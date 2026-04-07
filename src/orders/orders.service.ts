@@ -100,8 +100,8 @@ export class OrdersService {
         throw new Error('Invalid price');
       }
 
-      // ==== PATCH: Validate item_id only, don't fetch dbItem anymore
-      if (!item.item_id || isNaN(Number(item.item_id))) {
+      // item_id optional for now (STRICT PATCH)
+      if (item.item_id && isNaN(Number(item.item_id))) {
         throw new Error('Invalid item_id');
       }
 
@@ -112,9 +112,12 @@ export class OrdersService {
 
       // ======= PATCH ADDED CODE STARTS HERE =======
       orderItem.itemName = item.itemName || 'Item';
-      orderItem.quantity = Number(item.qty ?? 0);
-      orderItem.rate = Number(item.price ?? 0);
-      orderItem.amount = Number(item.qty ?? 0) * Number(item.price ?? 0);
+      const qty = !isNaN(Number(item.qty)) ? Number(item.qty) : 0;
+      const price = !isNaN(Number(item.price)) ? Number(item.price) : 0;
+
+      orderItem.quantity = qty;
+      orderItem.rate = price;
+      orderItem.amount = qty * price;
       // ======= PATCH ADDED CODE ENDS HERE =======
 
       // Keep old fields if present and needed, but do not overwrite above
@@ -163,30 +166,33 @@ export class OrdersService {
     ).padStart(3, '0')}`;
 
     // ✅ STEP 3: CREATE ORDER
-    if (!data.customer_id || isNaN(Number(data.customer_id))) {
-      throw new Error('Invalid customer_id');
-    }
+    // Lines for customer validation removed as per instructions
 
-    const customer = await this.customerRepository.findOne({
-      where: { id: Number(data.customer_id) },
-    });
+    // ADD safeNumber helper as per instructions
+    const safeNumber = (val: any) =>
+      !isNaN(Number(val)) ? Number(val) : 0;
 
-    if (!customer) {
-      throw new Error('Customer not found');
+    // PATCH: Inserted customer fetch conditional block
+    let customer = null;
+
+    if (data.customer_id && !isNaN(Number(data.customer_id))) {
+      customer = await this.customerRepository.findOne({
+        where: { id: Number(data.customer_id) },
+      });
     }
 
     const order: any = this.orderRepository.create({
-      customer: customer,
+      customer: customer || null,
 
       order_number: orderNumber,
       total_amount: totalAmount,
 
-      // 🚀 STRICT MODE PATCH - safe parse and fallback to 0
-      charges_packing: Number(data.charges?.packing ?? 0) || 0,
-      charges_cartage: Number(data.charges?.cartage ?? 0) || 0,
-      charges_forwarding: Number(data.charges?.forwarding ?? 0) || 0,
-      charges_installation: Number(data.charges?.installation ?? 0) || 0,
-      charges_loading: Number(data.charges?.loading ?? 0) || 0,
+      // 🚀 STRICT MODE PATCH - safe parse and fallback to 0 (rewritten per prompt)
+      charges_packing: safeNumber(data.charges?.packing),
+      charges_cartage: safeNumber(data.charges?.cartage),
+      charges_forwarding: safeNumber(data.charges?.forwarding),
+      charges_installation: safeNumber(data.charges?.installation),
+      charges_loading: safeNumber(data.charges?.loading),
 
       gst_percentage: gstPercent,
       gst_split_percent: gstSplitPercent,
@@ -204,7 +210,9 @@ export class OrdersService {
       ),
 
       commission_eligible: false,
-      salesman_id: Number(data.salesman_id ?? 1) || 1, // ⬅️ PATCHED
+      salesman_id: !isNaN(Number(data.salesman_id)) && data.salesman_id !== ''
+        ? Number(data.salesman_id)
+        : 1,
 
       status: 'PENDING_APPROVAL', // 🚀 STRICT MODE PATCH: Status set to "PENDING_APPROVAL"
     } as any);
@@ -247,10 +255,8 @@ export class OrdersService {
     // ✅ SAVE
     const savedOrder = await this.orderRepository.save(order);
 
-    return {
-      id: savedOrder.id,
-      order_number: savedOrder.order_number,
-    };
+    // STRICT MODE PATCH - Replace return with only ID
+    return { id: savedOrder.id };
   }
 
   // ================= UPDATE =================
@@ -271,8 +277,8 @@ export class OrdersService {
     // STRICT PATCH APPLIED TO UPDATE MAPPING TOO (for consistency)
     const mappedItems = await Promise.all(items.map(async (item) => {
 
-      // ==== PATCH: Validate item_id only, don't fetch dbItem anymore
-      if (!item.item_id || isNaN(Number(item.item_id))) {
+      // item_id optional for now (STRICT PATCH)
+      if (item.item_id && isNaN(Number(item.item_id))) {
         throw new Error('Invalid item_id');
       }
 
@@ -282,9 +288,18 @@ export class OrdersService {
 
       // ======= PATCH ADDED CODE STARTS HERE =======
       orderItem.itemName = item.itemName || 'Item';
-      orderItem.quantity = Number(item.qty ?? 0);
-      orderItem.rate = Number(item.price ?? 0);
-      orderItem.amount = Number(item.qty ?? 0) * Number(item.price ?? 0);
+
+      // REMOVE: orderItem.quantity = Number(item.qty ?? 0);
+      // REMOVE: orderItem.rate = Number(item.price ?? 0);
+      // REMOVE: orderItem.amount = Number(item.qty ?? 0) * Number(item.price ?? 0);
+
+      // ADD:
+      const qty = !isNaN(Number(item.qty)) ? Number(item.qty) : 0;
+      const price = !isNaN(Number(item.price)) ? Number(item.price) : 0;
+
+      orderItem.quantity = qty;
+      orderItem.rate = price;
+      orderItem.amount = qty * price;
       // ======= PATCH ADDED CODE ENDS HERE =======
 
       return orderItem;
