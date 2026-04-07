@@ -7,7 +7,7 @@ import { OrdersController } from './orders.controller';
 import { Order } from './entities/order.entity';
 import { OrderItem } from './entities/order-item.entity';
 import { Commission } from '../commission/entities/commission.entity';
-import { User } from '../users/entities/user.entity.ts';
+import { User } from '../users/entities/user.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { Item } from '../items/entities/item.entity';
 

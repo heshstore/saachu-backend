@@ -8,7 +8,7 @@ import { Order } from './orders/entities/order.entity';
 import { OrderItem } from './orders/entities/order-item.entity';
 import { Invoice } from './invoice/entities/invoice.entity';
 import { Commission } from './commission/entities/commission.entity';
-import { User } from './users/entities/user.entity.ts';
+import { User } from './users/entities/user.entity';
 import { CommissionModule } from './commission/commission.module';
 import { Product } from './products/entities/product.entity';
 import { ShopifyModule } from './shopify/shopify.module';

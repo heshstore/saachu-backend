@@ -5,7 +5,7 @@ import { Repository, DataSource } from 'typeorm';
 import { Order } from './entities/order.entity';
 import { OrderItem } from './entities/order-item.entity';
 import { Commission } from '../commission/entities/commission.entity';
-import { User } from '../users/entities/user.entity.ts';
+import { User } from '../users/entities/user.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { Item } from '../items/entities/item.entity';
 
@@ -89,8 +89,9 @@ export class OrdersService {
     });
 
     // ✅ STEP 1: CREATE ITEMS FIRST - STRICT PATCH MAPPING APPLIED
-    const mappedItems = items.map(async (item) => {
+    // REMOVED: const mappedItems = items.map(async (item) => {
 
+    const mappedItems = items.map((item) => {
       if (!item.qty || isNaN(Number(item.qty))) {
         throw new Error('Invalid quantity');
       }
@@ -103,8 +104,6 @@ export class OrdersService {
       if (!item.item_id || isNaN(Number(item.item_id))) {
         throw new Error('Invalid item_id');
       }
-
-      // Removed: const dbItem = await this.itemRepository.findOne({ ... });
 
       // STEP 2: Inside mapping
       console.log('🔥 ITEM:', item);
@@ -132,7 +131,11 @@ export class OrdersService {
 
     // ✅ STEP 2: CALCULATE TOTAL
     // PATCH: Resolve mappedItems and filter falsy values
-    const mappedItemsResolved = (await Promise.all(mappedItems)).filter(Boolean);
+    // LINE REMOVE: const mappedItemsResolved = (await Promise.all(mappedItems)).filter(Boolean);
+
+    // LINE ADD:
+    const mappedItemsResolved = mappedItems.filter(Boolean);
+
     const totalAmount = mappedItemsResolved.reduce(
       (sum, item) => sum + item.amount,
       0,
@@ -304,7 +307,7 @@ export class OrdersService {
   }
 
   // ================= APPROVE =================
-  async approveOrder(id: number, user: User) {
+  async approveOrder(id: number, user: any) {
     if (!user?.can_approve_order) {
       throw new Error('Not authorized');
     }
@@ -322,7 +325,7 @@ export class OrdersService {
 
   // 🚀 ADD BELOW APPROVE METHOD
 
-  async rejectOrder(id: number, reason: string, user: User) {
+  async rejectOrder(id: number, reason: string, user: any) {
     if (!user?.can_approve_order) {
       throw new Error('Not authorized');
     }
