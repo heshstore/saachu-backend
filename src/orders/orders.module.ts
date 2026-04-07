@@ -9,6 +9,7 @@ import { OrderItem } from './entities/order-item.entity';
 import { Commission } from '../commission/entities/commission.entity';
 import { User } from '../users/entities/user.entity.ts';
 import { Customer } from '../customers/entities/customer.entity';
+import { Item } from '../items/entities/item.entity';
 
 @Module({
   imports: [
@@ -17,7 +18,8 @@ import { Customer } from '../customers/entities/customer.entity';
       OrderItem,
       Commission,
       User,
-      Customer, 
+      Customer,
+      Item,
     ]),
   ],
   controllers: [OrdersController],

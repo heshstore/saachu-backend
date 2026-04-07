@@ -7,16 +7,20 @@ import { OrderItem } from './entities/order-item.entity';
 import { Commission } from '../commission/entities/commission.entity';
 import { User } from '../users/entities/user.entity.ts';
 import { Customer } from '../customers/entities/customer.entity';
+import { Item } from '../items/entities/item.entity';
 
 @Injectable()
 export class OrdersService {
   constructor(
     @InjectRepository(Order)
     private orderRepository: Repository<Order>,
-  
+
     @InjectRepository(OrderItem)
     private itemRepository: Repository<OrderItem>,
-  
+
+    @InjectRepository(Item)
+    private productRepository: Repository<Item>,
+
     @InjectRepository(Customer)
     private customerRepository: Repository<Customer>,
 
@@ -24,7 +28,7 @@ export class OrdersService {
     private commissionRepository: Repository<Commission>,
 
     private dataSource: DataSource,
-    
+
   ) {}
 
   // 🚀 STRICT MODE PATCH: Find only pending approval orders
@@ -41,6 +45,10 @@ export class OrdersService {
 
     // STEP 1: Top of create
     console.log('🔥 CREATE ORDER DATA:', data);
+
+    // --- INSERTED CONSOLE LOGS BEFORE SAVING (per prompt) ---
+    console.log("Incoming payload:", data);
+    console.log("Items:", data?.items);
 
     // 🚀 STRICT MODE PATCH: Check for existing order by quotation_id
     if (data.quotation_id) {
@@ -91,25 +99,24 @@ export class OrdersService {
         throw new Error('Invalid price');
       }
 
-      // ==== PATCH: Validate and fetch dbItem if item_id is provided
+      // ==== PATCH: Validate item_id only, don't fetch dbItem anymore
       if (!item.item_id || isNaN(Number(item.item_id))) {
         throw new Error('Invalid item_id');
       }
 
-      const dbItem = await this.itemRepository.findOne({
-        where: { id: Number(item.item_id) },
-      });
+      // Removed: const dbItem = await this.itemRepository.findOne({ ... });
 
       // STEP 2: Inside mapping
       console.log('🔥 ITEM:', item);
 
       const orderItem = new OrderItem();
 
-      // PATCHED MAPPING:
-      orderItem.itemName = item.itemName;
-      orderItem.quantity = Number(item.qty) || 0;
-      orderItem.rate = Number(item.price) || 0;
-      orderItem.amount = Number(item.qty || 0) * Number(item.price || 0);
+      // ======= PATCH ADDED CODE STARTS HERE =======
+      orderItem.itemName = item.itemName || 'Item';
+      orderItem.quantity = Number(item.qty ?? 0);
+      orderItem.rate = Number(item.price ?? 0);
+      orderItem.amount = Number(item.qty ?? 0) * Number(item.price ?? 0);
+      // ======= PATCH ADDED CODE ENDS HERE =======
 
       // Keep old fields if present and needed, but do not overwrite above
       // Do not remove other existing mappings if absolutely necessary for system
@@ -121,9 +128,11 @@ export class OrdersService {
     });
 
     // Need to await the mapping as we now have async calls (itemRepository)
-    const mappedItemsResolved = await Promise.all(mappedItems);
+    // const mappedItemsResolved = await Promise.all(mappedItems);
 
     // ✅ STEP 2: CALCULATE TOTAL
+    // PATCH: Resolve mappedItems and filter falsy values
+    const mappedItemsResolved = (await Promise.all(mappedItems)).filter(Boolean);
     const totalAmount = mappedItemsResolved.reduce(
       (sum, item) => sum + item.amount,
       0,
@@ -162,7 +171,7 @@ export class OrdersService {
     if (!customer) {
       throw new Error('Customer not found');
     }
-    
+
     const order: any = this.orderRepository.create({
       customer: customer,
 
@@ -250,26 +259,30 @@ export class OrdersService {
 
     if (!order) throw new Error('Order not found');
 
+    // --- INSERTED CONSOLE LOGS BEFORE SAVING (per prompt) ---
+    console.log("Incoming payload:", data);
+    console.log("Items:", data?.items);
+
     const { customer_name, mobile, items } = data;
 
     // STRICT PATCH APPLIED TO UPDATE MAPPING TOO (for consistency)
     const mappedItems = await Promise.all(items.map(async (item) => {
 
-      // ==== PATCH: Validate and fetch dbItem if item_id is provided
+      // ==== PATCH: Validate item_id only, don't fetch dbItem anymore
       if (!item.item_id || isNaN(Number(item.item_id))) {
         throw new Error('Invalid item_id');
       }
 
-      const dbItem = await this.itemRepository.findOne({
-        where: { id: Number(item.item_id) },
-      });
+      // Removed: const dbItem = await this.itemRepository.findOne({ ... });
 
       const orderItem = new OrderItem();
 
-      orderItem.itemName = item.itemName;
-      orderItem.quantity = Number(item.qty) || 0;
-      orderItem.rate = Number(item.price) || 0;
-      orderItem.amount = Number(item.qty || 0) * Number(item.price || 0);
+      // ======= PATCH ADDED CODE STARTS HERE =======
+      orderItem.itemName = item.itemName || 'Item';
+      orderItem.quantity = Number(item.qty ?? 0);
+      orderItem.rate = Number(item.price ?? 0);
+      orderItem.amount = Number(item.qty ?? 0) * Number(item.price ?? 0);
+      // ======= PATCH ADDED CODE ENDS HERE =======
 
       return orderItem;
     }));
