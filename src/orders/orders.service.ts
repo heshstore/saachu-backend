@@ -41,221 +41,90 @@ export class OrdersService {
 
   // ================= CREATE =================
   async create(data: any, user?: any) {
-    // 🚀 STRICT MODE PATCH: Only sales team can create orders
-
-    // STEP 1: Top of create
-    console.log('🔥 CREATE ORDER DATA:', data);
-
-    // --- INSERTED CONSOLE LOGS BEFORE SAVING (per prompt) ---
-    console.log("Incoming payload:", data);
-    console.log("Items:", data?.items);
-
-    // 🚀 STRICT MODE PATCH: Check for existing order by quotation_id
-    if (data.quotation_id) {
-      const existingOrder = await this.orderRepository.findOne({
-        where: { quotation_id: Number(data.quotation_id) },
-      });
-
-      if (existingOrder) {
-        throw new Error('Order already created for this quotation');
-      }
-    }
-
-    if (
-      user &&
-      user.role &&
-      !['Sales Manager', 'Territory Manager', 'Sales Executive'].includes(user.role)
-    ) {
-      throw new Error('Only sales team can create orders');
-    }
-
     if (!data) throw new Error('Request body missing');
 
-    const { customer_id, items } = data;
+    // Prevent duplicate order for same quotation
+    if (data.quotation_id) {
+      const existing = await this.orderRepository.findOne({ where: { quotation_id: Number(data.quotation_id) } });
+      if (existing) throw new Error('Order already created for this quotation');
+    }
 
+    const items = data.items;
     if (!items || !Array.isArray(items) || items.length === 0) {
       throw new BadRequestException('At least one item required');
     }
 
-    // ✅ VALIDATION BEFORE MAPPING
-    items.forEach((item) => {
-      if (!item.qty || isNaN(Number(item.qty))) {
-        throw new Error('Invalid quantity');
-      }
+    const safeNumber = (val: any) => (!isNaN(Number(val)) ? Number(val) : 0);
 
-      if (!item.price || isNaN(Number(item.price))) {
-        throw new Error('Invalid price');
-      }
-    });
+    // ── Map items — accepts both old { price } and new { rate } payloads ──────
+    const mappedItems = items.map((item: any) => {
+      const qty   = safeNumber(item.qty      ?? item.quantity);
+      const price = safeNumber(item.rate     ?? item.price);   // new form sends `rate`
+      const discountValue = safeNumber(item.discount_value);
+      const discountType  = item.discount_type || 'percent';
 
-    // ✅ STEP 1: CREATE ITEMS FIRST - STRICT PATCH MAPPING APPLIED
-    // REMOVED: const mappedItems = items.map(async (item) => {
+      const baseAmount = qty * price;
+      const discAmount = discountType === 'percent'
+        ? (baseAmount * discountValue) / 100
+        : discountValue;
+      const amount = Math.max(0, baseAmount - discAmount);
 
-    const mappedItems = items.map((item) => {
-      if (!item.qty || isNaN(Number(item.qty))) {
-        throw new Error('Invalid quantity');
-      }
-
-      if (!item.price || isNaN(Number(item.price))) {
-        throw new Error('Invalid price');
-      }
-
-      // item_id optional for now (STRICT PATCH)
-      if (item.item_id && isNaN(Number(item.item_id))) {
-        throw new Error('Invalid item_id');
-      }
-
-      // STEP 2: Inside mapping
-      console.log('🔥 ITEM:', item);
-
-      const orderItem = new OrderItem();
-
-      // ======= PATCH ADDED CODE STARTS HERE =======
-      orderItem.itemName = item.itemName || 'Item';
-      const qty = !isNaN(Number(item.qty)) ? Number(item.qty) : 0;
-      const price = !isNaN(Number(item.price)) ? Number(item.price) : 0;
-
-      orderItem.quantity = qty;
-      orderItem.rate = price;
-      orderItem.amount = qty * price;
-      // ======= PATCH ADDED CODE ENDS HERE =======
-
-      // Keep old fields if present and needed, but do not overwrite above
-      // Do not remove other existing mappings if absolutely necessary for system
-      // (Retain these for backward compatibility)
-      // orderItem.msp_price = msp;
-      // orderItem.discount_amount = discountAmount;
-
+      const orderItem          = new OrderItem();
+      orderItem.itemName       = item.item_name || item.itemName || 'Item';
+      orderItem.quantity       = qty;
+      orderItem.rate           = price;
+      orderItem.amount         = amount;
+      orderItem.msp_price      = price;
+      orderItem.discount_amount  = discountType === 'fixed'   ? discountValue : discAmount;
+      orderItem.discount_percent = discountType === 'percent' ? discountValue : 0;
       return orderItem;
     });
 
-    // Need to await the mapping as we now have async calls (itemRepository)
-    // const mappedItemsResolved = await Promise.all(mappedItems);
+    const subTotal = mappedItems.reduce((s: number, i: OrderItem) => s + i.amount, 0);
+    // Total GST = sum of per-item GST amounts supplied by the form
+    const totalGst = items.reduce((s: number, i: any) => s + safeNumber(i.gst_amount), 0);
+    const totalAmount = subTotal + totalGst
+      + safeNumber(data.charges_packing)
+      + safeNumber(data.charges_cartage)
+      + safeNumber(data.charges_forwarding)
+      + safeNumber(data.charges_installation)
+      + safeNumber(data.charges_loading);
 
-    // ✅ STEP 2: CALCULATE TOTAL
-    // PATCH: Resolve mappedItems and filter falsy values
-    // LINE REMOVE: const mappedItemsResolved = (await Promise.all(mappedItems)).filter(Boolean);
-
-    // LINE ADD:
-    const mappedItemsResolved = mappedItems.filter(Boolean);
-
-    const totalAmount = mappedItemsResolved.reduce(
-      (sum, item) => sum + item.amount,
-      0,
-    );
-
-    // 🚀 STRICT MODE PATCH - fixed
-    const gstPercent = Number(data.gst_percentage ?? 0) || 0;
-    const gstSplitPercent = Number(data.gst_split_percent ?? 100) || 100;
-
-    const taxableAmount = (totalAmount * gstSplitPercent) / 100;
-
-    const gstAmount = Number(
-      ((taxableAmount * gstPercent) / 100).toFixed(2),
-    );
-
-    const nonGstAmount = Number(
-      (totalAmount - taxableAmount).toFixed(2),
-    );
-
-    const creditDays = Number(data.credit_days ?? 0) || 0;
-
-    const count = await this.orderRepository.count();
-    const orderNumber = `QTN-${new Date().getFullYear()}-${String(
-      count + 1,
-    ).padStart(3, '0')}`;
-
-    // ✅ STEP 3: CREATE ORDER
-    // Lines for customer validation removed as per instructions
-
-    // ADD safeNumber helper as per instructions
-    const safeNumber = (val: any) =>
-      !isNaN(Number(val)) ? Number(val) : 0;
-
-    // PATCH: Inserted customer fetch conditional block
+    // Fetch customer
     let customer = null;
-
     if (data.customer_id && !isNaN(Number(data.customer_id))) {
-      customer = await this.customerRepository.findOne({
-        where: { id: Number(data.customer_id) },
-      });
+      customer = await this.customerRepository.findOne({ where: { id: Number(data.customer_id) } });
     }
+
+    // Sequential order number
+    const lastOrder = await this.orderRepository.find({ order: { id: 'DESC' }, take: 1 });
+    const nextNum   = lastOrder.length > 0 ? lastOrder[0].id + 1 : 1;
 
     const order: any = this.orderRepository.create({
-      customer: customer || null,
-
-      order_number: orderNumber,
-      total_amount: totalAmount,
-
-      // 🚀 STRICT MODE PATCH - safe parse and fallback to 0 (rewritten per prompt)
-      charges_packing: safeNumber(data.charges?.packing),
-      charges_cartage: safeNumber(data.charges?.cartage),
-      charges_forwarding: safeNumber(data.charges?.forwarding),
-      charges_installation: safeNumber(data.charges?.installation),
-      charges_loading: safeNumber(data.charges?.loading),
-
-      gst_percentage: gstPercent,
-      gst_split_percent: gstSplitPercent,
-      taxable_amount: taxableAmount,
-
-      gst_bill_amount: gstAmount,
-      non_gst_amount: nonGstAmount,
-
-      paid_amount: 0,
-      pending_amount: totalAmount,
-
-      credit_days: creditDays,
-      due_date: new Date(
-        Date.now() + creditDays * 24 * 60 * 60 * 1000,
-      ),
-
-      commission_eligible: false,
-      salesman_id: !isNaN(Number(data.salesman_id)) && data.salesman_id !== ''
-        ? Number(data.salesman_id)
-        : 1,
-
-      status: 'PENDING_APPROVAL', // 🚀 STRICT MODE PATCH: Status set to "PENDING_APPROVAL"
+      customer:          customer || null,
+      customer_name:     data.customer_name || customer?.companyName || '',
+      mobile:            customer?.mobile1  || '',
+      order_number:      `ORD-${String(nextNum).padStart(5, '0')}`,
+      total_amount:      totalAmount,
+      taxable_amount:    subTotal,
+      gst_bill_amount:   totalGst,
+      non_gst_amount:    0,
+      paid_amount:       0,
+      pending_amount:    totalAmount,
+      charges_packing:      safeNumber(data.charges_packing),
+      charges_cartage:      safeNumber(data.charges_cartage),
+      charges_forwarding:   safeNumber(data.charges_forwarding),
+      charges_installation: safeNumber(data.charges_installation),
+      charges_loading:      safeNumber(data.charges_loading),
+      salesman_id: data.salesman_id && !isNaN(Number(data.salesman_id)) ? Number(data.salesman_id) : 1,
+      credit_days: safeNumber(data.credit_days),
+      due_date:    new Date(Date.now() + safeNumber(data.credit_days) * 86400000),
+      status:      'PENDING_APPROVAL',
     } as any);
 
-    // ✅ CRITICAL FIX
-    order.items = mappedItemsResolved;
+    order.items = mappedItems;
 
-    // 🚨 STRICT MODE PATCH: Log order details before saving
-    console.log('🚨 FINAL ORDER OBJECT:', {
-      customer_id: data.customer_id,
-      salesman_id: order.salesman_id,
-      charges: {
-        packing: order.charges_packing,
-        cartage: order.charges_cartage,
-        forwarding: order.charges_forwarding,
-        installation: order.charges_installation,
-        loading: order.charges_loading,
-      },
-      gst_percentage: order.gst_percentage,
-      gst_split_percent: order.gst_split_percent,
-      credit_days: order.credit_days,
-      items: mappedItemsResolved,
-    });
-
-    // 🚀 STRICT MODE PATCH: Insert sequential order_number before saving
-    const lastOrder = await this.orderRepository.find({
-      order: { id: 'DESC' },
-      take: 1,
-    });
-
-    let nextNumber = 1;
-
-    if (lastOrder.length > 0) {
-      nextNumber = lastOrder[0].id + 1;
-    }
-
-    const newOrderNumber = `ORD-${String(nextNumber).padStart(5, '0')}`;
-    order.order_number = newOrderNumber;
-
-    // ✅ SAVE
     const savedOrder = await this.orderRepository.save(order);
-
-    // STRICT MODE PATCH - Replace return with only ID
     return { id: savedOrder.id };
   }
 

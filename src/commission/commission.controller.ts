@@ -1,6 +1,8 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { CommissionService } from './commission.service';
+import { Public } from '../auth/public.decorator';
 
+@Public()
 @Controller('commission')
 export class CommissionController {
   constructor(private readonly commissionService: CommissionService) {}

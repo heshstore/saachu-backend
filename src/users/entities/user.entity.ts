@@ -8,8 +8,14 @@ export class User {
   @Column()
   name: string;
 
-  @Column()
+  @Column({ nullable: true })
   mobile: string;
+
+  @Column({ unique: true, nullable: true })
+  email: string;
+
+  @Column({ nullable: true, select: false })
+  password_hash: string;
 
   @Column({ default: 2 })
   commission_rate: number;
@@ -22,4 +28,7 @@ export class User {
 
   @Column({ default: false })
   can_approve_order: boolean;
+
+  @Column({ nullable: true })
+  marketing_area: string;
 }

@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn } from 'typeorm';
 
 @Entity()
 export class Invoice {
@@ -7,6 +7,12 @@ export class Invoice {
 
   @Column()
   order_id: number;
+
+  @Column({ nullable: true, unique: true })
+  invoice_no: string;
+
+  @Column({ default: 'TALLY' })
+  type: string;
 
   @Column('decimal')
   total_amount: number;
@@ -28,4 +34,16 @@ export class Invoice {
 
   @Column('decimal', { nullable: true })
   tally_amount: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  cgst: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  sgst: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  igst: number;
+
+  @CreateDateColumn()
+  created_at: Date;
 }

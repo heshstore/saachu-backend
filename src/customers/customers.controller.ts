@@ -1,9 +1,11 @@
-import { Controller, Get, Post, Body, Param, Query } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, Put, Delete, Patch } from '@nestjs/common';
 import { CustomersService } from './customers.service';
+import { Public } from '../auth/public.decorator';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import { Customer } from './entities/customer.entity';
 
+@Public()
 @Controller('customers')
 export class CustomersController {
   
@@ -26,7 +28,6 @@ export class CustomersController {
         { gstNumber: ILike(`%${q}%`) },
         { tag: ILike(`%${q}%`) },
       ],
-      take: 10,
     });
   }
 
@@ -46,5 +47,23 @@ export class CustomersController {
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.customersService.findOne(Number(id));
+  }
+
+  @Put(':id')
+  update(@Param('id') id: string, @Body() body) {
+    return this.customersService.update(Number(id), body);
+  }
+
+  @Delete(':id')
+  remove(@Param('id') id: string) {
+    return this.customersService.remove(Number(id));
+  }
+
+  @Patch(':id/credit-limit')
+  updateCreditLimit(@Param('id') id: string, @Body() body: { credit_days: number; credit_limit_amount: number }) {
+    return this.customersService.update(Number(id), {
+      credit_days: body.credit_days,
+      creditLimit: body.credit_limit_amount,
+    });
   }
 }

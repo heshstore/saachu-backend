@@ -1,6 +1,7 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Unique } from 'typeorm';
 
 @Entity()
+@Unique('UQ_customer_name_tag_city', ['companyName', 'tag', 'city'])
 export class Customer {
   @PrimaryGeneratedColumn()
   id: number;
@@ -11,7 +12,7 @@ export class Customer {
   @Column()
   contactName: string;
 
-  @Column()
+  @Column({ unique: true })
   mobile1: string;
 
   @Column({ nullable: true })
@@ -32,10 +33,10 @@ export class Customer {
   @Column()
   pincode: string;
 
-  @Column({ nullable: true })
+  @Column({ unique: true, nullable: true })
   gstNumber: string;
 
-  @Column({ default: 'regular' })
+  @Column({ default: 'Retail Shop' })
   customerType: string;
 
   @Column({ nullable: true })
@@ -52,4 +53,10 @@ export class Customer {
 
   @Column({ default: "India" })
   country: string;
+
+  @Column({ default: '+91' })
+  country_code: string;
+
+  @Column({ type: 'smallint', default: 0 })
+  credit_days: number;
 }

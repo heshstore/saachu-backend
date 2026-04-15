@@ -3,6 +3,22 @@ import axios from 'axios';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Product } from '../products/entities/product.entity';
+import { ItemsService } from '../items/items.service';
+import { Item } from '../items/entities/item.entity';
+
+// Module-level progress object — reset on server restart only
+let syncStatus = {
+  total: 0,
+  processed: 0,
+  skipped: 0,
+  status: 'idle' as 'idle' | 'running' | 'done',
+  phase: 'idle' as 'idle' | 'fetching' | 'saving' | 'done',
+  lastError: '',
+};
+
+export function getSyncStatus() {
+  return syncStatus;
+}
 
 @Injectable()
 export class ShopifyService {
@@ -10,131 +26,229 @@ export class ShopifyService {
   constructor(
     @InjectRepository(Product)
     private productRepo: Repository<Product>,
+    @InjectRepository(Item)
+    private itemsRepository: Repository<Item>,
+    private readonly itemsService: ItemsService,
   ) {}
 
-  // ✅ GET PRODUCTS FROM SHOPIFY
-  async getProducts() {
-    const url = `https://${process.env.SHOPIFY_STORE}/admin/api/2024-10/products.json?limit=250`;
+  // ── Fetch all active products from Shopify (paginated) ──────────────────
+  async getProducts(): Promise<any[]> {
+    const store = process.env.SHOPIFY_STORE;
+    const token = process.env.SHOPIFY_ACCESS_TOKEN;
 
-    try {
-      console.log("SHOP:", process.env.SHOPIFY_STORE);
-      console.log("TOKEN:", process.env.SHOPIFY_ACCESS_TOKEN?.slice(0, 10));
-      console.log("URL:", url);
+    if (!store || !token) {
+      throw new Error('SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN must be set in .env');
+    }
+
+    let allProducts: any[] = [];
+    let since_id: string | undefined;
+
+    while (true) {
+      const url = since_id
+        ? `https://${store}/admin/api/2023-10/products.json?limit=250&status=active&since_id=${since_id}`
+        : `https://${store}/admin/api/2023-10/products.json?limit=250&status=active`;
 
       const response = await axios.get(url, {
-        headers: {
-          "X-Shopify-Access-Token": process.env.SHOPIFY_ACCESS_TOKEN,
-          "Content-Type": "application/json",
-        },
+        headers: { 'X-Shopify-Access-Token': token },
+        timeout: 30000,
       });
 
-      const products = (response.data as any).products;
+      const products: any[] = (response.data as any)?.products || [];
+      if (products.length === 0) break;
 
-      return products.flatMap((p: any) => {
-        // ❌ Skip product if no image
-        if (!p.image?.src) return [];
-
-        return p.variants
-          .filter((v: any) => {
-            return (
-              v.sku &&
-              v.sku.trim() !== "" &&
-              Number(v.price) > 0
-            );
-          })
-          .map((v: any) => ({
-            shopifyId: String(p.id),
-            title: p.title,
-            image: p.image.src,
-            sku: v.sku.trim(),
-            price: Number(v.price),
-          }));
-      });
-
-    } catch (error) {
-      console.error("SHOPIFY ERROR 👉", error.response?.data || error.message);
-      throw error;
+      allProducts.push(...products);
+      since_id = products[products.length - 1].id;
     }
+
+    return allProducts;
   }
 
-  // ✅ SYNC PRODUCTS (CREATE + UPDATE + DISABLE)
-  async syncProducts() {
-    const shopifyProducts = await this.getProducts();
-
-    const existing = await this.productRepo.find();
-    const existingMap = new Map(existing.map(i => [i.sku, i]));
-    const seenSkus = new Set();
-
-    for (const p of shopifyProducts) {
-
-      // ✅ safety checks
-      if (!p.sku || !p.price || !p.image || !p.shopifyId) continue;
-
-      seenSkus.add(p.sku);
-
-      const existingItem = existingMap.get(p.sku);
-
-      if (existingItem) {
-        // ✅ UPDATE EXISTING
-        await this.productRepo.update(existingItem.id, {
-          title: p.title,
-          price: p.price,
-          image: p.image,
-          shopifyId: p.shopifyId,
-          isActive: true,
-        });
-      } else {
-        // ✅ CREATE NEW
-        await this.productRepo.save({
-          shopifyId: p.shopifyId,
-          title: p.title,
-          sku: p.sku,
-          price: p.price,
-          image: p.image,
-          inventory: 0,
-          isActive: true,
-        });
-      }
-    }
-
-    // ✅ DISABLE REMOVED PRODUCTS
-    for (const item of existing) {
-      if (!seenSkus.has(item.sku)) {
-        await this.productRepo.update(item.id, {
-          isActive: false,
-        });
-      }
-    }
-
+  /**
+   * Split "Acrylic Counter Tray FOURBELS - F3" → { cleanTitle: "Acrylic Counter Tray FOURBELS", productSku: "F3" }
+   * Splits at the LAST occurrence of " - ".  If no " - " exists, cleanTitle = full title, productSku = "".
+   */
+  private parseProductTitle(raw: string): { cleanTitle: string; productSku: string } {
+    const idx = raw.lastIndexOf(' - ');
+    if (idx === -1) return { cleanTitle: raw.trim(), productSku: '' };
     return {
-      message: 'Shopify Sync Complete ✅',
-      count: shopifyProducts.length,
+      cleanTitle: raw.slice(0, idx).trim(),
+      productSku: raw.slice(idx + 3).trim(),
     };
   }
 
-  // ✅ GET ITEM BY SKU (FOR ORDER USE)
+  // ── Flatten products → variants, resolving the best available image ──────
+  private flattenToVariants(products: any[]): Array<{
+    shopifyProductId: string;
+    variantId: string;
+    title: string;
+    sku: string;
+    price: number;
+    image: string;
+  }> {
+    return products.flatMap((p: any) => {
+      // Build a map of imageId → src for variant-specific images
+      const imageMap: Record<string, string> = {};
+      for (const img of p.images || []) {
+        if (img.id && img.src) imageMap[img.id] = img.src;
+      }
+
+      const productImage: string = p.image?.src || '';
+      // Use the clean title (strip " - SKU" suffix from Shopify product titles)
+      const { cleanTitle } = this.parseProductTitle((p.title || '').trim());
+
+      return (p.variants || []).map((v: any) => {
+        // Prefer variant-specific image, then product main image
+        const variantImage: string =
+          (v.image_id && imageMap[v.image_id]) ? imageMap[v.image_id] : productImage;
+
+        return {
+          shopifyProductId: String(p.id),
+          variantId: String(v.id),       // stable Shopify variant ID — never changes
+          title: cleanTitle,
+          sku: (v.sku || '').trim(),
+          price: Number(v.price || 0),
+          image: variantImage,
+        };
+      });
+    });
+  }
+
+  // ── Main sync ─────────────────────────────────────────────────────────────
+  async syncProducts() {
+    // ✅ Mark running IMMEDIATELY — before any async work
+    syncStatus = { total: 0, processed: 0, skipped: 0, status: 'running', phase: 'fetching', lastError: '' };
+
+    try {
+      // Fetch from Shopify (can take 10-15 s for 660 products)
+      const rawProducts = await this.getProducts();
+      const variants = this.flattenToVariants(rawProducts);
+
+      // Pre-count valid variants so the progress bar knows the total
+      const validVariants = variants.filter(
+        (v) => v.sku && v.title && v.price > 0 && v.image,
+      );
+
+      syncStatus.total = validVariants.length;
+      syncStatus.phase = 'saving';
+
+      let savedCount = 0;
+      let skippedCount = 0;
+
+      for (const v of variants) {
+        // ── Skip conditions ──────────────────────────────────────────────
+        if (!v.sku) {
+          console.log(`⛔ SKIP (no SKU): ${v.title}`);
+          skippedCount++;
+          continue;
+        }
+        if (!v.title) {
+          console.log(`⛔ SKIP (no title): ${v.sku}`);
+          skippedCount++;
+          continue;
+        }
+        if (v.price <= 0) {
+          console.log(`⛔ SKIP (no price): ${v.sku}`);
+          skippedCount++;
+          continue;
+        }
+        if (!v.image) {
+          console.log(`⛔ SKIP (no image): ${v.sku}`);
+          skippedCount++;
+          continue;
+        }
+
+        // ── Upsert ───────────────────────────────────────────────────────
+        // 1. Match by Shopify variant ID  → handles SKU / title / price edits
+        // 2. Fall back to SKU match        → handles pre-existing records without variantId
+        // Matching by variant ID prevents orphaned old records when a SKU is renamed.
+        let existing = await this.itemsRepository.findOne({
+          where: { shopifyVariantId: v.variantId },
+        });
+
+        if (!existing && v.sku) {
+          existing = await this.itemsRepository.findOne({ where: { sku: v.sku } });
+        }
+
+        if (existing) {
+          // Detect if the SKU changed in Shopify
+          const skuChanged = existing.sku !== v.sku;
+          if (skuChanged) {
+            console.log(`🔄 SKU renamed: "${existing.sku}" → "${v.sku}" (variantId ${v.variantId})`);
+          }
+          await this.itemsRepository.update(
+            { id: existing.id },
+            {
+              itemName: v.title,
+              sku: v.sku,                  // update in case SKU was renamed in Shopify
+              sellingPrice: v.price,
+              retail_price: v.price,
+              image: v.image,
+              source: 'shopify',
+              shopifyVariantId: v.variantId,  // stamp the variant ID so future syncs match correctly
+            },
+          );
+        } else {
+          await this.itemsRepository.save({
+            itemName: v.title,
+            sku: v.sku,
+            sellingPrice: v.price,
+            retail_price: v.price,
+            image: v.image,
+            hsnCode: '',
+            gst: 0,
+            costPrice: 0,
+            unit: 'Nos',
+            source: 'shopify',
+            shopifyVariantId: v.variantId,
+          });
+        }
+
+        savedCount++;
+        syncStatus.processed = savedCount;
+      }
+
+      skippedCount += (variants.length - validVariants.length - (skippedCount - 0));
+      syncStatus.skipped = variants.length - savedCount - validVariants.length + savedCount;
+
+      const finalSkipped = variants.length - savedCount;
+      syncStatus.status = 'done';
+      syncStatus.phase = 'done';
+      syncStatus.processed = savedCount;
+      syncStatus.skipped = finalSkipped;
+
+      console.log(`✅ Sync complete — saved: ${savedCount}, skipped: ${finalSkipped}`);
+
+      return { count: savedCount, skipped: finalSkipped };
+
+    } catch (error: any) {
+      console.error('❌ Sync error:', error.message);
+      syncStatus.status = 'done';
+      syncStatus.phase = 'done';
+      syncStatus.lastError = error.message;
+      return { count: 0, error: error.message };
+    }
+  }
+
+  // ── Get single item by SKU (used by order flow) ──────────────────────────
   async getItemBySku(sku: string) {
     const normalize = (str: any) =>
-      (str || "").toString().toLowerCase().replace(/\s+/g, "");
+      (str || '').toString().toLowerCase().replace(/\s+/g, '');
 
-    const items = await this.productRepo.find({
-      where: { isActive: true },
-    });
-
+    const items = await this.itemsRepository.find();
     const found = items.find(
-      i =>
+      (i) =>
         normalize(i.sku) === normalize(sku) ||
-        normalize(i.sku).includes(normalize(sku))
+        normalize(i.sku).includes(normalize(sku)),
     );
 
     if (!found) return null;
 
     return {
       sku: found.sku,
-      itemName: found.title,
-      price: Number(found.price),
-      image: found.image,
-      gst: 0,
+      itemName: found.itemName,
+      price: Number(found.sellingPrice),
+      image: found.image || null,
+      gst: Number(found.gst) || 0,
     };
   }
 }

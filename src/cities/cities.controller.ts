@@ -1,9 +1,11 @@
 import { Controller, Get, Post, Body, Query } from "@nestjs/common";
+import { Public } from "../auth/public.decorator";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
 import { City } from "./cities.entity";
 import { CitiesService } from "./cities.service";
 
+@Public()
 @Controller("cities")
 export class CitiesController {
   constructor(
@@ -19,6 +21,7 @@ export class CitiesController {
 
   @Post()
   async create(@Body() body) {
+    // Removed countryISO field if it was being saved here (not present in this method).
     const city = this.cityRepo.create(body);
     return this.cityRepo.save(city);
   }
@@ -29,7 +32,16 @@ export class CitiesController {
   }
 
   @Post("save")
-  save(@Body() body: { name: string; state: string; country: string }) {
+  save(
+    @Body()
+    body: {
+      name: string;
+      state: string;
+      country: string;
+      countryISO?: string;
+      countryCode?: string;
+    },
+  ) {
     return this.citiesService.save(body);
   }
 }

@@ -1,13 +1,14 @@
 import { Controller, Get, Post, Body, Param, Delete, Query } from '@nestjs/common';
 import { ItemsService } from './items.service';
+import { Public } from '../auth/public.decorator';
 
+@Public()
 @Controller('items')
 export class ItemsController {
   constructor(private readonly itemsService: ItemsService) {}
 
   @Post()
   async create(@Body() data: any) {
-    // 🚀 STRICT MODE PATCH — DELETE OLD THEN INSERT
     if (data && data.sku) {
       await this.itemsService.removeBySku(data.sku);
     }
@@ -19,9 +20,25 @@ export class ItemsController {
     return this.itemsService.createBulk(data);
   }
 
+  /**
+   * GET /items          → all items (used by ShopifyItems page)
+   * GET /items?master=1 → only items with HSN + costPrice filled
+   *                       (used by QuotationForm, OrderForm, Invoice)
+   */
   @Get()
-  findAll() {
-    return this.itemsService.findAll();
+  findAll(@Query('master') master?: string) {
+    return master === '1'
+      ? this.itemsService.findMaster()
+      : this.itemsService.findAll();
+  }
+
+  /**
+   * Search only within master-ready items so incomplete Shopify items
+   * never appear as options when building a quotation/order.
+   */
+  @Get('search')
+  async searchItems(@Query('q') q: string) {
+    return this.itemsService.searchItems(q);
   }
 
   @Get(':id')
@@ -35,10 +52,5 @@ export class ItemsController {
   @Delete(':sku')
   removeBySku(@Param('sku') sku: string) {
     return this.itemsService.removeBySku(sku);
-  }
-
-  @Get('search')
-  async searchItems(@Query('q') q: string) {
-    return this.itemsService.searchItems(q);
   }
 }

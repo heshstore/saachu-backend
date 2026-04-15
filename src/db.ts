@@ -11,5 +11,5 @@ export const dbConfig: TypeOrmModuleOptions = {
   password: String(process.env.DB_PASSWORD), // 🔥 IMPORTANT FIX
   database: process.env.DB_NAME || 'saachu',
   autoLoadEntities: true,
-  synchronize: true,
+  synchronize: false,
 };

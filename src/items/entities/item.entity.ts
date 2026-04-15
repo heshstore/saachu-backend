@@ -22,4 +22,23 @@ export class Item {
 
   @Column({ nullable: true })
   hsnCode: string;
+
+  @Column({ nullable: true })
+  source: string;
+
+  /** Shopify variant numeric ID — used as the stable match key during sync */
+  @Column({ nullable: true })
+  shopifyVariantId: string;
+
+  @Column({ default: "Nos" })
+  unit: string;
+
+  @Column({ nullable: true })
+  image: string;
+
+  @Column({ type: 'float', default: 0 })
+  retail_price: number;
+
+  @Column({ type: 'float', default: 0 })
+  wholesale_price: number;
 }

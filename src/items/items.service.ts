@@ -27,6 +27,7 @@ export class ItemsService {
       gst: safeNumber(data.gst),
       costPrice: safeNumber(data.costPrice),
       sellingPrice: safeNumber(data.sellingPrice),
+      source: data.source || 'service', // <-- ADDED THIS LINE
     });
   }
 
@@ -40,18 +41,32 @@ export class ItemsService {
     const cleanData = dataArray.map(data => ({
       itemName: data.itemName,
       sku: data.sku,
-      hsnCode: data.hsnCode,
+      hsnCode: data.hsnCode || '',
       gst: safeNumber(data.gst),
       costPrice: safeNumber(data.costPrice),
       sellingPrice: safeNumber(data.sellingPrice),
-      unit: data.unit,
+      retail_price: safeNumber(data.retail_price ?? data.sellingPrice),
+      wholesale_price: safeNumber(data.wholesale_price ?? 0),
+      image: data.image || null,
+      unit: data.unit || 'Nos',
+      source: data.source || 'service',
     }));
 
     return this.repo.save(cleanData);
   }
 
   findAll() {
-    return this.repo.find();
+    return this.repo.find({ order: { itemName: 'ASC' } });
+  }
+
+  /** Only items with HSN Code and Cost Price filled — safe to use in orders */
+  findMaster() {
+    return this.repo
+      .createQueryBuilder('item')
+      .where("item.hsnCode IS NOT NULL AND item.hsnCode != ''")
+      .andWhere('item.costPrice > 0')
+      .orderBy('item.itemName', 'ASC')
+      .getMany();
   }
 
   findOne(id: number) {
@@ -73,13 +88,17 @@ export class ItemsService {
   async searchItems(q: string) {
     if (!q) return [];
 
-    return this.repo.find({
-      where: [
-        { itemName: ILike(`%${q}%`) },
-        { sku: ILike(`%${q}%`) },
-      ],
-      take: 10,
-    });
+    return this.repo
+      .createQueryBuilder('item')
+      .where(
+        "(item.itemName ILIKE :q OR item.sku ILIKE :q)",
+        { q: `%${q}%` },
+      )
+      .andWhere("item.hsnCode IS NOT NULL AND item.hsnCode != ''")
+      .andWhere('item.costPrice > 0')
+      .orderBy('item.sku', 'ASC')
+      .take(15)
+      .getMany();
   }
 
   // 🚀 STRICT MODE — FIX removeBySku

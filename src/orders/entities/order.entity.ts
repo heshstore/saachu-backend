@@ -98,4 +98,28 @@ export class Order {
 
   @Column({ default: 'Draft' })
   draft_status: string;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  charges_packing: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  charges_cartage: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  charges_forwarding: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  charges_installation: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  charges_loading: number;
+
+  @Column({ nullable: true })
+  rejection_reason: string;
+
+  @Column({ type: 'timestamp', nullable: true })
+  cancelled_at: Date;
+
+  @Column({ nullable: true })
+  cancelled_by: string;
 }
