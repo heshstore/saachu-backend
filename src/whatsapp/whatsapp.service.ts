@@ -2,6 +2,7 @@ import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/commo
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import * as fs from 'fs';
 import { ReplaySubject, Observable, interval, merge } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { WhatsAppSession } from './entities/whatsapp-session.entity';
@@ -56,10 +57,8 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    // Use PUPPETEER_EXECUTABLE_PATH env var if set (Render: set to /usr/bin/google-chrome-stable)
-    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
-
-    this.logger.log(`Launching Chromium${executablePath ? ` at ${executablePath}` : ' (bundled)'}`);
+    const executablePath = this.findChrome();
+    this.logger.log(`Launching Chromium${executablePath ? ` at ${executablePath}` : ' (bundled/auto)'}`);
 
     this.client = new Client({
       authStrategy: new LocalAuth({ clientId: this.sessionName }),
@@ -207,6 +206,26 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   isConnected(): boolean {
     return this._ready && this.client?.pupPage != null;
+  }
+
+  private findChrome(): string | undefined {
+    const CANDIDATES = [
+      process.env.PUPPETEER_EXECUTABLE_PATH,
+      // Render / Ubuntu common paths
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/google-chrome',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/snap/bin/chromium',
+      // macOS (local dev)
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+    ];
+    for (const p of CANDIDATES) {
+      if (p && fs.existsSync(p)) {
+        return p;
+      }
+    }
+    return undefined; // let puppeteer use its own bundled Chromium
   }
 
   private async reinitClient(): Promise<void> {
