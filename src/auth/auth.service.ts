@@ -4,6 +4,15 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { User } from '../users/entities/user.entity';
+import { RbacService } from '../rbac/rbac.service';
+import { normalizeUserMobile, normalizeUserRole } from '../users/user-normalization.util';
+
+/** Last up to 10 digits of input (matches DB mobile with or without country code). */
+function mobileMatchKey(input: string): string {
+  const d = (input || '').replace(/\D/g, '');
+  if (!d) return '';
+  return d.length > 10 ? d.slice(-10) : d;
+}
 
 @Injectable()
 export class AuthService {
@@ -11,17 +20,52 @@ export class AuthService {
     @InjectRepository(User)
     private userRepo: Repository<User>,
     private jwtService: JwtService,
+    private rbacService: RbacService,
   ) {}
 
-  async login(email: string, password: string) {
-    const user = await this.userRepo
-      .createQueryBuilder('user')
-      .addSelect('user.password_hash')
-      .where('user.email = :email', { email })
-      .getOne();
+  async login(loginId: string, password: string) {
+    const trimmed = (loginId || '').trim();
+    if (!trimmed || !password) {
+      throw new UnauthorizedException('Invalid mobile or password');
+    }
+
+    let user: User | null = null;
+
+    if (trimmed.includes('@')) {
+      user = await this.userRepo
+        .createQueryBuilder('user')
+        .addSelect('user.password_hash')
+        .where('LOWER(user.email) = LOWER(:email)', { email: trimmed })
+        .getOne();
+    } else {
+      const key = mobileMatchKey(trimmed);
+      if (!key) {
+        throw new UnauthorizedException('Invalid mobile or password');
+      }
+      user = await this.userRepo
+        .createQueryBuilder('user')
+        .addSelect('user.password_hash')
+        .where(
+          `(RIGHT(REGEXP_REPLACE(COALESCE(user.mobile, ''), '[^0-9]', '', 'g'), 10) = :key
+            OR REGEXP_REPLACE(COALESCE(user.mobile, ''), '[^0-9]', '', 'g') = :keyExact
+            OR TRIM(user.mobile) = :raw)`,
+          { key, keyExact: trimmed.replace(/\D/g, ''), raw: trimmed },
+        )
+        .getOne();
+    }
 
     if (!user) {
-      throw new UnauthorizedException('Invalid email or password');
+      throw new UnauthorizedException('Invalid mobile or password');
+    }
+
+    const normalizedRole = normalizeUserRole(user.role);
+    const normalizedMobile = normalizeUserMobile(user.mobile);
+    if (normalizedRole !== (user.role || '') || normalizedMobile !== (user.mobile || null)) {
+      const patch: Partial<User> = {};
+      if (normalizedRole !== (user.role || '')) patch.role = normalizedRole;
+      if (normalizedMobile !== (user.mobile || null)) patch.mobile = normalizedMobile;
+      await this.userRepo.update(user.id, patch);
+      Object.assign(user, patch);
     }
 
     if (!user.password_hash) {
@@ -30,18 +74,21 @@ export class AuthService {
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
-      throw new UnauthorizedException('Invalid email or password');
+      throw new UnauthorizedException('Invalid mobile or password');
     }
 
     if (!user.is_active) {
       throw new UnauthorizedException('Account is inactive');
     }
 
+    const permissions = await this.rbacService.getPermissionsForRole(normalizedRole);
+
     const payload = {
       sub: user.id,
       name: user.name,
       email: user.email,
-      role: user.role,
+      mobile: normalizedMobile,
+      role: normalizedRole,
       can_approve_order: user.can_approve_order,
     };
 
@@ -51,10 +98,29 @@ export class AuthService {
         id: user.id,
         name: user.name,
         email: user.email,
-        role: user.role,
+        mobile: normalizedMobile,
+        role: normalizedRole,
         can_approve_order: user.can_approve_order,
       },
+      permissions,
     };
+  }
+
+  async changePassword(userId: number, currentPassword: string, newPassword: string): Promise<void> {
+    const user = await this.userRepo
+      .createQueryBuilder('user')
+      .addSelect('user.password_hash')
+      .where('user.id = :id', { id: userId })
+      .getOne();
+
+    if (!user) throw new UnauthorizedException('User not found');
+    if (!user.password_hash) throw new UnauthorizedException('No password set');
+
+    const isMatch = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!isMatch) throw new UnauthorizedException('Current password is incorrect');
+
+    const newHash = await bcrypt.hash(newPassword, 10);
+    await this.userRepo.update(userId, { password_hash: newHash } as any);
   }
 
   async hashPassword(plain: string): Promise<string> {

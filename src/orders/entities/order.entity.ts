@@ -122,4 +122,7 @@ export class Order {
 
   @Column({ nullable: true })
   cancelled_by: string;
+
+  @Column({ default: false })
+  is_wholesaler: boolean;
 }

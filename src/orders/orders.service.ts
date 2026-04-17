@@ -120,6 +120,7 @@ export class OrdersService {
       credit_days: safeNumber(data.credit_days),
       due_date:    new Date(Date.now() + safeNumber(data.credit_days) * 86400000),
       status:      'PENDING_APPROVAL',
+      is_wholesaler: !!data.is_wholesaler,
     } as any);
 
     order.items = mappedItems;
@@ -333,13 +334,29 @@ export class OrdersService {
     return this.formatOrder(order);
   }
 
-  // ================= GET ALL =================
-  async findAll() {
-    const orders = await this.orderRepository.find({
-      relations: ['items'],
-      order: { id: 'DESC' },
+  // ================= GET ONE =================
+  async findOne(id: number) {
+    const order = await this.orderRepository.findOne({
+      where: { id },
+      relations: ['items', 'customer'],
     });
+    if (!order) throw new Error('Order not found');
+    return order;
+  }
 
+  // ================= GET ALL =================
+  async findAll(filters: any = {}, user?: any) {
+    const qb = this.orderRepository.createQueryBuilder('o')
+      .leftJoinAndSelect('o.items', 'items')
+      .orderBy('o.id', 'DESC');
+
+    // Data isolation: non-privileged roles see only own records
+    const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
+    if (user?.role && !fullAccessRoles.includes(user.role) && user.id) {
+      qb.andWhere('o.created_by = :userId', { userId: user.id });
+    }
+
+    const orders = await qb.getMany();
     return orders.map((o) => this.formatOrder(o));
   }
 

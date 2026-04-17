@@ -1,8 +1,7 @@
 import { Controller, Get, Post, Body, Param, Delete, Query } from '@nestjs/common';
 import { ItemsService } from './items.service';
-import { Public } from '../auth/public.decorator';
+import { RequirePermission } from '../auth/require-permission.decorator';
 
-@Public()
 @Controller('items')
 export class ItemsController {
   constructor(private readonly itemsService: ItemsService) {}

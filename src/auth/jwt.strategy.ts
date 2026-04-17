@@ -7,7 +7,10 @@ import { appConfig } from '../config/config';
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor() {
     super({
-      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      jwtFromRequest: ExtractJwt.fromExtractors([
+        ExtractJwt.fromAuthHeaderAsBearerToken(),
+        ExtractJwt.fromUrlQueryParameter('token'), // for SSE (EventSource can't set headers)
+      ]),
       ignoreExpiration: false,
       secretOrKey: appConfig.jwtSecret,
     });
@@ -18,6 +21,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       id: payload.sub,
       name: payload.name,
       email: payload.email,
+      mobile: payload.mobile,
       role: payload.role,
       can_approve_order: payload.can_approve_order,
     };

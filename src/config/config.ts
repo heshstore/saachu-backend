@@ -11,6 +11,13 @@ export interface AppConfig {
   jwtSecret: string;
   jwtExpiresIn: string;
   idempotencyWindowSeconds: number;
+  // CRM integrations
+  indiaMartApiKey: string;
+  indiaMartSecretKey: string;
+  metaVerifyToken: string;
+  metaAccessToken: string;
+  metaPageId: string;
+  whatsappSessionName: string;
 }
 
 export const appConfig: AppConfig = {
@@ -26,4 +33,10 @@ export const appConfig: AppConfig = {
   jwtSecret: process.env.JWT_SECRET || 'saachu_jwt_secret_change_in_production',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '8h',
   idempotencyWindowSeconds: 60,
+  indiaMartApiKey: process.env.INDIAMART_API_KEY || '',
+  indiaMartSecretKey: process.env.INDIAMART_SECRET_KEY || '',
+  metaVerifyToken: process.env.META_VERIFY_TOKEN || '',
+  metaAccessToken: process.env.META_ACCESS_TOKEN || '',
+  metaPageId: process.env.META_PAGE_ID || '',
+  whatsappSessionName: process.env.WHATSAPP_SESSION || 'saachu-main',
 };

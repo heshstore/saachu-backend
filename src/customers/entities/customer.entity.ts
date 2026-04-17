@@ -59,4 +59,7 @@ export class Customer {
 
   @Column({ type: 'smallint', default: 0 })
   credit_days: number;
+
+  @Column({ default: false })
+  isWholesaler: boolean;
 }

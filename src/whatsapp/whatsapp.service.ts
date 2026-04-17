@@ -1,0 +1,272 @@
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Subject, Observable, interval, merge } from 'rxjs';
+import { map } from 'rxjs/operators';
+import { WhatsAppSession } from './entities/whatsapp-session.entity';
+import { WhatsAppMessage } from './entities/whatsapp-message.entity';
+import { appConfig } from '../config/config';
+import { LeadSource } from '../crm/entities/lead.entity';
+
+@Injectable()
+export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
+  private client: any = null;
+  private _ready = false;
+  private qrSubject = new Subject<string>();
+  private sessionName = appConfig.whatsappSessionName;
+  private seenMsgIds = new Set<string>(); // dedup between message + message_create events
+
+  constructor(
+    @InjectRepository(WhatsAppSession)
+    private sessionRepo: Repository<WhatsAppSession>,
+    @InjectRepository(WhatsAppMessage)
+    private messageRepo: Repository<WhatsAppMessage>,
+    private eventEmitter: EventEmitter2,
+  ) {}
+
+  async onModuleInit() {
+    // Lazily initialize — don't crash if whatsapp-web.js has issues at startup
+    setImmediate(() => this.initClient().catch((e) => {
+      console.warn('[WhatsApp] Init deferred due to error:', e?.message);
+    }));
+  }
+
+  async onModuleDestroy() {
+    this._ready = false;
+    if (this.client) {
+      try { await this.client.destroy(); } catch { /* ignore */ }
+      this.client = null;
+    }
+  }
+
+  private async initClient() {
+    let Client: any, LocalAuth: any;
+    try {
+      const wwebjs = await import('whatsapp-web.js');
+      Client = wwebjs.Client;
+      LocalAuth = wwebjs.LocalAuth;
+    } catch (e) {
+      console.warn('[WhatsApp] whatsapp-web.js not available:', e?.message);
+      return;
+    }
+
+    this.client = new Client({
+      authStrategy: new LocalAuth({ clientId: this.sessionName }),
+      puppeteer: {
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      },
+    });
+
+    this.client.on('qr', async (qr: string) => {
+      let QRCode: any;
+      try { QRCode = (await import('qrcode')).default; } catch { return; }
+      const dataUrl = await QRCode.toDataURL(qr);
+      this.qrSubject.next(dataUrl);
+      await this.updateSession({ status: 'CONNECTING', qr_code: dataUrl });
+    });
+
+    this.client.on('ready', async () => {
+      this._ready = true;
+      const info = this.client.info;
+      const phone = info?.wid?.user ?? null;
+      await this.updateSession({ status: 'CONNECTED', qr_code: null, phone_number: phone, connected_at: new Date() });
+      this.qrSubject.next(JSON.stringify({ type: 'ready', phone }));
+      console.log('[WhatsApp] Connected as', phone);
+    });
+
+    this.client.on('disconnected', async (reason: string) => {
+      this._ready = false;
+      await this.updateSession({ status: 'DISCONNECTED' });
+      console.log('[WhatsApp] Disconnected:', reason);
+      // Auto-reconnect after 10s
+      setTimeout(() => this.reinitClient().catch((e) => console.warn('[WhatsApp] Reconnect failed:', e?.message)), 10000);
+    });
+
+    this.client.on('auth_failure', async (msg: string) => {
+      this._ready = false;
+      await this.updateSession({ status: 'DISCONNECTED' });
+      console.warn('[WhatsApp] Auth failure:', msg);
+    });
+
+    const onMsg = async (msg: any) => {
+      if (msg.fromMe) return;
+      const msgId = msg.id?._serialized ?? `${msg.from}-${msg.timestamp}`;
+      if (this.seenMsgIds.has(msgId)) return;
+      this.seenMsgIds.add(msgId);
+      if (this.seenMsgIds.size > 500) {
+        // Prevent unbounded growth — drop oldest entries
+        const first = this.seenMsgIds.values().next().value;
+        this.seenMsgIds.delete(first);
+      }
+      console.log(`[WhatsApp] incoming: from=${msg.from} id=${msgId}`);
+      await this.handleInbound(msg);
+    };
+
+    this.client.on('message', onMsg);
+    this.client.on('message_create', onMsg);
+
+    await this.client.initialize();
+  }
+
+  // SSE observable — QR codes + ready events + keep-alive pings
+  getQrObservable(): Observable<any> {
+    return merge(
+      this.qrSubject.asObservable().pipe(
+        map((data) => {
+          try {
+            const parsed = JSON.parse(data);
+            return { data: parsed };
+          } catch {
+            return { data: { type: 'qr', dataUrl: data } };
+          }
+        }),
+      ),
+      // Keep-alive every 30s to prevent Render idle timeout
+      interval(30000).pipe(map(() => ({ data: { type: 'ping' } }))),
+    );
+  }
+
+  async sendMessage(chatId: string, body: string, sentBy?: number): Promise<void> {
+    if (!this.client || !this.isConnected()) {
+      throw new Error('WhatsApp not connected. Please scan the QR code first.');
+    }
+    try {
+      await this.client.sendMessage(chatId, body);
+    } catch (err: any) {
+      const msg = err?.message ?? '';
+      if (msg.includes('detached Frame') || msg.includes('Session closed') || msg.includes('Target closed')) {
+        this._ready = false;
+        setImmediate(() => this.reinitClient().catch((e) => console.warn('[WhatsApp] Reconnect failed:', e?.message)));
+        throw new Error('WhatsApp session expired. Reconnecting — please try again in a moment.');
+      }
+      throw err;
+    }
+    await this.messageRepo.save(
+      this.messageRepo.create({
+        chat_id: chatId,
+        direction: 'OUTBOUND',
+        body,
+        timestamp: new Date(),
+        sent_by: sentBy ?? null,
+      }),
+    );
+  }
+
+  async sendToPhone(phone: string, body: string, sentBy?: number): Promise<void> {
+    const chatId = `${phone}@c.us`;
+    await this.sendMessage(chatId, body, sentBy);
+  }
+
+  async sendToAssignee(userId: number, body: string): Promise<void> {
+    const rows: any[] = await this.messageRepo.manager.query(
+      `SELECT mobile FROM "user" WHERE id = $1`,
+      [userId],
+    );
+    if (!rows.length || !rows[0].mobile) return;
+    const phone = rows[0].mobile.replace(/\D/g, '').slice(-10);
+    if (phone.length !== 10) return;
+    await this.sendToPhone(`91${phone}`, body);
+  }
+
+  async getSessionStatus(): Promise<{ status: string; phone: string | null }> {
+    const row = await this.sessionRepo.findOne({ where: { session_name: this.sessionName } });
+    return {
+      status: row?.status ?? 'DISCONNECTED',
+      phone: row?.phone_number ?? null,
+    };
+  }
+
+  async getChatMessages(chatId: string, leadId?: number): Promise<WhatsAppMessage[]> {
+    const normalized = this.normalizeChatId(chatId);
+    const q = this.messageRepo.createQueryBuilder('m')
+      .where('m.chat_id = :chatId', { chatId: normalized })
+      .orWhere('m.chat_id = :raw', { raw: chatId }); // also match un-normalized legacy rows
+    if (leadId) q.orWhere('m.lead_id = :leadId', { leadId });
+    return q.orderBy('m.timestamp', 'ASC').getMany();
+  }
+
+  isConnected(): boolean {
+    return this._ready && this.client?.pupPage != null;
+  }
+
+  private async reinitClient(): Promise<void> {
+    console.log('[WhatsApp] Reinitializing client...');
+    if (this.client) {
+      try { await this.client.destroy(); } catch { /* ignore */ }
+      this.client = null;
+    }
+    await this.initClient();
+  }
+
+  // Normalize multi-device chatIds: "919999999999:1@c.us" → "919999999999@c.us"
+  private normalizeChatId(chatId: string): string {
+    return chatId.replace(/:\d+(?=@)/, '');
+  }
+
+  private detectSource(body: string): LeadSource {
+    const u = (body || '').toUpperCase();
+    if (u.includes('META_LEAD') || u.includes('FB_LEAD')) return LeadSource.META_ADS;
+    if (u.includes('GOOGLE_LEAD') || u.includes('GADS')) return LeadSource.GOOGLE_ADS;
+    if (u.includes('INDIAMART')) return LeadSource.INDIAMART;
+    return LeadSource.WHATSAPP;
+  }
+
+  private async handleInbound(msg: any): Promise<void> {
+    // Skip group chats, broadcasts, and newsletters — keep only individual chats
+    const from: string = msg.from ?? '';
+    if (from.endsWith('@g.us') || from === 'status@broadcast' || from.endsWith('@newsletter')) return;
+
+    const chatId: string = this.normalizeChatId(from);
+    const body: string = msg.body ?? '';
+    const phone = chatId.split('@')[0].replace(/\D/g, '').slice(-10);
+    console.log(`[WhatsApp] Inbound from ${chatId}, phone=${phone}, body="${body.slice(0, 50)}"`);
+
+
+    // Save message
+    const savedMsg = await this.messageRepo.save(
+      this.messageRepo.create({
+        chat_id: chatId,
+        direction: 'INBOUND',
+        body,
+        timestamp: new Date(msg.timestamp * 1000),
+        is_read: false,
+      }),
+    );
+
+    // Check if this chat_id already linked to a lead
+    const existing = await this.messageRepo.manager.query(
+      `SELECT id, assigned_to FROM leads WHERE whatsapp_chat_id = $1 AND is_active = true LIMIT 1`,
+      [chatId],
+    );
+    if (existing.length > 0) {
+      // Link message to existing lead
+      savedMsg.lead_id = existing[0].id;
+      await this.messageRepo.save(savedMsg);
+      return;
+    }
+
+    // New contact — create lead via event emitter
+    const contact = await msg.getContact().catch(() => null);
+    const name = contact?.pushname || contact?.name || phone;
+    const source = this.detectSource(body);
+
+    this.eventEmitter.emit('lead.incoming', {
+      phone,
+      name,
+      source,
+      whatsapp_chat_id: chatId,
+      raw_payload: { chatId, body, timestamp: msg.timestamp },
+    });
+  }
+
+  private async updateSession(data: Partial<WhatsAppSession>): Promise<void> {
+    let row = await this.sessionRepo.findOne({ where: { session_name: this.sessionName } });
+    if (!row) {
+      row = this.sessionRepo.create({ session_name: this.sessionName });
+    }
+    Object.assign(row, data, { last_active_at: new Date() });
+    await this.sessionRepo.save(row).catch(() => { /* ignore concurrent update errors */ });
+  }
+}

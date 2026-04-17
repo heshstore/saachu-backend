@@ -15,8 +15,16 @@ async function bootstrap() {
     }),
   );
 
+  const corsRaw = (process.env.CORS_ORIGIN || '').trim();
+  const corsOrigin: boolean | string | string[] =
+    !corsRaw || corsRaw === '*'
+      ? true
+      : corsRaw.includes(',')
+        ? corsRaw.split(',').map((s) => s.trim()).filter(Boolean)
+        : corsRaw;
+
   app.enableCors({
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: corsOrigin,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
     credentials: true,

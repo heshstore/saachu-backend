@@ -1,9 +1,10 @@
-import { Injectable, BadRequestException, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, BadRequestException, NotFoundException, ForbiddenException, Inject, forwardRef } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between, MoreThanOrEqual, LessThanOrEqual } from 'typeorm';
+import { Repository, MoreThanOrEqual } from 'typeorm';
 import { Quotation } from './quotation.entity';
 import { QuotationItem } from './quotation-item.entity';
 import { appConfig } from '../config/config';
+import { OrdersService } from '../orders/orders.service';
 
 @Injectable()
 export class QuotationService {
@@ -12,6 +13,8 @@ export class QuotationService {
     private quotationRepo: Repository<Quotation>,
     @InjectRepository(QuotationItem)
     private quotationItemRepo: Repository<QuotationItem>,
+    @Inject(forwardRef(() => OrdersService))
+    private ordersService: OrdersService,
   ) {}
 
   private async generateQuotationNo(): Promise<string> {
@@ -93,17 +96,24 @@ export class QuotationService {
       sub_total: subTotal,
       total_amount: totalAmount,
       created_by: user?.id,
+      is_wholesaler: !!data.is_wholesaler,
       items: mappedItems,
     });
 
     return this.quotationRepo.save(quotation);
   }
 
-  async findAll(filters: any = {}) {
+  async findAll(filters: any = {}, user?: any) {
     const qb = this.quotationRepo.createQueryBuilder('q')
       .leftJoinAndSelect('q.items', 'items')
       .where('q.status != :cancelled', { cancelled: 'CANCELLED' })
       .orderBy('q.id', 'DESC');
+
+    // Data isolation: non-privileged roles see only own records
+    const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
+    if (user?.role && !fullAccessRoles.includes(user.role) && user.id) {
+      qb.andWhere('q.created_by = :userId', { userId: user.id });
+    }
 
     if (filters.status) {
       qb.andWhere('q.status = :status', { status: filters.status });
@@ -189,8 +199,41 @@ export class QuotationService {
     if (quotation.status !== 'OPEN') {
       throw new ForbiddenException('Only OPEN quotations can be converted');
     }
+
+    const orderPayload: any = {
+      customer_id:           quotation.customer_id,
+      customer_name:         quotation.customer_name,
+      salesman_id:           quotation.salesman_id,
+      bill_to_id:            quotation.bill_to_id,
+      ship_to_id:            quotation.ship_to_id,
+      delivery_type:         quotation.delivery_type,
+      payment_type:          quotation.payment_type,
+      charges_packing:       quotation.charges_packing,
+      charges_cartage:       quotation.charges_cartage,
+      charges_forwarding:    quotation.charges_forwarding,
+      charges_installation:  quotation.charges_installation,
+      charges_loading:       quotation.charges_loading,
+      quotation_id:          quotation.id,
+      items: (quotation.items || []).map((i: any) => ({
+        item_name:      i.item_name,
+        sku:            i.sku,
+        hsn_code:       i.hsn_code,
+        qty:            i.qty,
+        rate:           i.rate,
+        discount_type:  i.discount_type,
+        discount_value: i.discount_value,
+        gst_percent:    i.gst_percent,
+        amount:         i.amount,
+        gst_amount:     Number(i.amount || 0) * Number(i.gst_percent || 0) / 100,
+        instruction:    i.instruction,
+      })),
+    };
+
+    const order = await this.ordersService.create(orderPayload, user);
+
     quotation.status = 'CONVERTED';
     await this.quotationRepo.save(quotation);
-    return { quotation_id: id, message: 'Quotation converted — create order manually' };
+
+    return { order_id: order.id, quotation_id: id };
   }
 }

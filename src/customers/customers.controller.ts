@@ -1,11 +1,10 @@
 import { Controller, Get, Post, Body, Param, Query, Put, Delete, Patch } from '@nestjs/common';
 import { CustomersService } from './customers.service';
-import { Public } from '../auth/public.decorator';
+import { RequirePermission } from '../auth/require-permission.decorator';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import { Customer } from './entities/customer.entity';
 
-@Public()
 @Controller('customers')
 export class CustomersController {
   
@@ -60,10 +59,14 @@ export class CustomersController {
   }
 
   @Patch(':id/credit-limit')
-  updateCreditLimit(@Param('id') id: string, @Body() body: { credit_days: number; credit_limit_amount: number }) {
-    return this.customersService.update(Number(id), {
-      credit_days: body.credit_days,
-      creditLimit: body.credit_limit_amount,
-    });
+  updateCreditLimit(
+    @Param('id') id: string,
+    @Body() body: { credit_days?: number; credit_limit_amount?: number; isWholesaler?: boolean },
+  ) {
+    const update: any = {};
+    if (body.credit_days !== undefined) update.credit_days = body.credit_days;
+    if (body.credit_limit_amount !== undefined) update.creditLimit = body.credit_limit_amount;
+    if (body.isWholesaler !== undefined) update.isWholesaler = body.isWholesaler;
+    return this.customersService.update(Number(id), update);
   }
 }

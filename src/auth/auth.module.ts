@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -7,6 +7,7 @@ import { AuthService } from './auth.service';
 import { JwtStrategy } from './jwt.strategy';
 import { User } from '../users/entities/user.entity';
 import { appConfig } from '../config/config';
+import { RbacModule } from '../rbac/rbac.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { appConfig } from '../config/config';
       signOptions: { expiresIn: '8h' },
     }),
     TypeOrmModule.forFeature([User]),
+    forwardRef(() => RbacModule),
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],

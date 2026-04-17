@@ -81,6 +81,9 @@ export class Quotation {
   @Column({ nullable: true })
   created_by: number;
 
+  @Column({ default: false })
+  is_wholesaler: boolean;
+
   @CreateDateColumn()
   created_at: Date;
 

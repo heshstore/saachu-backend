@@ -1,18 +1,19 @@
 import { Controller, Get, Param } from '@nestjs/common';
 import { ShopifyService, getSyncStatus } from './shopify.service';
-import { Public } from '../auth/public.decorator';
+import { RequirePermission } from '../auth/require-permission.decorator';
 
-@Public()
 @Controller('shopify')
 export class ShopifyController {
   constructor(private readonly shopifyService: ShopifyService) {}
 
   @Get('products')
+  @RequirePermission('item.view')
   getProducts() {
     return this.shopifyService.getProducts();
   }
 
-  @Get('sync-products')   // ✅ ADD THIS
+  @Get('sync-products')
+  @RequirePermission('item.shopify_sync')
   async syncProducts() {
     console.log("STEP5 API HIT");
     try {
@@ -37,7 +38,8 @@ export class ShopifyController {
     }
   }
 
-  @Get('sync')   // ✅ BACKWARD COMPATIBILITY ROUTE
+  @Get('sync')
+  @RequirePermission('item.shopify_sync')
   async syncProductsAlias() {
     return this.syncProducts();
   }
@@ -48,6 +50,7 @@ export class ShopifyController {
   }
 
   @Get(':sku')
+  @RequirePermission('item.view')
   getItem(@Param('sku') sku: string) {
     return this.shopifyService.getItemBySku(sku);
   }
