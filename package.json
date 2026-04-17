@@ -21,7 +21,7 @@
     "seed:admin": "node scripts/seed-admin.js",
     "migrate:crm": "node scripts/migrate-crm-schema.js",
     "seed:crm": "node scripts/seed-crm-permissions.js",
-    "postinstall": "npx puppeteer browsers install chrome --no-progress 2>/dev/null || true"
+    "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
