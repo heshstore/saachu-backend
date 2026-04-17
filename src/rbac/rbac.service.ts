@@ -142,4 +142,21 @@ export class RbacService implements OnModuleInit {
     await this.refreshCache();
     return saved;
   }
+
+  async renameRole(id: number, name: string): Promise<Role> {
+    const role = await this.roleRepo.findOne({ where: { id } });
+    if (!role) throw new Error('Role not found');
+    role.name = name.trim();
+    const saved = await this.roleRepo.save(role);
+    await this.refreshCache();
+    return saved;
+  }
+
+  async deleteRole(id: number): Promise<void> {
+    const role = await this.roleRepo.findOne({ where: { id } });
+    if (!role) throw new Error('Role not found');
+    if (role.is_system) throw new Error('Cannot delete system roles');
+    await this.roleRepo.remove(role);
+    await this.refreshCache();
+  }
 }

@@ -24,3 +24,26 @@
 2026/04/17-15:23:20.317 5e50bd Delete type=2 #392
 2026/04/17-15:23:20.317 5e50bd Delete type=2 #390
 2026/04/17-15:23:20.317 5e50bd Delete type=2 #391
+2026/04/17-16:28:28.897 5e50bd Level-0 table #407: started
+2026/04/17-16:28:28.948 5e50bd Level-0 table #407: 1362110 bytes OK
+2026/04/17-16:28:28.953 5e50bd Delete type=0 #396
+2026/04/17-16:28:56.283 5e50bd Compacting 1@1 + 8@2 files
+2026/04/17-16:28:56.406 5e50bd Generated table #408@1: 82526 keys, 2232525 bytes
+2026/04/17-16:28:56.485 5e50bd Generated table #409@1: 45207 keys, 2223674 bytes
+2026/04/17-16:28:56.543 5e50bd Generated table #410@1: 37788 keys, 2215312 bytes
+2026/04/17-16:28:56.607 5e50bd Generated table #411@1: 50175 keys, 2210191 bytes
+2026/04/17-16:28:56.655 5e50bd Generated table #412@1: 38624 keys, 2197354 bytes
+2026/04/17-16:28:56.667 5e50bd Generated table #413@1: 552 keys, 2125082 bytes
+2026/04/17-16:28:56.706 5e50bd Generated table #414@1: 24651 keys, 2193881 bytes
+2026/04/17-16:28:56.720 5e50bd Generated table #415@1: 7158 keys, 1617051 bytes
+2026/04/17-16:28:56.720 5e50bd Compacted 1@1 + 8@2 files => 17015070 bytes
+2026/04/17-16:28:56.723 5e50bd compacted to: files[ 0 0 8 0 0 0 0 ]
+2026/04/17-16:28:56.723 5e50bd Delete type=2 #405
+2026/04/17-16:28:56.723 5e50bd Delete type=2 #404
+2026/04/17-16:28:56.723 5e50bd Delete type=2 #407
+2026/04/17-16:28:56.723 5e50bd Delete type=2 #403
+2026/04/17-16:28:56.723 5e50bd Delete type=2 #402
+2026/04/17-16:28:56.723 5e50bd Delete type=2 #399
+2026/04/17-16:28:56.723 5e50bd Delete type=2 #400
+2026/04/17-16:28:56.724 5e50bd Delete type=2 #401
+2026/04/17-16:28:56.725 5e50bd Delete type=2 #398

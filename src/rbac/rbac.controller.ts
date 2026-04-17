@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body } from '@nestjs/common';
+import { Controller, Get, Post, Put, Delete, Body, Param, HttpCode } from '@nestjs/common';
 import { RbacService } from './rbac.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
@@ -31,5 +31,20 @@ export class RbacController {
   @RequirePermission('rbac.manage')
   createRole(@Body() body: { name: string }) {
     return this.rbacService.createRole(body.name);
+  }
+
+  /** Rename a role — Admin only */
+  @Put('roles/:id')
+  @RequirePermission('rbac.manage')
+  renameRole(@Param('id') id: string, @Body() body: { name: string }) {
+    return this.rbacService.renameRole(Number(id), body.name);
+  }
+
+  /** Delete a non-system role — Admin only */
+  @Delete('roles/:id')
+  @HttpCode(204)
+  @RequirePermission('rbac.manage')
+  deleteRole(@Param('id') id: string) {
+    return this.rbacService.deleteRole(Number(id));
   }
 }
