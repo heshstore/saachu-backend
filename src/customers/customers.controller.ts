@@ -18,6 +18,7 @@ export class CustomersController {
 
   // ✅ SEARCH API (WORKING)
   @Get('search')
+  @RequirePermission('customer.view')
   async searchCustomers(@Query('q') q: string) {
     return this.customerRepository.find({
       where: [
@@ -32,33 +33,39 @@ export class CustomersController {
 
   // ✅ CREATE
   @Post()
+  @RequirePermission('customer.create')
   create(@Body() body) {
     return this.customersService.create(body);
   }
 
   // ✅ GET ALL
   @Get()
+  @RequirePermission('customer.view')
   findAll() {
     return this.customersService.findAll();
   }
 
   // ✅ GET ONE
   @Get(':id')
+  @RequirePermission('customer.view')
   findOne(@Param('id') id: string) {
     return this.customersService.findOne(Number(id));
   }
 
   @Put(':id')
+  @RequirePermission('customer.edit')
   update(@Param('id') id: string, @Body() body) {
     return this.customersService.update(Number(id), body);
   }
 
   @Delete(':id')
+  @RequirePermission('customer.delete')
   remove(@Param('id') id: string) {
     return this.customersService.remove(Number(id));
   }
 
   @Patch(':id/credit-limit')
+  @RequirePermission('customer.edit')
   updateCreditLimit(
     @Param('id') id: string,
     @Body() body: { credit_days?: number; credit_limit_amount?: number; isWholesaler?: boolean },

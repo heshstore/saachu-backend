@@ -7,6 +7,7 @@ export class ItemsController {
   constructor(private readonly itemsService: ItemsService) {}
 
   @Post()
+  @RequirePermission('item.create')
   async create(@Body() data: any) {
     if (data && data.sku) {
       await this.itemsService.removeBySku(data.sku);
@@ -15,6 +16,7 @@ export class ItemsController {
   }
 
   @Post('bulk')
+  @RequirePermission('item.shopify_sync')
   createBulk(@Body() data: any[]) {
     return this.itemsService.createBulk(data);
   }
@@ -49,6 +51,7 @@ export class ItemsController {
   // PATCH and PUT not exposed to enforce strict INSERT/DELETE-then-POST
 
   @Delete(':sku')
+  @RequirePermission('item.edit')
   removeBySku(@Param('sku') sku: string) {
     return this.itemsService.removeBySku(sku);
   }
