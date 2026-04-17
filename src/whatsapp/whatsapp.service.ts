@@ -1,8 +1,8 @@
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Subject, Observable, interval, merge } from 'rxjs';
+import { ReplaySubject, Observable, interval, merge } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { WhatsAppSession } from './entities/whatsapp-session.entity';
 import { WhatsAppMessage } from './entities/whatsapp-message.entity';
@@ -11,11 +11,13 @@ import { LeadSource } from '../crm/entities/lead.entity';
 
 @Injectable()
 export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(WhatsAppService.name);
   private client: any = null;
   private _ready = false;
-  private qrSubject = new Subject<string>();
+  // ReplaySubject(1): new SSE subscribers immediately receive the last QR/status event
+  private qrSubject = new ReplaySubject<string>(1);
   private sessionName = appConfig.whatsappSessionName;
-  private seenMsgIds = new Set<string>(); // dedup between message + message_create events
+  private seenMsgIds = new Set<string>();
 
   constructor(
     @InjectRepository(WhatsAppSession)
@@ -26,9 +28,12 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit() {
-    // Lazily initialize — don't crash if whatsapp-web.js has issues at startup
+    this.logger.log('WhatsApp module init — starting Chromium in background');
+    // Emit initializing so the SSE page shows status immediately
+    this.qrSubject.next(JSON.stringify({ type: 'initializing' }));
     setImmediate(() => this.initClient().catch((e) => {
-      console.warn('[WhatsApp] Init deferred due to error:', e?.message);
+      this.logger.error('WhatsApp init failed', e?.stack ?? e?.message);
+      this.qrSubject.next(JSON.stringify({ type: 'error', message: e?.message }));
     }));
   }
 
@@ -51,19 +56,39 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // Use PUPPETEER_EXECUTABLE_PATH env var if set (Render: set to /usr/bin/google-chrome-stable)
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || undefined;
+
+    this.logger.log(`Launching Chromium${executablePath ? ` at ${executablePath}` : ' (bundled)'}`);
+
     this.client = new Client({
       authStrategy: new LocalAuth({ clientId: this.sessionName }),
       puppeteer: {
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        ...(executablePath ? { executablePath } : {}),
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',          // required on Render — prevents forking
+          '--disable-extensions',
+          '--disable-background-networking',
+          '--disable-default-apps',
+          '--mute-audio',
+        ],
       },
     });
 
     this.client.on('qr', async (qr: string) => {
+      this.logger.log('QR code received — waiting for scan');
       let QRCode: any;
       try { QRCode = (await import('qrcode')).default; } catch { return; }
       const dataUrl = await QRCode.toDataURL(qr);
-      this.qrSubject.next(dataUrl);
+      this.qrSubject.next(JSON.stringify({ type: 'qr', dataUrl }));
       await this.updateSession({ status: 'CONNECTING', qr_code: dataUrl });
     });
 
@@ -73,21 +98,22 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       const phone = info?.wid?.user ?? null;
       await this.updateSession({ status: 'CONNECTED', qr_code: null, phone_number: phone, connected_at: new Date() });
       this.qrSubject.next(JSON.stringify({ type: 'ready', phone }));
-      console.log('[WhatsApp] Connected as', phone);
+      this.logger.log(`Connected as ${phone}`);
     });
 
     this.client.on('disconnected', async (reason: string) => {
       this._ready = false;
       await this.updateSession({ status: 'DISCONNECTED' });
-      console.log('[WhatsApp] Disconnected:', reason);
-      // Auto-reconnect after 10s
-      setTimeout(() => this.reinitClient().catch((e) => console.warn('[WhatsApp] Reconnect failed:', e?.message)), 10000);
+      this.logger.warn(`Disconnected: ${reason}`);
+      this.qrSubject.next(JSON.stringify({ type: 'disconnected', reason }));
+      setTimeout(() => this.reinitClient().catch((e) => this.logger.error('Reconnect failed', e?.message)), 10000);
     });
 
     this.client.on('auth_failure', async (msg: string) => {
       this._ready = false;
       await this.updateSession({ status: 'DISCONNECTED' });
-      console.warn('[WhatsApp] Auth failure:', msg);
+      this.logger.error(`Auth failure: ${msg}`);
+      this.qrSubject.next(JSON.stringify({ type: 'error', message: `Auth failure: ${msg}` }));
     });
 
     const onMsg = async (msg: any) => {
@@ -100,7 +126,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         const first = this.seenMsgIds.values().next().value;
         this.seenMsgIds.delete(first);
       }
-      console.log(`[WhatsApp] incoming: from=${msg.from} id=${msgId}`);
+      this.logger.log(`Incoming from=${msg.from} id=${msgId}`);
       await this.handleInbound(msg);
     };
 
@@ -110,20 +136,12 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     await this.client.initialize();
   }
 
-  // SSE observable — QR codes + ready events + keep-alive pings
+  // SSE observable — always JSON, replays last event to new subscribers
   getQrObservable(): Observable<any> {
     return merge(
       this.qrSubject.asObservable().pipe(
-        map((data) => {
-          try {
-            const parsed = JSON.parse(data);
-            return { data: parsed };
-          } catch {
-            return { data: { type: 'qr', dataUrl: data } };
-          }
-        }),
+        map((json) => ({ data: JSON.parse(json) })),
       ),
-      // Keep-alive every 30s to prevent Render idle timeout
       interval(30000).pipe(map(() => ({ data: { type: 'ping' } }))),
     );
   }
@@ -192,7 +210,8 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async reinitClient(): Promise<void> {
-    console.log('[WhatsApp] Reinitializing client...');
+    this.logger.log('Reinitializing client...');
+    this.qrSubject.next(JSON.stringify({ type: 'initializing' }));
     if (this.client) {
       try { await this.client.destroy(); } catch { /* ignore */ }
       this.client = null;
@@ -221,7 +240,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     const chatId: string = this.normalizeChatId(from);
     const body: string = msg.body ?? '';
     const phone = chatId.split('@')[0].replace(/\D/g, '').slice(-10);
-    console.log(`[WhatsApp] Inbound from ${chatId}, phone=${phone}, body="${body.slice(0, 50)}"`);
+    this.logger.log(`Inbound chatId=${chatId} phone=${phone} body="${body.slice(0, 50)}"`);
 
 
     // Save message

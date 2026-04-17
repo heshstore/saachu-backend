@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -16,6 +16,8 @@ function mobileMatchKey(input: string): string {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     @InjectRepository(User)
     private userRepo: Repository<User>,
@@ -25,7 +27,9 @@ export class AuthService {
 
   async login(loginId: string, password: string) {
     const trimmed = (loginId || '').trim();
+    this.logger.log(`Login attempt: "${trimmed}"`);
     if (!trimmed || !password) {
+      this.logger.warn(`Login rejected: empty credentials`);
       throw new UnauthorizedException('Invalid mobile or password');
     }
 
@@ -55,6 +59,7 @@ export class AuthService {
     }
 
     if (!user) {
+      this.logger.warn(`Login failed: no user found for "${trimmed}"`);
       throw new UnauthorizedException('Invalid mobile or password');
     }
 
@@ -74,10 +79,12 @@ export class AuthService {
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
+      this.logger.warn(`Login failed: wrong password for uid=${user.id} (${trimmed})`);
       throw new UnauthorizedException('Invalid mobile or password');
     }
 
     if (!user.is_active) {
+      this.logger.warn(`Login failed: inactive account uid=${user.id}`);
       throw new UnauthorizedException('Account is inactive');
     }
 
@@ -92,6 +99,7 @@ export class AuthService {
       can_approve_order: user.can_approve_order,
     };
 
+    this.logger.log(`Login success: uid=${user.id} name="${user.name}" role=${normalizedRole}`);
     return {
       access_token: this.jwtService.sign(payload),
       user: {

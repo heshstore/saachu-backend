@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
@@ -29,6 +29,8 @@ function sentenceCaseWords(s: string): string {
 
 @Injectable()
 export class LeadService {
+  private readonly logger = new Logger(LeadService.name);
+
   constructor(
     @InjectRepository(Lead)
     private leadRepo: Repository<Lead>,
@@ -74,6 +76,7 @@ export class LeadService {
     });
 
     const saved = await this.leadRepo.save(lead);
+    this.logger.log(`Lead created id=${saved.id} phone=${phone} source=${dto.source} assigned_to=${assignedTo ?? 'none'}${dupCount > 0 ? ' [DUPLICATE]' : ''}`);
 
     // Auto-schedule first follow-up 3 days from now for inbound leads
     if (dto.source !== LeadSource.MANUAL) {
@@ -276,8 +279,7 @@ export class LeadService {
         { id: null, role: 'Admin' },
       );
     } catch (e) {
-      // Swallow — webhook leads must never crash the app
-      console.error('[LeadService] handleIncomingLead error:', e?.message);
+      this.logger.error(`handleIncomingLead failed for phone=${payload.phone}: ${e?.message}`, e?.stack);
     }
   }
 
