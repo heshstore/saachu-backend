@@ -1,26 +1,26 @@
-2026/04/17-14:03:42.415 5c7a1b Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/04/17-14:03:42.417 5c7a1b Recovering log #374
-2026/04/17-14:03:42.436 5c7a1b Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000374.log 
-2026/04/17-14:04:04.911 5c7a1e Level-0 table #386: started
-2026/04/17-14:04:04.981 5c7a1e Level-0 table #386: 1254258 bytes OK
-2026/04/17-14:04:05.005 5c7a1e Delete type=0 #374
-2026/04/17-14:04:05.304 5c7a1e Compacting 1@1 + 8@2 files
-2026/04/17-14:04:05.392 5c7a1e Generated table #387@1: 84047 keys, 2233301 bytes
-2026/04/17-14:04:05.434 5c7a1e Generated table #388@1: 39162 keys, 2210983 bytes
-2026/04/17-14:04:05.510 5c7a1e Generated table #389@1: 34467 keys, 2210026 bytes
-2026/04/17-14:04:05.655 5c7a1e Generated table #390@1: 55996 keys, 2219028 bytes
-2026/04/17-14:04:05.705 5c7a1e Generated table #391@1: 31017 keys, 2185983 bytes
-2026/04/17-14:04:05.725 5c7a1e Generated table #392@1: 919 keys, 2134194 bytes
-2026/04/17-14:04:05.764 5c7a1e Generated table #393@1: 23980 keys, 2181624 bytes
-2026/04/17-14:04:05.775 5c7a1e Generated table #394@1: 6805 keys, 808522 bytes
-2026/04/17-14:04:05.775 5c7a1e Compacted 1@1 + 8@2 files => 16183661 bytes
-2026/04/17-14:04:05.778 5c7a1e compacted to: files[ 0 0 8 0 0 0 0 ]
-2026/04/17-14:04:05.778 5c7a1e Delete type=2 #377
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #376
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #381
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #380
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #382
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #383
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #378
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #379
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #386
+2026/04/17-15:22:58.452 5e50bb Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/04/17-15:22:58.455 5e50bb Recovering log #385
+2026/04/17-15:22:58.478 5e50bb Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000385.log 
+2026/04/17-15:23:18.393 5e50bd Level-0 table #397: started
+2026/04/17-15:23:18.522 5e50bd Level-0 table #397: 1593405 bytes OK
+2026/04/17-15:23:18.533 5e50bd Delete type=0 #385
+2026/04/17-15:23:18.659 5e50bd Compacting 1@1 + 8@2 files
+2026/04/17-15:23:19.144 5e50bd Generated table #398@1: 82946 keys, 2233649 bytes
+2026/04/17-15:23:19.345 5e50bd Generated table #399@1: 40043 keys, 2218576 bytes
+2026/04/17-15:23:19.628 5e50bd Generated table #400@1: 38067 keys, 2215831 bytes
+2026/04/17-15:23:19.833 5e50bd Generated table #401@1: 52768 keys, 2213156 bytes
+2026/04/17-15:23:19.974 5e50bd Generated table #402@1: 35207 keys, 2194411 bytes
+2026/04/17-15:23:20.176 5e50bd Generated table #403@1: 732 keys, 2131283 bytes
+2026/04/17-15:23:20.272 5e50bd Generated table #404@1: 24379 keys, 2190414 bytes
+2026/04/17-15:23:20.309 5e50bd Generated table #405@1: 7033 keys, 1243646 bytes
+2026/04/17-15:23:20.310 5e50bd Compacted 1@1 + 8@2 files => 16640966 bytes
+2026/04/17-15:23:20.313 5e50bd compacted to: files[ 0 0 8 0 0 0 0 ]
+2026/04/17-15:23:20.315 5e50bd Delete type=2 #388
+2026/04/17-15:23:20.315 5e50bd Delete type=2 #389
+2026/04/17-15:23:20.317 5e50bd Delete type=2 #394
+2026/04/17-15:23:20.317 5e50bd Delete type=2 #397
+2026/04/17-15:23:20.317 5e50bd Delete type=2 #393
+2026/04/17-15:23:20.317 5e50bd Delete type=2 #387
+2026/04/17-15:23:20.317 5e50bd Delete type=2 #392
+2026/04/17-15:23:20.317 5e50bd Delete type=2 #390
+2026/04/17-15:23:20.317 5e50bd Delete type=2 #391

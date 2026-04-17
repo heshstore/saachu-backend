@@ -8,7 +8,9 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "strict": false,
+    "rootDir": "./src",
     "outDir": "./dist",
     "sourceMap": true
-  }
+  },
+  "exclude": ["node_modules", "test", "dist", "**/*spec.ts"]
 }
