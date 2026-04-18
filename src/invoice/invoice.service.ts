@@ -28,12 +28,14 @@ export class InvoiceService {
 
     if (!order) throw new NotFoundException('Order not found');
 
-    // Credit limit check
+    // Credit limit check — scoped to this customer's orders only
     const customer = order.customer;
     if (customer?.creditLimit && Number(customer.creditLimit) > 0) {
       const outstandingInvoices = await this.invoiceRepository
         .createQueryBuilder('inv')
-        .where('inv.status != :paid', { paid: 'PAID' })
+        .innerJoin(Order, 'ord', 'ord.id = inv.order_id')
+        .where('ord.customer_id = :cid', { cid: customer.id })
+        .andWhere('inv.status != :paid', { paid: 'PAID' })
         .getMany();
 
       const outstanding = outstandingInvoices.reduce(

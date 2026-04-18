@@ -14,9 +14,7 @@ export class AnalyticsService {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    const scope = this.isFullAccess(user) ? '' : `AND (l.assigned_to = ${user.id} OR l.created_by = ${user.id})`;
-
-    const rows = await this.ds.query(`
+    const selectClause = `
       SELECT
         COUNT(*) FILTER (WHERE true) AS total,
         COUNT(*) FILTER (WHERE l.status = 'NEW') AS new_count,
@@ -27,8 +25,17 @@ export class AnalyticsService {
         COUNT(*) FILTER (WHERE l.status = 'LOST') AS lost,
         COUNT(*) FILTER (WHERE l.created_at >= $1) AS today_new
       FROM leads l
-      WHERE l.is_active = true ${scope}
-    `, [today]);
+    `;
+
+    let rows: any[];
+    if (this.isFullAccess(user)) {
+      rows = await this.ds.query(`${selectClause} WHERE l.is_active = true`, [today]);
+    } else {
+      rows = await this.ds.query(
+        `${selectClause} WHERE l.is_active = true AND (l.assigned_to = $2 OR l.created_by = $2)`,
+        [today, user.id],
+      );
+    }
 
     const r = rows[0];
     return {
@@ -46,19 +53,25 @@ export class AnalyticsService {
   }
 
   async getSourceBreakdown(user: any) {
-    const scope = this.isFullAccess(user) ? '' : `AND (l.assigned_to = ${user.id} OR l.created_by = ${user.id})`;
-
-    const rows = await this.ds.query(`
+    const selectClause = `
       SELECT
         l.source,
         COUNT(*) AS total,
         COUNT(*) FILTER (WHERE l.status IN ('QUOTATION','CONVERTED')) AS to_quotation,
         COUNT(*) FILTER (WHERE l.status = 'CONVERTED') AS converted
       FROM leads l
-      WHERE l.is_active = true ${scope}
-      GROUP BY l.source
-      ORDER BY total DESC
-    `);
+    `;
+    const tail = `GROUP BY l.source ORDER BY total DESC`;
+
+    let rows: any[];
+    if (this.isFullAccess(user)) {
+      rows = await this.ds.query(`${selectClause} WHERE l.is_active = true ${tail}`);
+    } else {
+      rows = await this.ds.query(
+        `${selectClause} WHERE l.is_active = true AND (l.assigned_to = $1 OR l.created_by = $1) ${tail}`,
+        [user.id],
+      );
+    }
 
     return rows.map((r: any) => ({
       source: r.source,
