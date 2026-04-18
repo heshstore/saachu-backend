@@ -8,6 +8,20 @@ import { LeadFollowUp } from './entities/lead-followup.entity';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import { UpdateLeadDto } from './dto/update-lead.dto';
 import { LeadAssignmentService } from './lead-assignment.service';
+import { DecisionEngineService, DecisionContext } from './decision-engine.service';
+
+// Allowed forward-only status transitions.
+// Admin/COO bypass this check entirely.
+const VALID_TRANSITIONS: Record<string, string[]> = {
+  NEW:        ['CONTACTED', 'LOST'],
+  CONTACTED:  ['INTERESTED', 'LOST'],
+  INTERESTED: ['QUOTATION', 'CONTACTED', 'LOST'],
+  QUOTATION:  ['CONVERTED', 'INTERESTED', 'LOST'],
+  CONVERTED:  [],
+  LOST:       ['CONTACTED'],
+};
+
+const WORKFLOW_BYPASS_ROLES = ['Admin', 'COO'];
 
 function normalizePhone(raw: string): string {
   let d = (raw || '').replace(/\D/g, '');
@@ -39,7 +53,10 @@ export class LeadService {
     @InjectRepository(LeadFollowUp)
     private followUpRepo: Repository<LeadFollowUp>,
     private assignmentService: LeadAssignmentService,
+    private decisionEngine: DecisionEngineService,
   ) {}
+
+  // ── Create ──────────────────────────────────────────────────────────────────
 
   async create(dto: CreateLeadDto, user: any): Promise<{ lead: Lead; warning?: string }> {
     const phone = normalizePhone(dto.phone);
@@ -47,22 +64,17 @@ export class LeadService {
       throw new BadRequestException('Phone number must be 10 digits. Please check and try again.');
     }
 
-    // Idempotency: check external_id if provided
     if (dto.external_id) {
       const existing = await this.findByExternalId(dto.external_id);
       if (existing) return { lead: existing };
     }
 
-    // Auto-assign if not specified
     let assignedTo = dto.assigned_to;
     if (!assignedTo) {
       assignedTo = await this.assignmentService.getNextAssignee(dto.source) ?? undefined;
     }
 
-    // Duplicate phone detection
-    const dupCount = await this.leadRepo.count({
-      where: { phone, is_active: true },
-    });
+    const dupCount = await this.leadRepo.count({ where: { phone, is_active: true } });
 
     const lead = this.leadRepo.create({
       ...dto,
@@ -76,24 +88,23 @@ export class LeadService {
     });
 
     const saved = await this.leadRepo.save(lead);
-    this.logger.log(`Lead created id=${saved.id} phone=${phone} source=${dto.source} assigned_to=${assignedTo ?? 'none'}${dupCount > 0 ? ' [DUPLICATE]' : ''}`);
+    this.logger.log(
+      `Lead created id=${saved.id} phone=${phone} source=${dto.source} assigned_to=${assignedTo ?? 'none'}${dupCount > 0 ? ' [DUPLICATE]' : ''}`,
+    );
 
-    // Auto-schedule first follow-up 3 days from now for inbound leads
     if (dto.source !== LeadSource.MANUAL) {
       await this.scheduleFirstFollowUp(saved);
     }
 
-    return {
-      lead: saved,
-      warning: dupCount > 0 ? 'duplicate_phone' : undefined,
-    };
+    return { lead: saved, warning: dupCount > 0 ? 'duplicate_phone' : undefined };
   }
+
+  // ── List / Detail ────────────────────────────────────────────────────────────
 
   async findAll(filters: any, user: any): Promise<Lead[]> {
     const q = this.leadRepo.createQueryBuilder('l');
     q.where('l.is_active = true');
 
-    // RBAC data isolation
     const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
     if (!fullAccessRoles.includes(user?.role)) {
       q.andWhere('l.assigned_to = :uid OR l.created_by = :uid', { uid: user.id });
@@ -117,10 +128,9 @@ export class LeadService {
   async findOne(
     id: number,
     user: any,
-  ): Promise<Omit<Lead, 'notes'> & { notes: LeadNote[]; followups: LeadFollowUp[] }> {
+  ): Promise<Lead & { activityNotes: LeadNote[]; followups: LeadFollowUp[] }> {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
-
     this.assertAccess(lead, user);
 
     const notes = await this.noteRepo.find({
@@ -132,8 +142,78 @@ export class LeadService {
       order: { due_date: 'ASC' },
     });
 
-    return { ...lead, notes, followups };
+    return { ...lead, activityNotes: notes, followups };
   }
+
+  // ── Decision Engine endpoints ────────────────────────────────────────────────
+
+  /** Prioritised queue for the telecaller — active leads sorted by score + overdue flag */
+  async getQueue(user: any): Promise<any[]> {
+    const q = this.leadRepo.createQueryBuilder('l');
+    q.where('l.is_active = true');
+    q.andWhere('l.status NOT IN (:...done)', { done: ['CONVERTED'] });
+
+    const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
+    if (!fullAccessRoles.includes(user?.role)) {
+      q.andWhere('(l.assigned_to = :uid OR l.created_by = :uid)', { uid: user.id });
+    }
+
+    q.orderBy('l.created_at', 'DESC');
+    const leads = await q.getMany();
+
+    const now = Date.now();
+    const scored = leads.map((lead) => {
+      const score = this.decisionEngine.scoreLead(lead);
+      const nextAction = this.decisionEngine.getNextAction(lead);
+      const isOverdue = !!(lead.follow_up_date && new Date(lead.follow_up_date).getTime() < now);
+      const ageHours = Math.round((now - new Date(lead.created_at).getTime()) / 3_600_000);
+      return { lead, score, nextAction, isOverdue, ageHours };
+    });
+
+    // Overdue leads first, then by score desc
+    scored.sort((a, b) => {
+      if (a.isOverdue !== b.isOverdue) return a.isOverdue ? -1 : 1;
+      return b.score - a.score;
+    });
+
+    return scored;
+  }
+
+  /** Full decision context for a single lead */
+  async getDecision(id: number, user: any): Promise<DecisionContext> {
+    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    if (!lead) throw new NotFoundException('Lead not found');
+    this.assertAccess(lead, user);
+    return this.decisionEngine.getDecisionContext(lead);
+  }
+
+  /** Log a call outcome note and optionally advance stage */
+  async logAction(
+    id: number,
+    body: { note: string; noteType?: NoteType; newStatus?: string },
+    user: any,
+  ): Promise<Lead> {
+    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    if (!lead) throw new NotFoundException('Lead not found');
+    this.assertAccess(lead, user);
+
+    await this.noteRepo.save(
+      this.noteRepo.create({
+        lead_id: id,
+        note: toSentenceCase(body.note),
+        type: body.noteType ?? NoteType.CALL,
+        created_by: user?.id,
+      }),
+    );
+
+    if (body.newStatus && body.newStatus !== lead.status) {
+      return this.update(id, { status: body.newStatus as LeadStatus } as UpdateLeadDto, user);
+    }
+
+    return lead;
+  }
+
+  // ── Update (with workflow enforcement) ──────────────────────────────────────
 
   async update(id: number, dto: UpdateLeadDto, user: any): Promise<Lead> {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
@@ -145,9 +225,35 @@ export class LeadService {
     if ((dto as any).notes) (dto as any).notes = toSentenceCase((dto as any).notes);
     if (dto.product_interest) dto.product_interest = sentenceCaseWords(dto.product_interest);
 
+    // Workflow enforcement — block invalid stage jumps for non-bypass roles
+    if (dto.status && dto.status !== lead.status) {
+      if (!WORKFLOW_BYPASS_ROLES.includes(user?.role)) {
+        const allowed = VALID_TRANSITIONS[lead.status] ?? [];
+        if (!allowed.includes(dto.status)) {
+          throw new BadRequestException(
+            `Cannot move lead from ${lead.status} to ${dto.status}. ` +
+              `Next allowed stages: ${allowed.length ? allowed.join(', ') : 'none (terminal state)'}`,
+          );
+        }
+      }
+
+      const prevStatus = lead.status;
+      Object.assign(lead, dto);
+      const saved = await this.leadRepo.save(lead);
+
+      // Auto-schedule follow-up when stage advances
+      if (prevStatus !== saved.status) {
+        await this.autoScheduleFollowUp(saved, saved.status as LeadStatus, user);
+      }
+
+      return saved;
+    }
+
     Object.assign(lead, dto);
     return this.leadRepo.save(lead);
   }
+
+  // ── Other CRUD ───────────────────────────────────────────────────────────────
 
   async softDelete(id: number, user: any): Promise<void> {
     const lead = await this.leadRepo.findOne({ where: { id } });
@@ -192,7 +298,6 @@ export class LeadService {
       note: body.note ? toSentenceCase(body.note) : undefined,
       created_by: user.id,
     });
-    // Update lead follow_up_date to the new one
     lead.follow_up_date = fu.due_date;
     await this.leadRepo.save(lead);
     return this.followUpRepo.save(fu);
@@ -222,7 +327,6 @@ export class LeadService {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
 
-    // Check if customer exists by phone
     const existing = await this.leadRepo.manager.query(
       `SELECT id, "companyName", "contactName", mobile1, email, city
        FROM customer WHERE mobile1 = $1 LIMIT 1`,
@@ -252,11 +356,55 @@ export class LeadService {
     return this.leadRepo.save(lead);
   }
 
+  /** Structured entry-point for Shopify WhatsApp-click events (POST /api/leads/shopify) */
+  async createFromShopifyClick(payload: Record<string, string | undefined>): Promise<{ ok: boolean; leadId?: number }> {
+    try {
+      const assignedTo =
+        (await this.assignmentService.getNextAssignee(LeadSource.SHOPIFY)) ?? undefined;
+
+      const notes = [
+        payload.action      ? `Action: ${payload.action}`           : null,
+        payload.lead_type   ? `Type: ${payload.lead_type}`          : null,
+        payload.product_url ? `Product URL: ${payload.product_url}` : null,
+        payload.page_url    ? `Page: ${payload.page_url}`           : null,
+        payload.timestamp   ? `Clicked at: ${payload.timestamp}`    : null,
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      const priority = (['LOW', 'MEDIUM', 'HIGH'].includes((payload.priority ?? '').toUpperCase())
+        ? payload.priority!.toUpperCase()
+        : 'MEDIUM') as LeadPriority;
+
+      const lead = this.leadRepo.create({
+        name: payload.product
+          ? `Shopify Enquiry — ${payload.product}`
+          : 'Shopify Enquiry',
+        phone: '0000000000',          // updated by telecaller on first contact
+        source: LeadSource.SHOPIFY,
+        status: LeadStatus.NEW,
+        product_interest: payload.product ?? undefined,
+        lead_priority: priority,
+        assigned_to: assignedTo,
+        notes: notes || undefined,
+        utm_source: payload.source ?? 'shopify',
+        is_active: true,
+        duplicate_flag: false,
+      });
+
+      const saved = await this.leadRepo.save(lead);
+      this.logger.log(`Shopify click lead created id=${saved.id} product="${payload.product}" assigned_to=${assignedTo ?? 'none'}`);
+      return { ok: true, leadId: saved.id };
+    } catch (e) {
+      this.logger.error(`createFromShopifyClick failed: ${e?.message}`, e?.stack);
+      return { ok: false };
+    }
+  }
+
   async findByExternalId(externalId: string): Promise<Lead | null> {
     return this.leadRepo.findOne({ where: { external_id: externalId } });
   }
 
-  // Called by WhatsApp service via EventEmitter
   @OnEvent('lead.incoming')
   async handleIncomingLead(payload: {
     phone: string;
@@ -283,6 +431,8 @@ export class LeadService {
     }
   }
 
+  // ── Private helpers ──────────────────────────────────────────────────────────
+
   private assertAccess(lead: Lead, user: any) {
     const fullAccess = ['Admin', 'COO', 'Sales Manager'];
     if (fullAccess.includes(user?.role)) return;
@@ -299,6 +449,37 @@ export class LeadService {
       due_date: due,
       note: 'Initial follow-up',
       created_by: lead.created_by ?? lead.assigned_to ?? 1,
+    });
+    await this.followUpRepo.save(fu);
+    lead.follow_up_date = due;
+    await this.leadRepo.save(lead);
+  }
+
+  /** Auto-schedule the next follow-up when a lead advances to a new stage. */
+  private async autoScheduleFollowUp(lead: Lead, newStatus: LeadStatus, user: any): Promise<void> {
+    let daysAhead: number | null = null;
+    let noteText: string | null = null;
+
+    if (newStatus === LeadStatus.CONTACTED) {
+      daysAhead = 2;
+      noteText = 'Auto-scheduled: follow up after first contact';
+    } else if (newStatus === LeadStatus.INTERESTED) {
+      daysAhead = 1;
+      noteText = 'Auto-scheduled: send quotation';
+    } else if (newStatus === LeadStatus.QUOTATION) {
+      daysAhead = 3;
+      noteText = 'Auto-scheduled: follow up on quotation';
+    }
+
+    if (!daysAhead) return;
+
+    const due = new Date();
+    due.setDate(due.getDate() + daysAhead);
+    const fu = this.followUpRepo.create({
+      lead_id: lead.id,
+      due_date: due,
+      note: noteText!,
+      created_by: user?.id ?? lead.assigned_to ?? 1,
     });
     await this.followUpRepo.save(fu);
     lead.follow_up_date = due;

@@ -24,6 +24,28 @@ export class LeadController {
     return this.leadService.create(dto, req.user);
   }
 
+  @Get('queue')
+  @RequirePermission('lead.view')
+  getQueue(@Request() req) {
+    return this.leadService.getQueue(req.user);
+  }
+
+  @Get(':id/decision')
+  @RequirePermission('lead.view')
+  getDecision(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    return this.leadService.getDecision(id, req.user);
+  }
+
+  @Post(':id/log-action')
+  @RequirePermission('lead.edit')
+  logAction(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: { note: string; noteType?: NoteType; newStatus?: string },
+    @Request() req,
+  ) {
+    return this.leadService.logAction(id, body, req.user);
+  }
+
   @Get(':id')
   @RequirePermission('lead.view')
   findOne(@Param('id', ParseIntPipe) id: number, @Request() req) {
