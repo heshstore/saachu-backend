@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, BadRequestException, Logger } from '@nes
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
-import { Lead, LeadSource, LeadStatus } from './entities/lead.entity';
+import { Lead, LeadSource, LeadStatus, LeadPriority } from './entities/lead.entity';
 import { LeadNote, NoteType } from './entities/lead-note.entity';
 import { LeadFollowUp } from './entities/lead-followup.entity';
 import { CreateLeadDto } from './dto/create-lead.dto';
@@ -357,7 +357,10 @@ export class LeadService {
   }
 
   /** Structured entry-point for Shopify WhatsApp-click events (POST /api/leads/shopify) */
-  async createFromShopifyClick(payload: Record<string, string | undefined>): Promise<{ ok: boolean; leadId?: number }> {
+  async createFromShopifyClick(payload: {
+    source?: string; action?: string; product?: string; product_url?: string;
+    page_url?: string; lead_type?: string; priority?: string; timestamp?: string;
+  }): Promise<{ ok: boolean; leadId?: number }> {
     try {
       const assignedTo =
         (await this.assignmentService.getNextAssignee(LeadSource.SHOPIFY)) ?? undefined;
