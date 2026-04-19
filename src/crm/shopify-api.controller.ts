@@ -1,4 +1,4 @@
-import { Controller, Post, Body, HttpCode, Logger } from '@nestjs/common';
+import { Controller, Get, Post, Body, HttpCode, Logger, Query } from '@nestjs/common';
 import { IsOptional, IsString } from 'class-validator';
 import { Public } from '../auth/public.decorator';
 import { LeadService } from './lead.service';
@@ -6,6 +6,9 @@ import { LeadService } from './lead.service';
 export class ShopifyLeadDto {
   @IsOptional() @IsString() source?: string;
   @IsOptional() @IsString() action?: string;
+  @IsOptional() @IsString() name?: string;
+  @IsOptional() @IsString() phone?: string;
+  @IsOptional() @IsString() message?: string;
   @IsOptional() @IsString() product?: string;
   @IsOptional() @IsString() product_url?: string;
   @IsOptional() @IsString() page_url?: string;
@@ -19,6 +22,12 @@ export class ShopifyApiController {
   private readonly logger = new Logger(ShopifyApiController.name);
 
   constructor(private readonly leadService: LeadService) {}
+
+  @Get()
+  @Public()
+  getLeads(@Query('status') status?: string, @Query('source') source?: string) {
+    return this.leadService.findAll({ status, source }, { role: 'Admin', id: 0 });
+  }
 
   @Post('shopify')
   @Public()

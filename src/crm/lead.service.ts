@@ -358,7 +358,8 @@ export class LeadService {
 
   /** Structured entry-point for Shopify WhatsApp-click events (POST /api/leads/shopify) */
   async createFromShopifyClick(payload: {
-    source?: string; action?: string; product?: string; product_url?: string;
+    source?: string; action?: string; name?: string; phone?: string;
+    message?: string; product?: string; product_url?: string;
     page_url?: string; lead_type?: string; priority?: string; timestamp?: string;
   }): Promise<{ ok: boolean; leadId?: number }> {
     try {
@@ -366,6 +367,7 @@ export class LeadService {
         (await this.assignmentService.getNextAssignee(LeadSource.SHOPIFY)) ?? undefined;
 
       const notes = [
+        payload.message     ? `Message: ${payload.message}`         : null,
         payload.action      ? `Action: ${payload.action}`           : null,
         payload.lead_type   ? `Type: ${payload.lead_type}`          : null,
         payload.product_url ? `Product URL: ${payload.product_url}` : null,
@@ -380,10 +382,12 @@ export class LeadService {
         : 'MEDIUM') as LeadPriority;
 
       const lead = this.leadRepo.create({
-        name: payload.product
-          ? `Shopify Enquiry — ${payload.product}`
-          : 'Shopify Enquiry',
-        phone: '0000000000',          // updated by telecaller on first contact
+        name: payload.name
+          ? payload.name
+          : payload.product
+            ? `Shopify Enquiry — ${payload.product}`
+            : 'Shopify Enquiry',
+        phone: payload.phone ? normalizePhone(payload.phone) || '0000000000' : '0000000000',
         source: LeadSource.SHOPIFY,
         status: LeadStatus.NEW,
         product_interest: payload.product ?? undefined,
