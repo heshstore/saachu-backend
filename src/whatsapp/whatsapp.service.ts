@@ -62,6 +62,12 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
     this.client = new Client({
       authStrategy: new LocalAuth({ clientId: this.sessionName }),
+      // Fetch the latest WhatsApp Web version — prevents "Couldn't link device" on stale builds
+      webVersionCache: {
+        type: 'remote',
+        remotePath:
+          'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1017547727-alpha.html',
+      },
       puppeteer: {
         headless: true,
         ...(executablePath ? { executablePath } : {}),
@@ -73,7 +79,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
           '--disable-gpu',
           '--no-first-run',
           '--no-zygote',
-          '--single-process',          // required on Render — prevents forking
+          '--single-process',
           '--disable-extensions',
           '--disable-background-networking',
           '--disable-default-apps',
@@ -236,6 +242,33 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       this.client = null;
     }
     await this.initClient();
+  }
+
+  /** Logout current session, delete saved auth, and restart so a new QR appears */
+  async disconnectAndReset(): Promise<void> {
+    this.logger.log('Manual disconnect requested — clearing session');
+    this._ready = false;
+
+    if (this.client) {
+      try { await this.client.logout(); } catch { /* already disconnected */ }
+      try { await this.client.destroy(); } catch { /* ignore */ }
+      this.client = null;
+    }
+
+    // Delete the LocalAuth session folder so a fresh QR is generated
+    const fs = await import('fs');
+    const path = await import('path');
+    const sessionDir = path.join(process.cwd(), `.wwebjs_auth/session-${this.sessionName}`);
+    if (fs.existsSync(sessionDir)) {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+      this.logger.log(`Session folder deleted: ${sessionDir}`);
+    }
+
+    await this.updateSession({ status: 'DISCONNECTED', phone_number: null, connected_at: null });
+    this.qrSubject.next(JSON.stringify({ type: 'disconnected' }));
+
+    // Restart so new QR appears automatically
+    setTimeout(() => this.reinitClient().catch((e) => this.logger.error('Reinit failed', e?.message)), 2000);
   }
 
   // Normalize multi-device chatIds: "919999999999:1@c.us" → "919999999999@c.us"

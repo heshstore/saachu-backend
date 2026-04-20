@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Body, Param, Query, Request, Sse, MessageEvent,
+  Controller, Get, Post, Body, Param, Query, Request, Sse, MessageEvent, HttpCode,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { WhatsAppService } from './whatsapp.service';
@@ -19,6 +19,14 @@ export class WhatsAppController {
   @RequirePermission('whatsapp.manage')
   getStatus() {
     return this.waService.getSessionStatus();
+  }
+
+  @Post('disconnect')
+  @HttpCode(200)
+  @RequirePermission('whatsapp.manage')
+  async disconnect() {
+    await this.waService.disconnectAndReset();
+    return { ok: true };
   }
 
   @Post('send')
