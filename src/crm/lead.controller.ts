@@ -43,13 +43,13 @@ export class LeadController {
     @Body() body: { note: string; noteType?: NoteType; newStatus?: string },
     @Request() req,
   ) {
-    return this.leadService.logAction(id, body, req.user);
+    return this.leadService.logAction(id, body, req.user, req.ip);
   }
 
   @Get(':id')
   @RequirePermission('lead.view')
   findOne(@Param('id', ParseIntPipe) id: number, @Request() req) {
-    return this.leadService.findOne(id, req.user);
+    return this.leadService.findOne(id, req.user, req.ip);
   }
 
   @Put(':id')
@@ -59,7 +59,7 @@ export class LeadController {
     @Body() dto: UpdateLeadDto,
     @Request() req,
   ) {
-    return this.leadService.update(id, dto, req.user);
+    return this.leadService.update(id, dto, req.user, req.ip);
   }
 
   @Delete(':id')
@@ -75,7 +75,7 @@ export class LeadController {
     @Body('userId', ParseIntPipe) userId: number,
     @Request() req,
   ) {
-    return this.leadService.assignLead(id, userId, req.user);
+    return this.leadService.assignLead(id, userId, req.user, req.ip);
   }
 
   @Post(':id/notes')
@@ -90,8 +90,8 @@ export class LeadController {
 
   @Get(':id/notes')
   @RequirePermission('lead.view')
-  getNotes(@Param('id', ParseIntPipe) id: number) {
-    return this.leadService.getNotes(id);
+  getNotes(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    return this.leadService.getNotes(id, req.user);
   }
 
   @Post(':id/followups')
@@ -101,7 +101,7 @@ export class LeadController {
     @Body() body: { due_date: string; note?: string },
     @Request() req,
   ) {
-    return this.leadService.addFollowUp(id, body, req.user);
+    return this.leadService.addFollowUp(id, body, req.user, req.ip);
   }
 
   @Patch(':id/followups/:fid/complete')
@@ -110,13 +110,13 @@ export class LeadController {
     @Param('fid', ParseIntPipe) fid: number,
     @Request() req,
   ) {
-    return this.leadService.completeFollowUp(fid, req.user);
+    return this.leadService.completeFollowUp(fid, req.user, req.ip);
   }
 
   @Post(':id/convert')
   @RequirePermission('lead.convert')
-  checkConvert(@Param('id', ParseIntPipe) id: number) {
-    return this.leadService.checkConvert(id);
+  checkConvert(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    return this.leadService.checkConvert(id, req.user);
   }
 
   @Patch(':id/mark-converted')
@@ -126,6 +126,6 @@ export class LeadController {
     @Body() body: { customerId: number; quotationId: number },
     @Request() req,
   ) {
-    return this.leadService.markConverted(id, body.customerId, body.quotationId, req.user);
+    return this.leadService.markConverted(id, body.customerId, body.quotationId, req.user, req.ip);
   }
 }

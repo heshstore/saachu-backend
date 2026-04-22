@@ -14,6 +14,18 @@ export class CreateLeadDto {
   @IsString()
   email?: string;
 
+  @IsOptional()
+  @IsString()
+  city?: string;
+
+  @IsOptional()
+  @IsString()
+  state?: string;
+
+  @IsOptional()
+  @IsString()
+  country?: string;
+
   @IsEnum(LeadSource)
   source: LeadSource;
 
@@ -39,6 +51,10 @@ export class CreateLeadDto {
 
   @IsOptional()
   @IsString()
+  requirement_note?: string;
+
+  @IsOptional()
+  @IsString()
   utm_source?: string;
 
   @IsOptional()
@@ -52,6 +68,18 @@ export class CreateLeadDto {
   @IsOptional()
   @IsString()
   external_id?: string;
+
+  @IsOptional()
+  @IsString()
+  lead_source_label?: string;
+
+  @IsOptional()
+  @IsString()
+  channel?: string;
+
+  @IsOptional()
+  @IsString()
+  landing_page?: string;
 
   @IsOptional()
   raw_payload?: Record<string, any>;

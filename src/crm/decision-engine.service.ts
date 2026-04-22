@@ -28,12 +28,17 @@ export interface DecisionContext {
 
 const SOURCE_SCORES: Record<string, number> = {
   INDIAMART: 30,
-  META_ADS: 25,
-  GOOGLE_ADS: 22,
+  DIRECT:    28,
+  META:      25,
+  GOOGLE:    22,
+  LINKEDIN:  22,
+  WHATSAPP:  20,
+  SHOPIFY:   15,
+  // Legacy keys — kept so un-migrated DB rows still score correctly
+  MANUAL:      28,  // maps to DIRECT score
+  META_ADS:    25,
+  GOOGLE_ADS:  22,
   DIRECT_CALL: 28,
-  WHATSAPP: 20,
-  SHOPIFY: 15,
-  MANUAL: 10,
 };
 
 const PRIORITY_BONUS: Record<string, number> = {
@@ -44,12 +49,17 @@ const PRIORITY_BONUS: Record<string, number> = {
 
 const SOURCE_LABELS: Record<string, string> = {
   INDIAMART: 'IndiaMart',
-  META_ADS: 'Meta Ads',
-  GOOGLE_ADS: 'Google Ads',
-  SHOPIFY: 'Shopify',
-  WHATSAPP: 'WhatsApp',
-  DIRECT_CALL: 'Direct Call',
-  MANUAL: 'Manual',
+  META:      'Meta Ads',
+  GOOGLE:    'Google Ads',
+  LINKEDIN:  'LinkedIn',
+  SHOPIFY:   'Shopify',
+  WHATSAPP:  'WhatsApp',
+  DIRECT:    'Direct',
+  // Legacy keys
+  MANUAL:      'Direct',
+  META_ADS:    'Meta Ads',
+  GOOGLE_ADS:  'Google Ads',
+  DIRECT_CALL: 'Direct',
 };
 
 const URGENCY_WORDS = [

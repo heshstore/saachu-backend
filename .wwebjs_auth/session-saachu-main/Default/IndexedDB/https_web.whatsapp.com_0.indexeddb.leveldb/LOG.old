@@ -1,26 +1,3 @@
-2026/04/17-14:03:42.415 5c7a1b Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/04/17-14:03:42.417 5c7a1b Recovering log #374
-2026/04/17-14:03:42.436 5c7a1b Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000374.log 
-2026/04/17-14:04:04.911 5c7a1e Level-0 table #386: started
-2026/04/17-14:04:04.981 5c7a1e Level-0 table #386: 1254258 bytes OK
-2026/04/17-14:04:05.005 5c7a1e Delete type=0 #374
-2026/04/17-14:04:05.304 5c7a1e Compacting 1@1 + 8@2 files
-2026/04/17-14:04:05.392 5c7a1e Generated table #387@1: 84047 keys, 2233301 bytes
-2026/04/17-14:04:05.434 5c7a1e Generated table #388@1: 39162 keys, 2210983 bytes
-2026/04/17-14:04:05.510 5c7a1e Generated table #389@1: 34467 keys, 2210026 bytes
-2026/04/17-14:04:05.655 5c7a1e Generated table #390@1: 55996 keys, 2219028 bytes
-2026/04/17-14:04:05.705 5c7a1e Generated table #391@1: 31017 keys, 2185983 bytes
-2026/04/17-14:04:05.725 5c7a1e Generated table #392@1: 919 keys, 2134194 bytes
-2026/04/17-14:04:05.764 5c7a1e Generated table #393@1: 23980 keys, 2181624 bytes
-2026/04/17-14:04:05.775 5c7a1e Generated table #394@1: 6805 keys, 808522 bytes
-2026/04/17-14:04:05.775 5c7a1e Compacted 1@1 + 8@2 files => 16183661 bytes
-2026/04/17-14:04:05.778 5c7a1e compacted to: files[ 0 0 8 0 0 0 0 ]
-2026/04/17-14:04:05.778 5c7a1e Delete type=2 #377
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #376
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #381
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #380
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #382
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #383
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #378
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #379
-2026/04/17-14:04:05.779 5c7a1e Delete type=2 #386
+2026/04/22-18:49:27.416 a938b7 Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/04/22-18:49:27.417 a938b7 Recovering log #344
+2026/04/22-18:49:27.418 a938b7 Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000344.log 

@@ -1,8 +1,10 @@
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, BadRequestException, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
 import { Role } from './role.entity';
 import { Permission } from './permission.entity';
+
+const RESERVED_ROLE_NAMES = new Set(['Admin', 'admin', 'ADMIN']);
 
 // Permission dependency map — if key is granted, deps are auto-granted too
 export const PERMISSION_DEPS: Record<string, string[]> = {
@@ -135,18 +137,27 @@ export class RbacService implements OnModuleInit {
   }
 
   async createRole(name: string): Promise<Role> {
-    const existing = await this.roleRepo.findOne({ where: { name } });
+    const trimmed = (name || '').trim();
+    if (RESERVED_ROLE_NAMES.has(trimmed)) {
+      throw new BadRequestException(`Role name "${trimmed}" is reserved and cannot be created`);
+    }
+    const existing = await this.roleRepo.findOne({ where: { name: trimmed } });
     if (existing) return existing;
-    const role = this.roleRepo.create({ name, is_system: false });
+    const role = this.roleRepo.create({ name: trimmed, is_system: false });
     const saved = await this.roleRepo.save(role);
     await this.refreshCache();
     return saved;
   }
 
   async renameRole(id: number, name: string): Promise<Role> {
+    const trimmed = (name || '').trim();
+    if (RESERVED_ROLE_NAMES.has(trimmed)) {
+      throw new BadRequestException(`Role name "${trimmed}" is reserved and cannot be used`);
+    }
     const role = await this.roleRepo.findOne({ where: { id } });
-    if (!role) throw new Error('Role not found');
-    role.name = name.trim();
+    if (!role) throw new NotFoundException('Role not found');
+    if (role.is_system) throw new BadRequestException('System roles cannot be renamed');
+    role.name = trimmed;
     const saved = await this.roleRepo.save(role);
     await this.refreshCache();
     return saved;
@@ -154,8 +165,8 @@ export class RbacService implements OnModuleInit {
 
   async deleteRole(id: number): Promise<void> {
     const role = await this.roleRepo.findOne({ where: { id } });
-    if (!role) throw new Error('Role not found');
-    if (role.is_system) throw new Error('Cannot delete system roles');
+    if (!role) throw new NotFoundException('Role not found');
+    if (role.is_system) throw new BadRequestException('System roles cannot be deleted');
     await this.roleRepo.remove(role);
     await this.refreshCache();
   }

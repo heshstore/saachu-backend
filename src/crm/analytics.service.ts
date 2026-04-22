@@ -146,6 +146,72 @@ export class AnalyticsService {
     }));
   }
 
+  /**
+   * Detailed performance metrics for a single user.
+   * Uses 4 targeted queries — no N+1, no correlated subqueries on hot paths.
+   * Permission check: full-access roles can query anyone; others can only query themselves.
+   */
+  async getPerformance(targetUserId: number, user: any) {
+    const fullAccess = this.isFullAccess(user);
+    if (!fullAccess && user.id !== targetUserId) {
+      targetUserId = user.id; // silently scope to self — permission guard already runs
+    }
+
+    // 1. Lead totals
+    const [leadsRow] = await this.ds.query(`
+      SELECT
+        COUNT(*) AS total_leads,
+        COUNT(*) FILTER (WHERE status = 'CONVERTED') AS conversions,
+        COUNT(*) FILTER (WHERE status = 'LOST') AS lost
+      FROM leads
+      WHERE (assigned_to = $1 OR created_by = $1) AND is_active = true
+    `, [targetUserId]);
+
+    // 2. CALLED actions from audit log (only counts logged calls via logAction)
+    const [callsRow] = await this.ds.query(`
+      SELECT COUNT(*) AS calls_made
+      FROM lead_audit_logs
+      WHERE user_id = $1 AND action = 'CALLED'
+    `, [targetUserId]);
+
+    // 3. Follow-up completion rate across their assigned leads
+    const [fuRow] = await this.ds.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE f.is_completed = true) AS fu_completed,
+        COUNT(*) AS fu_total
+      FROM lead_followups f
+      JOIN leads l ON l.id = f.lead_id
+      WHERE l.assigned_to = $1 AND l.is_active = true
+    `, [targetUserId]);
+
+    // 4. Avg first-response time (minutes from lead creation to first note)
+    const [responseRow] = await this.ds.query(`
+      SELECT ROUND(AVG(response_min)::numeric, 1) AS avg_response_min
+      FROM (
+        SELECT EXTRACT(EPOCH FROM (MIN(n.created_at) - l.created_at)) / 60 AS response_min
+        FROM leads l
+        JOIN lead_notes n ON n.lead_id = l.id
+        WHERE l.assigned_to = $1 AND l.is_active = true
+        GROUP BY l.id
+      ) sub
+    `, [targetUserId]);
+
+    const fuTotal = +fuRow.fu_total;
+    return {
+      userId: targetUserId,
+      totalLeads: +leadsRow.total_leads,
+      conversions: +leadsRow.conversions,
+      lost: +leadsRow.lost,
+      callsMade: +callsRow.calls_made,
+      followUpCompletionPct: fuTotal > 0
+        ? Math.round((+fuRow.fu_completed / fuTotal) * 100)
+        : null,
+      avgResponseMin: responseRow.avg_response_min
+        ? +responseRow.avg_response_min
+        : null,
+    };
+  }
+
   async getTelecallerStats(telecallerId: number, user: any) {
     const rows = await this.ds.query(`
       SELECT
@@ -158,7 +224,7 @@ export class AnalyticsService {
     `, [telecallerId]);
 
     const user_row = await this.ds.query(
-      `SELECT id, name, role FROM "user" WHERE id = $1`,
+      `SELECT id, name FROM "user" WHERE id = $1`,
       [telecallerId],
     );
 

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Read(//Users/saachi/Projects/Saachu-app/**)"
+    ],
+    "additionalDirectories": [
+      "/Users/saachi/Projects/Saachu-app/assets"
+    ]
+  }
+}

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
@@ -6,6 +6,7 @@ import { Notification } from './notification.entity';
 
 @Injectable()
 export class NotificationService {
+  private readonly logger = new Logger(NotificationService.name);
   private waService: any = null;
 
   constructor(
@@ -49,6 +50,16 @@ export class NotificationService {
 
   @Cron('*/15 * * * *')
   async handleFollowUpReminders(): Promise<void> {
+    this.logger.log('[Cron] NotificationService: checking follow-up reminders...');
+    try {
+      await this._processFollowUpReminders();
+    } catch (e: any) {
+      this.logger.error('[Cron] NotificationService: follow-up reminders failed', e?.stack ?? e?.message);
+      // Do NOT rethrow — a single failure must never prevent the next scheduled run
+    }
+  }
+
+  private async _processFollowUpReminders(): Promise<void> {
     const window = new Date(Date.now() + 30 * 60 * 1000);
 
     const dues = await this.ds.query(`
@@ -62,6 +73,7 @@ export class NotificationService {
         AND l.assigned_to IS NOT NULL
     `, [window]);
 
+    let sent = 0;
     for (const row of dues) {
       if (!row.assigned_to) continue;
 
@@ -75,13 +87,16 @@ export class NotificationService {
       const body = row.note || `Call ${row.lead_name} (${row.lead_phone})`;
 
       await this.create(row.assigned_to, title, body, 'lead_followup', row.fu_id);
+      sent++;
 
-      // WhatsApp reminder to assignee if connected
+      // WhatsApp reminder to assignee if connected — failure here must not abort the loop
       if (this.waService?.isConnected?.()) {
         this.waService
           .sendToAssignee(row.assigned_to, `Reminder: ${title}\n${body}`)
-          .catch(() => { /* silent */ });
+          .catch((e: any) => this.logger.warn(`[Cron] WhatsApp reminder send failed: ${e?.message}`));
       }
     }
+
+    if (sent > 0) this.logger.log(`[Cron] NotificationService: sent ${sent} follow-up reminder(s)`);
   }
 }

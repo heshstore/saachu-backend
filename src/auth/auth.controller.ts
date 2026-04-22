@@ -1,5 +1,6 @@
 import { Controller, Post, Patch, Get, Body, HttpCode, Req } from '@nestjs/common';
 import { Request } from 'express';
+import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { RbacService } from '../rbac/rbac.service';
 import { Public } from './public.decorator';
@@ -14,6 +15,7 @@ export class AuthController {
   @Public()
   @Post('login')
   @HttpCode(200)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   login(@Body() body: { mobile?: string; email?: string; password?: string }) {
     const loginId = (body.mobile ?? body.email ?? '').trim();
     return this.authService.login(loginId, (body.password ?? '').trim());

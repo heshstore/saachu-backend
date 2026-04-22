@@ -1,6 +1,8 @@
-import { Controller, Get, Post, Body, HttpCode, Logger, Query } from '@nestjs/common';
+import { Controller, Get, Post, Body, HttpCode, Logger, Query, Request } from '@nestjs/common';
 import { IsOptional, IsString } from 'class-validator';
+import { Throttle } from '@nestjs/throttler';
 import { Public } from '../auth/public.decorator';
+import { RequirePermission } from '../auth/require-permission.decorator';
 import { LeadService } from './lead.service';
 
 export class ShopifyLeadDto {
@@ -24,14 +26,15 @@ export class ShopifyApiController {
   constructor(private readonly leadService: LeadService) {}
 
   @Get()
-  @Public()
-  getLeads(@Query('status') status?: string, @Query('source') source?: string) {
-    return this.leadService.findAll({ status, source }, { role: 'Admin', id: 0 });
+  @RequirePermission('lead.view')
+  getLeads(@Query('status') status?: string, @Query('source') source?: string, @Request() req?: any) {
+    return this.leadService.findAll({ status, source }, req.user);
   }
 
   @Post('shopify')
   @Public()
   @HttpCode(200)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async createShopifyLead(@Body() body: ShopifyLeadDto) {
     this.logger.log(`Shopify lead received: ${JSON.stringify(body)}`);
     const result = await this.leadService.createFromShopifyClick(body);

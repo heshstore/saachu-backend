@@ -4,6 +4,7 @@ import { OrdersService } from './orders.service';
 import { PdfService } from '../shared/pdf.service';
 import { MailService } from '../shared/mail.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
+import { SendEmailDto } from '../shared/dto/send-email.dto';
 
 @Controller('orders')
 export class OrdersController {
@@ -90,6 +91,7 @@ export class OrdersController {
   }
 
   @Get(':id/pdf')
+  @RequirePermission('order.view')
   async getPdf(@Param('id') id: string, @Res() res: Response) {
     const data = await this.ordersService.findOne(Number(id));
     const buffer = await this.pdfService.generateBuffer(
@@ -103,7 +105,8 @@ export class OrdersController {
   }
 
   @Post(':id/email')
-  async sendEmail(@Param('id') id: string, @Body() body: { to: string }) {
+  @RequirePermission('order.view')
+  async sendEmail(@Param('id') id: string, @Body() body: SendEmailDto) {
     const data = await this.ordersService.findOne(Number(id));
     const filePath = await this.pdfService.generateAndSave('order', Number(id), data);
     await this.mailService.sendDocument(

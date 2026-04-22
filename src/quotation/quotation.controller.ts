@@ -15,6 +15,7 @@ import { QuotationService } from './quotation.service';
 import { PdfService } from '../shared/pdf.service';
 import { MailService } from '../shared/mail.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
+import { SendEmailDto } from '../shared/dto/send-email.dto';
 
 @Controller('quotations')
 export class QuotationController {
@@ -61,6 +62,7 @@ export class QuotationController {
   }
 
   @Get(':id/pdf')
+  @RequirePermission('quotation.view')
   async getPdf(@Param('id') id: string, @Res() res: Response) {
     const data = await this.quotationService.findOne(Number(id));
     const buffer = await this.pdfService.generateBuffer(
@@ -74,7 +76,8 @@ export class QuotationController {
   }
 
   @Post(':id/email')
-  async sendEmail(@Param('id') id: string, @Body() body: { to: string }) {
+  @RequirePermission('quotation.view')
+  async sendEmail(@Param('id') id: string, @Body() body: SendEmailDto) {
     const data = await this.quotationService.findOne(Number(id));
     const filePath = await this.pdfService.generateAndSave('quotation', Number(id), data);
     await this.mailService.sendDocument(

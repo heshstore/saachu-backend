@@ -1,4 +1,4 @@
-import { IsEnum, IsOptional, IsString, IsDateString, IsNumber } from 'class-validator';
+import { IsEnum, IsOptional, IsString, IsDateString } from 'class-validator';
 import { LeadStatus, LeadPriority } from '../entities/lead.entity';
 
 export class UpdateLeadDto {
@@ -15,12 +15,12 @@ export class UpdateLeadDto {
   email?: string;
 
   @IsOptional()
-  @IsEnum(LeadStatus)
-  status?: LeadStatus;
+  @IsString()
+  city?: string;
 
   @IsOptional()
-  @IsNumber()
-  assigned_to?: number;
+  @IsEnum(LeadStatus)
+  status?: LeadStatus;
 
   @IsOptional()
   @IsString()
@@ -38,11 +38,7 @@ export class UpdateLeadDto {
   @IsEnum(LeadPriority)
   lead_priority?: LeadPriority;
 
-  @IsOptional()
-  @IsNumber()
-  quotation_id?: number;
-
-  @IsOptional()
-  @IsNumber()
-  customer_id?: number;
+  // assigned_to  → use PATCH /:id/assign       (requires lead.assign)
+  // customer_id  → use PATCH /:id/mark-converted (requires lead.convert)
+  // quotation_id → use PATCH /:id/mark-converted (requires lead.convert)
 }

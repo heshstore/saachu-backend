@@ -30,6 +30,12 @@ export class AnalyticsController {
     return this.analyticsService.getLeaderboard(req.user);
   }
 
+  @Get('performance/:userId')
+  @RequirePermission('crm.analytics.self')
+  getPerformance(@Param('userId', ParseIntPipe) userId: number, @Request() req) {
+    return this.analyticsService.getPerformance(userId, req.user);
+  }
+
   @Get('telecaller/:id')
   @RequirePermission('crm.analytics.all')
   getTelecallerStats(@Param('id', ParseIntPipe) id: number, @Request() req) {

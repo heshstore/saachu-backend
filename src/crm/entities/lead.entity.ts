@@ -4,13 +4,13 @@ import {
 } from 'typeorm';
 
 export enum LeadSource {
-  INDIAMART   = 'INDIAMART',
-  META_ADS    = 'META_ADS',
-  GOOGLE_ADS  = 'GOOGLE_ADS',
-  SHOPIFY     = 'SHOPIFY',
-  WHATSAPP    = 'WHATSAPP',
-  DIRECT_CALL = 'DIRECT_CALL',
-  MANUAL      = 'MANUAL',
+  SHOPIFY   = 'SHOPIFY',
+  META      = 'META',
+  GOOGLE    = 'GOOGLE',
+  INDIAMART = 'INDIAMART',
+  LINKEDIN  = 'LINKEDIN',
+  WHATSAPP  = 'WHATSAPP',
+  DIRECT    = 'DIRECT',
 }
 
 export enum LeadStatus {
@@ -28,6 +28,12 @@ export enum LeadPriority {
   HIGH   = 'HIGH',
 }
 
+export enum LeadChannel {
+  WHATSAPP = 'WHATSAPP',
+  CALL     = 'CALL',
+  FORM     = 'FORM',
+}
+
 @Entity('leads')
 export class Lead {
   @PrimaryGeneratedColumn()
@@ -36,11 +42,21 @@ export class Lead {
   @Column()
   name: string;
 
-  @Column({ length: 10 })
+  /** Stored in +E.164 format, e.g. +919876543210 */
+  @Column({ length: 20 })
   phone: string;
 
   @Column({ nullable: true })
   email: string;
+
+  @Column({ nullable: true })
+  city: string;
+
+  @Column({ nullable: true })
+  state: string;
+
+  @Column({ nullable: true })
+  country: string;
 
   @Column({ type: 'varchar', length: 20 })
   source: LeadSource;
@@ -59,6 +75,9 @@ export class Lead {
 
   @Column({ type: 'text', nullable: true })
   product_interest: string;
+
+  @Column({ type: 'text', nullable: true })
+  requirement_note: string;
 
   @Column({ nullable: true })
   utm_source: string;
@@ -84,8 +103,21 @@ export class Lead {
   @Column({ nullable: true })
   external_id: string;
 
+  @Column({ type: 'varchar', length: 50, nullable: true })
+  lead_source_label: string;
+
+  @Column({ type: 'varchar', length: 10, nullable: true })
+  channel: string;
+
+  @Column({ type: 'text', nullable: true })
+  landing_page: string;
+
   @Column({ default: false })
   duplicate_flag: boolean;
+
+  /** Auto-computed behavioral tags: ["high_intent", "slow_response", "bulk_buyer"] */
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  tags: string[];
 
   @Column({ default: true })
   is_active: boolean;

@@ -7,6 +7,7 @@ export interface AppConfig {
   smtpPass: string;
   shopifyStore: string;
   shopifyToken: string;
+  shopifyWebhookSecret: string;
   googlePlacesKey: string;
   jwtSecret: string;
   jwtExpiresIn: string;
@@ -16,6 +17,7 @@ export interface AppConfig {
   indiaMartSecretKey: string;
   metaVerifyToken: string;
   metaAccessToken: string;
+  metaAppSecret: string;
   metaPageId: string;
   whatsappSessionName: string;
 }
@@ -29,6 +31,7 @@ export const appConfig: AppConfig = {
   smtpPass: process.env.SMTP_PASS || '',
   shopifyStore: process.env.SHOPIFY_STORE || '',
   shopifyToken: process.env.SHOPIFY_ACCESS_TOKEN || '',
+  shopifyWebhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET || '',
   googlePlacesKey: process.env.GOOGLE_PLACES_KEY || '',
   jwtSecret: process.env.JWT_SECRET || 'saachu_jwt_secret_change_in_production',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '8h',
@@ -37,6 +40,7 @@ export const appConfig: AppConfig = {
   indiaMartSecretKey: process.env.INDIAMART_SECRET_KEY || '',
   metaVerifyToken: process.env.META_VERIFY_TOKEN || '',
   metaAccessToken: process.env.META_ACCESS_TOKEN || '',
+  metaAppSecret: process.env.META_APP_SECRET || '',
   metaPageId: process.env.META_PAGE_ID || '',
   whatsappSessionName: process.env.WHATSAPP_SESSION || 'saachu-main',
 };
