@@ -1,3 +1,5 @@
-2026/04/22-18:49:23.861 a93930 Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/Local Storage/leveldb/MANIFEST-000001
-2026/04/22-18:49:23.868 a93930 Recovering log #4
-2026/04/22-18:49:23.869 a93930 Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/Local Storage/leveldb/000004.log 
+2026/04/22-20:06:45.953 abc0d7 Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/Local Storage/leveldb/MANIFEST-000001
+2026/04/22-20:06:45.956 abc0d7 Recovering log #4
+2026/04/22-20:06:45.956 abc0d7 Level-0 table #7: started
+2026/04/22-20:06:45.963 abc0d7 Level-0 table #7: 14146 bytes OK
+2026/04/22-20:06:45.967 abc0d7 Delete type=0 #4
