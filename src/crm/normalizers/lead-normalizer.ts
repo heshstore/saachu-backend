@@ -44,6 +44,8 @@ export function normalizePlatform(input: string): Platform {
  *   "09876543210"      → "+919876543210"
  */
 export function normalizePhone(raw: string, defaultCountryCode = '91'): string {
+  if ((raw || '').trim().toLowerCase() === 'unknown') return 'unknown';
+
   const digits = (raw || '').replace(/\D/g, '');
   if (!digits) return '';
 
@@ -62,9 +64,9 @@ export function normalizePhone(raw: string, defaultCountryCode = '91'): string {
   return `+${defaultCountryCode}${digits}`;
 }
 
-/** True if phone is in valid +E.164 format */
+/** True if phone is in valid +E.164 format, or the sentinel "unknown" for Shopify leads without a phone. */
 export function isValidPhone(phone: string): boolean {
-  return /^\+\d{10,15}$/.test(phone);
+  return phone === 'unknown' || /^\+\d{10,15}$/.test(phone);
 }
 
 // ─── Text utilities ──────────────────────────────────────────────────────────

@@ -472,10 +472,6 @@ export class LeadService implements OnModuleInit {
   }): Promise<{ ok: boolean; leadId?: number; error?: string }> {
     console.log('SHOPIFY PAYLOAD:', JSON.stringify(payload));
 
-    if (!payload.phone) {
-      throw new BadRequestException('Phone number is required');
-    }
-
     const externalId = generateShopifyExternalId(payload);
 
     const name = payload.name
@@ -498,7 +494,7 @@ export class LeadService implements OnModuleInit {
     const action = payload.action || payload.lead_type || '';
     const dto = {
       name,
-      phone: payload.phone,
+      phone: payload.phone || 'unknown',
       source: LeadSource.SHOPIFY,
       product_interest: payload.product ?? undefined,
       requirement_note: payload.message ? toSentenceCase(payload.message) : undefined,
