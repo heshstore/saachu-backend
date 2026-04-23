@@ -469,7 +469,9 @@ export class LeadService implements OnModuleInit {
     source?: string; action?: string; name?: string; phone?: string;
     message?: string; product?: string; product_url?: string;
     page_url?: string; lead_type?: string; priority?: string; timestamp?: string;
-  }): Promise<{ ok: boolean; leadId?: number }> {
+  }): Promise<{ ok: boolean; leadId?: number; error?: string }> {
+    console.log('SHOPIFY PAYLOAD:', JSON.stringify(payload));
+
     if (!payload.phone) {
       throw new BadRequestException('Phone number is required');
     }
@@ -511,14 +513,13 @@ export class LeadService implements OnModuleInit {
       raw_payload: payload,
     } as CreateLeadDto;
 
-    // Re-throw validation errors (bad phone etc.) so the HTTP layer returns a proper 400.
-    // On unique constraint violation (concurrent duplicate), return the existing lead.
-    // All other unexpected errors are swallowed to keep the Shopify theme JS happy.
     try {
       const { lead } = await this.create(dto, { id: null, role: 'Admin' });
+      console.log('LEAD CREATED:', { id: lead.id, phone: lead.phone, source: lead.source });
       this.logger.log(`Shopify lead id=${lead.id} external_id=${externalId}`);
       return { ok: true, leadId: lead.id };
     } catch (e: any) {
+      console.error('SHOPIFY ERROR:', e?.message, e?.stack);
       if (e instanceof BadRequestException) throw e;
       // Unique index violation — concurrent duplicate submission
       if (e?.code === '23505' || e?.message?.includes('unique') || e?.message?.includes('duplicate')) {
@@ -526,7 +527,7 @@ export class LeadService implements OnModuleInit {
         if (existing) return { ok: true, leadId: existing.id };
       }
       this.logger.error(`createFromShopifyClick failed: ${e?.message}`, e?.stack);
-      return { ok: false };
+      return { ok: false, error: e?.message };
     }
   }
 

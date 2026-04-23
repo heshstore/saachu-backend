@@ -30,6 +30,7 @@
     "migrate:whatsapp-alerts": "node scripts/migrate-whatsapp-alerts.js",
     "migrate:leads-location": "node scripts/migrate-leads-location.js",
     "migrate:leads-tracking": "node scripts/migrate-leads-tracking.js",
+    "migrate:leads-prod": "node scripts/migrate-leads-prod.js",
     "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {

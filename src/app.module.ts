@@ -48,10 +48,21 @@ const useDatabaseSsl =
     // Only active when the build/ folder exists (i.e. production deploy).
     ServeStaticModule.forRoot({
       rootPath: join(__dirname, '..', '..', 'frontend', 'build'),
-      exclude: ['/auth/*', '/users/*', '/customers/*', '/items/*',
-                '/quotations/*', '/orders/*', '/invoices/*', '/crm/*',
-                '/leads/*', '/whatsapp/*', '/notifications/*', '/rbac/*',
-                '/shopify/*'],
+      exclude: [
+        '/auth',
+        '/users',
+        '/customers',
+        '/items',
+        '/quotations',
+        '/orders',
+        '/invoices',
+        '/crm',
+        '/leads',
+        '/whatsapp',
+        '/notifications',
+        '/rbac',
+        '/shopify',
+      ],
     }),
 
     // Global default: 200 req/min per IP. Specific routes override via @Throttle().

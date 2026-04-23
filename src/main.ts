@@ -63,16 +63,17 @@ async function bootstrap() {
         ? corsRaw.split(',').map((s) => s.trim()).filter(Boolean)
         : corsRaw || false;
 
-        app.enableCors({
-          origin: [
-            "https://heshstore.in",
-            "https://www.heshstore.in",
-            "http://localhost:3000"
-          ],
-          methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-          allowedHeaders: ['Content-Type', 'Authorization'],
-          credentials: true,
-        });
+  app.enableCors({
+    origin: [
+      'http://localhost:3000',
+      'http://localhost:4000',
+      'https://heshstore.in',
+      'https://www.heshstore.in',
+    ],
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    allowedHeaders: 'Content-Type, Authorization',
+    credentials: true,
+  });
 
   const preferred = parseInt(String(process.env.PORT || 4000), 10);
   const port = await findFreePort(preferred);
