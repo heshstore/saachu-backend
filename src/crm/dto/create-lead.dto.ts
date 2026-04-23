@@ -51,10 +51,6 @@ export class CreateLeadDto {
 
   @IsOptional()
   @IsString()
-  requirement_note?: string;
-
-  @IsOptional()
-  @IsString()
   utm_source?: string;
 
   @IsOptional()

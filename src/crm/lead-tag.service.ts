@@ -42,7 +42,7 @@ export class LeadTagService {
             ||
             CASE
               WHEN (
-                COALESCE(l.requirement_note, '') || ' ' ||
+                COALESCE(l.notes, '') || ' ' ||
                 COALESCE(l.notes, '') || ' ' ||
                 COALESCE(l.product_interest, '')
               ) ~* '\\y(bulk|wholesale|container|tonnes?|tons?|\\d{3,}\\s*(kg|pcs|units?|boxes?|cartons?))\\y'
@@ -84,7 +84,7 @@ export class LeadTagService {
             ||
             CASE
               WHEN (
-                COALESCE(l.requirement_note, '') || ' ' ||
+                COALESCE(l.notes, '') || ' ' ||
                 COALESCE(l.notes, '') || ' ' ||
                 COALESCE(l.product_interest, '')
               ) ~* '\\y(bulk|wholesale|container|tonnes?|tons?|\\d{3,}\\s*(kg|pcs|units?|boxes?|cartons?))\\y'

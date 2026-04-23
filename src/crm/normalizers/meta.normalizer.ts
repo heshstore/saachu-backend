@@ -28,7 +28,7 @@ export function normalizeMetaLead(graphData: MetaGraphResponse, leadgenId: strin
 
   const phone = normalizePhone(get('phone_number', 'phone', 'mobile'));
 
-  // Concatenate custom question answers into product_interest / requirement_note
+  // Concatenate custom question answers into product_interest / notes
   const customAnswers = fields
     .filter((f) => !STANDARD_FIELDS.has(f.name) && f.values?.[0])
     .map((f) => `${f.name.replace(/_/g, ' ')}: ${f.values[0]}`)
@@ -38,7 +38,7 @@ export function normalizeMetaLead(graphData: MetaGraphResponse, leadgenId: strin
     || customAnswers
     || undefined;
 
-  const requirementNote = toSentenceCase(
+  const notes = toSentenceCase(
     get('message', 'requirement', 'notes') || customAnswers,
   ) || undefined;
 
@@ -49,7 +49,7 @@ export function normalizeMetaLead(graphData: MetaGraphResponse, leadgenId: strin
     city:             get('city', 'location') || undefined,
     source:           LeadSource.META,
     product_interest: productInterest,
-    requirement_note: requirementNote,
+    notes,
     lead_source_label: 'meta_lead_form',
     channel:          'FORM',
     utm_source:       'meta',

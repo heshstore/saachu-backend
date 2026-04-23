@@ -34,12 +34,17 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 
 const WORKFLOW_BYPASS_ROLES = ['Admin', 'COO'];
 
-/** Deterministic idempotency key for Shopify leads.
- *  Uses bare 10-digit phone for the hash so format changes don't invalidate existing keys. */
+/** Idempotency key for Shopify leads.
+ *  Known phone → deterministic hash (deduplicates repeat clicks from same customer).
+ *  Unknown phone → unique key per click (every anonymous WhatsApp click is a separate lead). */
 function generateShopifyExternalId(payload: {
   phone?: string; action?: string; lead_type?: string; product?: string;
 }): string {
-  const phone = normalizePhone(payload.phone || '').replace(/\D/g, '').slice(-10);
+  const rawPhone = (payload.phone || '').trim();
+  if (!rawPhone || rawPhone.toLowerCase() === 'unknown') {
+    return `shopify_anon_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+  }
+  const phone   = normalizePhone(rawPhone).replace(/\D/g, '').slice(-10);
   const type    = (payload.action || payload.lead_type || 'enquiry').toLowerCase().replace(/\s+/g, '_');
   const product = (payload.product || '').toLowerCase().replace(/\s+/g, '_').slice(0, 40);
   const raw     = `shopify_${type}_${phone}_${product}`;
@@ -117,8 +122,8 @@ export class LeadService implements OnModuleInit {
       ...dto,
       name: sentenceCaseWords(dto.name),
       phone,
-      notes: dto.notes ? toSentenceCase(dto.notes) : undefined,
-      product_interest: dto.product_interest ? sentenceCaseWords(dto.product_interest) : undefined,
+      notes: dto.notes != null && dto.notes !== '' ? toSentenceCase(dto.notes) : undefined,
+      product_interest: dto.product_interest != null && dto.product_interest !== '' ? sentenceCaseWords(dto.product_interest) : undefined,
       assigned_to: assignedTo,
       created_by: user?.id,
       duplicate_flag: dupCount > 0,
@@ -467,50 +472,38 @@ export class LeadService implements OnModuleInit {
    *  Routes through the standard create() so dedup, assignment, and follow-up all apply. */
   async createFromShopifyClick(payload: {
     source?: string; action?: string; name?: string; phone?: string;
-    message?: string; product?: string; product_url?: string;
+    email?: string; city?: string; country?: string;
+    message?: string; product?: string; product_title?: string; product_url?: string;
     page_url?: string; lead_type?: string; priority?: string; timestamp?: string;
   }): Promise<{ ok: boolean; leadId?: number; error?: string }> {
-    console.log('SHOPIFY PAYLOAD:', JSON.stringify(payload));
+    console.log('📥 SERVICE PAYLOAD:', JSON.stringify(payload));
 
     const externalId = generateShopifyExternalId(payload);
 
-    const name = payload.name
-      ? payload.name
-      : `Shopify Lead - ${payload.product || 'Enquiry'}`;
+    const leadData: CreateLeadDto = {
+      name:              payload.name             || 'Unknown',
+      phone:             payload.phone            || 'unknown',
+      email:             payload.email            || undefined,
+      city:              payload.city             || undefined,
+      country:           payload.country          || undefined,
+      product_interest:  payload.product || payload.product_title || undefined,
+      notes:             `${payload.message || 'WhatsApp Click'} | ${payload.page_url || ''}`,
+      source:            LeadSource.SHOPIFY,
+      lead_source_label: `SHOPIFY – ${payload.action || 'CLICK'}`,
+      landing_page:      payload.page_url || '',
+      external_id:       externalId,
+      raw_payload:       payload,
+    };
 
-    const notes = [
-      payload.message     ? `Message: ${payload.message}`         : null,
-      payload.action      ? `Action: ${payload.action}`           : null,
-      payload.lead_type   ? `Type: ${payload.lead_type}`          : null,
-      payload.product_url ? `Product URL: ${payload.product_url}` : null,
-      payload.page_url    ? `Page: ${payload.page_url}`           : null,
-      payload.timestamp   ? `Clicked at: ${payload.timestamp}`    : null,
-    ].filter(Boolean).join('\n');
-
-    const priority = (['LOW', 'MEDIUM', 'HIGH'].includes((payload.priority ?? '').toUpperCase())
-      ? payload.priority!.toUpperCase()
-      : 'MEDIUM') as LeadPriority;
-
-    const action = payload.action || payload.lead_type || '';
-    const dto = {
-      name,
-      phone: payload.phone || 'unknown',
-      source: LeadSource.SHOPIFY,
-      product_interest: payload.product ?? undefined,
-      requirement_note: payload.message ? toSentenceCase(payload.message) : undefined,
-      lead_priority: priority,
-      utm_source: action || 'shopify',
-      utm_campaign: payload.product ?? undefined,
-      lead_source_label: (action || 'shopify').slice(0, 50),
-      channel: action.toLowerCase().includes('whatsapp') ? 'WHATSAPP' : 'FORM',
-      landing_page: payload.page_url ?? undefined,
-      notes: notes || undefined,
-      external_id: externalId,
-      raw_payload: payload,
-    } as CreateLeadDto;
+    console.log('✅ FINAL CLEAN LEAD:', {
+      product: leadData.product_interest,
+      notes:   leadData.notes,
+      source:  leadData.lead_source_label,
+      page:    leadData.landing_page,
+    });
 
     try {
-      const { lead } = await this.create(dto, { id: null, role: 'Admin' });
+      const { lead } = await this.create(leadData, { id: null, role: 'Admin' });
       console.log('LEAD CREATED:', { id: lead.id, phone: lead.phone, source: lead.source });
       this.logger.log(`Shopify lead id=${lead.id} external_id=${externalId}`);
       return { ok: true, leadId: lead.id };

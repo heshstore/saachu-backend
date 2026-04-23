@@ -39,11 +39,11 @@ export class Lead {
   @PrimaryGeneratedColumn()
   id: number;
 
-  @Column()
+  @Column({ nullable: true })
   name: string;
 
-  /** Stored in +E.164 format, e.g. +919876543210 */
-  @Column({ length: 20 })
+  /** Stored in +E.164 format or 'unknown' for anonymous Shopify leads */
+  @Column({ length: 20, nullable: true })
   phone: string;
 
   @Column({ nullable: true })
@@ -75,9 +75,6 @@ export class Lead {
 
   @Column({ type: 'text', nullable: true })
   product_interest: string;
-
-  @Column({ type: 'text', nullable: true })
-  requirement_note: string;
 
   @Column({ nullable: true })
   utm_source: string;

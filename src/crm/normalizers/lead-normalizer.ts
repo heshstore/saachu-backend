@@ -91,7 +91,7 @@ export interface StandardizedLead {
   email?: string;
   city?: string;
   product_interest?: string;
-  requirement_note?: string;   // short human-readable need
+  notes?: string;
   source: LeadSource;
   lead_source_label?: string;  // e.g. whatsapp_click, meta_lead_form
   channel?: string;            // WHATSAPP | CALL | FORM
@@ -125,8 +125,8 @@ export function normalizeLeadData(rawInput: any, sourceType: SourceType): Standa
       return {
         ...base,
         source: LeadSource.SHOPIFY,
-        product_interest: rawInput.product || undefined,
-        requirement_note: toSentenceCase(rawInput.message || rawInput.body || '') || undefined,
+        product_interest: rawInput.product || rawInput.product_title || undefined,
+        notes: toSentenceCase(rawInput.message || rawInput.body || '') || undefined,
         lead_source_label: (action || 'shopify').slice(0, 50),
         channel: action.toLowerCase().includes('whatsapp') ? 'WHATSAPP' : 'FORM',
         utm_source: action || 'shopify',
@@ -141,8 +141,8 @@ export function normalizeLeadData(rawInput: any, sourceType: SourceType): Standa
       return {
         ...base,
         source: LeadSource.META,
-        product_interest: rawInput.product_interest || undefined,
-        requirement_note: toSentenceCase(rawInput.message || rawInput.product_interest || '') || undefined,
+        product_interest: rawInput.product || rawInput.product_title || rawInput.product_interest || undefined,
+        notes: toSentenceCase(rawInput.message || rawInput.product_interest || '') || undefined,
         lead_source_label: 'meta_lead_form',
         channel: 'FORM',
         utm_source: 'meta',
@@ -156,7 +156,7 @@ export function normalizeLeadData(rawInput: any, sourceType: SourceType): Standa
       return {
         ...base,
         source: LeadSource.WHATSAPP,
-        requirement_note: toSentenceCase(rawInput.body || '') || undefined,
+        notes: toSentenceCase(rawInput.body || '') || undefined,
         lead_source_label: 'inbound_message',
         channel: 'WHATSAPP',
         utm_source: 'whatsapp',
@@ -168,8 +168,8 @@ export function normalizeLeadData(rawInput: any, sourceType: SourceType): Standa
       return {
         ...base,
         source: LeadSource.INDIAMART,
-        product_interest: rawInput.QUERY_PRODUCT_NAME || rawInput.SUBJECT || undefined,
-        requirement_note: toSentenceCase(rawInput.QUERY_MESSAGE || '') || undefined,
+        product_interest: rawInput.product || rawInput.product_title || rawInput.QUERY_PRODUCT_NAME || rawInput.SUBJECT || undefined,
+        notes: toSentenceCase(rawInput.QUERY_MESSAGE || '') || undefined,
         lead_source_label: 'indiamart_query',
         channel: 'FORM',
         utm_source: 'indiamart',
@@ -201,7 +201,7 @@ export function formatLeadDisplay(lead: {
   phone: string;
   city?: string;
   product_interest?: string;
-  requirement_note?: string;
+  notes?: string;
   source: string;
   lead_source_label?: string;
 }): LeadDisplayFormat {
@@ -214,7 +214,7 @@ export function formatLeadDisplay(lead: {
     phoneLink: `tel:${lead.phone}`,
     location:  `📍 ${lead.city || 'Unknown'}`,
     product:   `📦 ${lead.product_interest || '-'}`,
-    note:      `🧾 ${lead.requirement_note || '-'}`,
+    note:      `🧾 ${lead.notes || '-'}`,
     context:   `🌐 ${platform} – ${label}`,
     platform,
   };

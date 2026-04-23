@@ -12,6 +12,7 @@ export class ShopifyLeadDto {
   @IsOptional() @IsString() phone?: string;
   @IsOptional() @IsString() message?: string;
   @IsOptional() @IsString() product?: string;
+  @IsOptional() @IsString() product_title?: string;
   @IsOptional() @IsString() product_url?: string;
   @IsOptional() @IsString() page_url?: string;
   @IsOptional() @IsString() lead_type?: string;
@@ -36,7 +37,7 @@ export class ShopifyApiController {
   @HttpCode(200)
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async createShopifyLead(@Body() body: ShopifyLeadDto) {
-    console.log('SHOPIFY API HIT', JSON.stringify(body));
+    console.log('📥 INCOMING BODY:', JSON.stringify(body));
     this.logger.log(`Shopify lead received: ${JSON.stringify(body)}`);
     const result = await this.leadService.createFromShopifyClick(body);
     return { success: result.ok, leadId: result.leadId, error: result.error ?? undefined };
