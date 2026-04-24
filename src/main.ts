@@ -67,6 +67,36 @@ async function ensurePromotionTable(): Promise<void> {
   }
 }
 
+async function ensureAnalyticsTable(): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return;
+  const ssl = /neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(url)
+    ? { rejectUnauthorized: false }
+    : undefined;
+  const client = new Client({ connectionString: url, ssl });
+  await client.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS analytics_events (
+        id         SERIAL PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        event      TEXT NOT NULL,
+        product    TEXT,
+        page_url   TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_analytics_session ON analytics_events(session_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_analytics_event   ON analytics_events(event)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_analytics_product ON analytics_events(product)`);
+    console.log('📊 ANALYTICS TABLE READY');
+  } catch (err: any) {
+    logger.error('Analytics migration failed (non-fatal):', err?.message);
+  } finally {
+    await client.end();
+  }
+}
+
 async function bootstrap() {
   console.log('DB CONNECTED TO:', process.env.DATABASE_URL?.replace(/:\/\/[^@]+@/, '://***@') ?? '(not set)');
 
@@ -76,6 +106,8 @@ async function bootstrap() {
   } catch (err: any) {
     logger.error('Promotion migration failed (non-fatal):', err?.message);
   }
+
+  await ensureAnalyticsTable();
 
   const app = await NestFactory.create(AppModule, { rawBody: true });
   console.log('🚀 PROMOTION ROUTE READY');
