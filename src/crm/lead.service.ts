@@ -481,13 +481,13 @@ export class LeadService implements OnModuleInit {
     const externalId = generateShopifyExternalId(payload);
 
     const leadData: CreateLeadDto = {
-      name:              payload.name             || 'Unknown',
-      phone:             payload.phone            || 'unknown',
-      email:             payload.email            || undefined,
-      city:              payload.city             || undefined,
-      country:           payload.country          || undefined,
-      product_interest:  payload.product || payload.product_title || undefined,
-      notes:             `${payload.message || 'WhatsApp Click'} | ${payload.page_url || ''}`,
+      name:              payload.name    || 'Unknown',
+      phone:             payload.phone   || 'unknown',
+      email:             payload.email   || undefined,
+      city:              payload.city    || undefined,
+      country:           payload.country || undefined,
+      product_interest:  payload.product || payload.product_title || payload.page_url || 'General Inquiry',
+      notes:             payload.message ? payload.message : `Lead from ${payload.page_url || ''}`,
       source:            LeadSource.SHOPIFY,
       lead_source_label: `SHOPIFY – ${payload.action || 'CLICK'}`,
       landing_page:      payload.page_url || '',
@@ -495,11 +495,11 @@ export class LeadService implements OnModuleInit {
       raw_payload:       payload,
     };
 
-    console.log('✅ FINAL CLEAN LEAD:', {
+    console.log('📧 EMAIL:', leadData.email);
+    console.log('🚨 FINAL SANITY CHECK:', {
+      phone:   leadData.phone,
+      email:   leadData.email,
       product: leadData.product_interest,
-      notes:   leadData.notes,
-      source:  leadData.lead_source_label,
-      page:    leadData.landing_page,
     });
 
     try {

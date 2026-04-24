@@ -1,3 +1,52 @@
-2026/04/23-15:12:31.879 b919ee Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/04/23-15:12:31.880 b919ee Recovering log #376
-2026/04/23-15:12:31.937 b919ee Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000376.log 
+2026/04/24-15:14:29.437 c8ef72 Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/04/24-15:14:29.441 c8ef72 Recovering log #568
+2026/04/24-15:14:29.473 c8ef72 Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000568.log 
+2026/04/24-18:47:18.539 c8ef75 Level-0 table #578: started
+2026/04/24-18:47:18.595 c8ef75 Level-0 table #578: 1492785 bytes OK
+2026/04/24-18:47:18.601 c8ef75 Delete type=0 #568
+2026/04/24-18:47:18.616 c8ef75 Compacting 1@1 + 6@2 files
+2026/04/24-18:47:18.752 c8ef75 Generated table #579@1: 85127 keys, 2235161 bytes
+2026/04/24-18:47:18.860 c8ef75 Generated table #580@1: 30064 keys, 2224828 bytes
+2026/04/24-18:47:18.993 c8ef75 Generated table #581@1: 65244 keys, 2233713 bytes
+2026/04/24-18:47:19.074 c8ef75 Generated table #582@1: 27950 keys, 2180662 bytes
+2026/04/24-18:47:19.126 c8ef75 Generated table #583@1: 37099 keys, 2208706 bytes
+2026/04/24-18:47:19.142 c8ef75 Generated table #584@1: 13504 keys, 967826 bytes
+2026/04/24-18:47:19.142 c8ef75 Compacted 1@1 + 6@2 files => 12050896 bytes
+2026/04/24-18:47:19.144 c8ef75 compacted to: files[ 0 0 6 0 0 0 0 ]
+2026/04/24-18:47:19.144 c8ef75 Delete type=2 #571
+2026/04/24-18:47:19.145 c8ef75 Delete type=2 #570
+2026/04/24-18:47:19.145 c8ef75 Delete type=2 #572
+2026/04/24-18:47:19.145 c8ef75 Delete type=2 #573
+2026/04/24-18:47:19.146 c8ef75 Delete type=2 #574
+2026/04/24-18:47:19.146 c8ef75 Delete type=2 #575
+2026/04/24-18:47:19.146 c8ef75 Delete type=2 #578
+2026/04/24-18:51:25.134 c8ef75 Level-0 table #586: started
+2026/04/24-18:51:25.201 c8ef75 Level-0 table #586: 1007621 bytes OK
+2026/04/24-18:51:25.209 c8ef75 Delete type=0 #577
+2026/04/24-18:51:25.218 c8ef87 Compacting 1@1 + 6@2 files
+2026/04/24-18:51:25.473 c8ef87 Generated table #587@1: 81280 keys, 2229270 bytes
+2026/04/24-18:51:25.717 c8ef87 Generated table #588@1: 46211 keys, 2242372 bytes
+2026/04/24-18:51:25.953 c8ef87 Generated table #589@1: 60672 keys, 2225694 bytes
+2026/04/24-18:51:26.119 c8ef87 Generated table #590@1: 36696 keys, 2196438 bytes
+2026/04/24-18:51:26.298 c8ef87 Generated table #591@1: 26304 keys, 2186859 bytes
+2026/04/24-18:51:26.394 c8ef87 Generated table #592@1: 26588 keys, 1476781 bytes
+2026/04/24-18:51:26.395 c8ef87 Compacted 1@1 + 6@2 files => 12557414 bytes
+2026/04/24-18:51:26.397 c8ef87 compacted to: files[ 0 0 6 0 0 0 0 ]
+2026/04/24-18:51:26.604 c8ef75 Level-0 table #594: started
+2026/04/24-18:51:26.654 c8ef75 Level-0 table #594: 1109576 bytes OK
+2026/04/24-18:51:26.657 c8ef75 Delete type=2 #586
+2026/04/24-18:51:26.657 c8ef75 Delete type=0 #585
+2026/04/24-18:51:27.905 c8ef75 Compacting 1@1 + 2@2 files
+2026/04/24-18:51:28.045 c8ef75 Generated table #595@1: 95237 keys, 2247999 bytes
+2026/04/24-18:51:28.174 c8ef75 Generated table #596@1: 23581 keys, 1733908 bytes
+2026/04/24-18:51:28.177 c8ef75 Compacted 1@1 + 2@2 files => 3981907 bytes
+2026/04/24-18:51:28.180 c8ef75 compacted to: files[ 0 0 6 0 0 0 0 ]
+2026/04/24-18:51:28.181 c8ef75 Delete type=2 #588
+2026/04/24-18:51:28.182 c8ef75 Delete type=2 #587
+2026/04/24-18:51:28.182 c8ef75 Delete type=2 #579
+2026/04/24-18:51:28.182 c8ef75 Delete type=2 #584
+2026/04/24-18:51:28.183 c8ef75 Delete type=2 #581
+2026/04/24-18:51:28.183 c8ef75 Delete type=2 #594
+2026/04/24-18:51:28.183 c8ef75 Delete type=2 #580
+2026/04/24-18:51:28.183 c8ef75 Delete type=2 #582
+2026/04/24-18:51:28.183 c8ef75 Delete type=2 #583

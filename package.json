@@ -31,6 +31,7 @@
     "migrate:leads-location": "node scripts/migrate-leads-location.js",
     "migrate:leads-tracking": "node scripts/migrate-leads-tracking.js",
     "migrate:leads-prod": "node scripts/migrate-leads-prod.js",
+    "migrate:promotion": "node scripts/migrate-promotion-contacts.js",
     "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {

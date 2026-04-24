@@ -1,3 +1,22 @@
-2026/04/23-15:05:03.095 b8d828 Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
-2026/04/23-15:05:03.097 b8d828 Recovering log #376
-2026/04/23-15:05:03.133 b8d828 Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000376.log 
+2026/04/24-15:08:38.360 c8bc8d Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/04/24-15:08:38.363 c8bc8d Recovering log #559
+2026/04/24-15:08:38.463 c8bc8d Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth/session-saachu-main/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000559.log 
+2026/04/24-15:08:52.832 c8bc90 Level-0 table #569: started
+2026/04/24-15:08:52.930 c8bc90 Level-0 table #569: 1457082 bytes OK
+2026/04/24-15:08:52.933 c8bc90 Delete type=0 #559
+2026/04/24-15:08:53.245 c8bc8d Compacting 1@1 + 6@2 files
+2026/04/24-15:08:53.537 c8bc8d Generated table #570@1: 85217 keys, 2255837 bytes
+2026/04/24-15:08:53.842 c8bc8d Generated table #571@1: 32285 keys, 2205535 bytes
+2026/04/24-15:08:54.099 c8bc8d Generated table #572@1: 61730 keys, 2230219 bytes
+2026/04/24-15:08:54.187 c8bc8d Generated table #573@1: 24791 keys, 2173677 bytes
+2026/04/24-15:08:54.599 c8bc8d Generated table #574@1: 39260 keys, 2213455 bytes
+2026/04/24-15:08:54.640 c8bc8d Generated table #575@1: 10522 keys, 779766 bytes
+2026/04/24-15:08:54.640 c8bc8d Compacted 1@1 + 6@2 files => 11858489 bytes
+2026/04/24-15:08:54.643 c8bc8d compacted to: files[ 0 0 6 0 0 0 0 ]
+2026/04/24-15:08:54.643 c8bc8d Delete type=2 #565
+2026/04/24-15:08:54.644 c8bc8d Delete type=2 #564
+2026/04/24-15:08:54.645 c8bc8d Delete type=2 #566
+2026/04/24-15:08:54.645 c8bc8d Delete type=2 #563
+2026/04/24-15:08:54.645 c8bc8d Delete type=2 #562
+2026/04/24-15:08:54.645 c8bc8d Delete type=2 #561
+2026/04/24-15:08:54.645 c8bc8d Delete type=2 #569

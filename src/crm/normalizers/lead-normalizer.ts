@@ -43,25 +43,19 @@ export function normalizePlatform(input: string): Platform {
  *   "+1 5551234567"    → "+15551234567"
  *   "09876543210"      → "+919876543210"
  */
-export function normalizePhone(raw: string, defaultCountryCode = '91'): string {
-  if ((raw || '').trim().toLowerCase() === 'unknown') return 'unknown';
+export function normalizePhone(raw: string): string {
+  const input = (raw || '').trim();
+  if (!input || input.toLowerCase() === 'unknown') return 'unknown';
 
-  const digits = (raw || '').replace(/\D/g, '');
-  if (!digits) return '';
+  const digits = input.replace(/\D/g, '');
 
-  // Already has country code embedded (more than 10 digits)
-  if (digits.length > 10) return '+' + digits;
+  if (digits.length === 10) return '+91' + digits;
 
-  // 10-digit bare number (Indian standard)
-  if (digits.length === 10) return `+${defaultCountryCode}${digits}`;
+  if (digits.length === 12 && digits.startsWith('91')) return '+' + digits;
 
-  // 11-digit with leading 0 (e.g. 09876543210)
-  if (digits.length === 11 && digits.startsWith('0')) {
-    return `+${defaultCountryCode}${digits.slice(1)}`;
-  }
+  if (input.startsWith('+')) return input;
 
-  // Best-effort for anything shorter — prepend default country code
-  return `+${defaultCountryCode}${digits}`;
+  return 'unknown';
 }
 
 /** True if phone is in valid +E.164 format, or the sentinel "unknown" for Shopify leads without a phone. */

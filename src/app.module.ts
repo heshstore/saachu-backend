@@ -33,6 +33,7 @@ import { RbacModule } from './rbac/rbac.module';
 import { CrmModule } from './crm/crm.module';
 import { WhatsappModule } from './whatsapp/whatsapp.module';
 import { NotificationsModule } from './notifications/notification.module';
+import { PromotionModule } from './promotion/promotion.module';
 
 const databaseUrl = process.env.DATABASE_URL || '';
 const useDatabaseSsl =
@@ -62,6 +63,7 @@ const useDatabaseSsl =
         '/notifications',
         '/rbac',
         '/shopify',
+        '/promotion-capture',
       ],
     }),
 
@@ -94,6 +96,7 @@ const useDatabaseSsl =
     CrmModule,
     WhatsappModule,
     NotificationsModule,
+    PromotionModule,
   ],
   providers: [
     AppService,
