@@ -32,6 +32,7 @@ import { CrmModule } from './crm/crm.module';
 import { WhatsappModule } from './whatsapp/whatsapp.module';
 import { NotificationsModule } from './notifications/notification.module';
 import { PromotionModule } from './promotion/promotion.module';
+import { AnalyticsModule } from './analytics/analytics.module';
 
 const databaseUrl = process.env.DATABASE_URL || '';
 const useDatabaseSsl =
@@ -73,6 +74,7 @@ const useDatabaseSsl =
     WhatsappModule,
     NotificationsModule,
     PromotionModule,
+    AnalyticsModule,
   ],
   providers: [
     AppService,
