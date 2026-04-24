@@ -1,6 +1,7 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 import * as net from 'net';
+import { Client } from 'pg';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe, Logger } from '@nestjs/common';
@@ -32,10 +33,52 @@ async function findFreePort(preferred: number): Promise<number> {
   );
 }
 
+async function ensurePromotionTable(): Promise<void> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return;
+  const ssl = /neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(url)
+    ? { rejectUnauthorized: false }
+    : undefined;
+  const client = new Client({ connectionString: url, ssl });
+  await client.connect();
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS promotion_contacts (
+        id               SERIAL PRIMARY KEY,
+        whatsapp_number  VARCHAR(15),
+        email            VARCHAR(255),
+        source           TEXT NOT NULL,
+        page_url         TEXT NOT NULL,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_promo_whatsapp
+        ON promotion_contacts(whatsapp_number)
+        WHERE whatsapp_number IS NOT NULL AND whatsapp_number <> ''
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_promo_email
+        ON promotion_contacts(email)
+        WHERE email IS NOT NULL AND email <> ''
+    `);
+  } finally {
+    await client.end();
+  }
+}
+
 async function bootstrap() {
   console.log('DB CONNECTED TO:', process.env.DATABASE_URL?.replace(/:\/\/[^@]+@/, '://***@') ?? '(not set)');
 
+  try {
+    await ensurePromotionTable();
+    console.log('✅ PROMOTION TABLE READY');
+  } catch (err: any) {
+    logger.error('Promotion migration failed (non-fatal):', err?.message);
+  }
+
   const app = await NestFactory.create(AppModule, { rawBody: true });
+  console.log('🚀 PROMOTION ROUTE READY');
 
   // Triggers onModuleDestroy() on every module (WhatsApp client, DB) when the process exits
   app.enableShutdownHooks();

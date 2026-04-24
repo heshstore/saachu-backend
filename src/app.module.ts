@@ -7,8 +7,6 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
-import { ServeStaticModule } from '@nestjs/serve-static';
-import { join } from 'path';
 
 import { OrdersModule } from './orders/orders.module';
 import { InvoiceModule } from './invoice/invoice.module';
@@ -44,28 +42,6 @@ const useDatabaseSsl =
   controllers: [AppController],
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
-
-    // Serve the React production build; fallback to index.html for SPA routes.
-    // Only active when the build/ folder exists (i.e. production deploy).
-    ServeStaticModule.forRoot({
-      rootPath: join(__dirname, '..', '..', 'frontend', 'build'),
-      exclude: [
-        '/auth',
-        '/users',
-        '/customers',
-        '/items',
-        '/quotations',
-        '/orders',
-        '/invoices',
-        '/crm',
-        '/leads',
-        '/whatsapp',
-        '/notifications',
-        '/rbac',
-        '/shopify',
-        '/promotion-capture',
-      ],
-    }),
 
     // Global default: 200 req/min per IP. Specific routes override via @Throttle().
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 200 }]),
