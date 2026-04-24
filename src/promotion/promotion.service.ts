@@ -35,6 +35,10 @@ export class PromotionService {
 
   async create(dto: PromotionCaptureDto): Promise<{ success: boolean; message: string; data: PromotionContact }> {
     await this.ensureTable();
+
+    dto.whatsapp_number = dto.whatsapp_number || undefined;
+    dto.email = dto.email || undefined;
+
     console.log('Promotion Capture:', dto);
 
     if (!dto.whatsapp_number && !dto.email) {

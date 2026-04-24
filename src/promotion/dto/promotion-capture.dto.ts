@@ -5,13 +5,16 @@ export class PromotionCaptureDto {
   @IsString()
   whatsapp_number?: string;
 
-  @IsOptional()
+  @ValidateIf(o => o.email !== '' && o.email !== undefined && o.email !== null)
   @IsEmail()
+  @IsOptional()
   email?: string;
 
+  @IsOptional()
   @IsString()
-  source: string;
+  source?: string;
 
+  @IsOptional()
   @IsString()
-  page_url: string;
+  page_url?: string;
 }
