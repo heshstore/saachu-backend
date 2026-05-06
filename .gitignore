@@ -48,6 +48,8 @@ lerna-debug.log*
 
 # WhatsApp session data (large Chromium profile — never commit)
 .wwebjs_auth/
+# Puppeteer-downloaded Chrome binary — project-local cache for Render
+.puppeteer-cache/
 
 # Runtime data
 pids

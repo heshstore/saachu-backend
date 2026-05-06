@@ -679,6 +679,15 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     for (const p of CANDIDATES) {
       if (p && fs.existsSync(p)) return p;
     }
+    // Last resort: ask puppeteer where it downloaded Chrome (respects PUPPETEER_CACHE_DIR)
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const ep: string = require('puppeteer').executablePath();
+      if (ep && fs.existsSync(ep)) return ep;
+      this.logger.warn(`[WhatsApp] puppeteer.executablePath() returned "${ep}" but file not found`);
+    } catch (e: any) {
+      this.logger.warn(`[WhatsApp] Could not resolve puppeteer executablePath: ${e?.message}`);
+    }
     return undefined;
   }
 
