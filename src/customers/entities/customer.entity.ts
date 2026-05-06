@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Unique } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Unique, Index } from 'typeorm';
 
 @Entity()
 @Unique('UQ_customer_name_tag_city', ['companyName', 'tag', 'city'])
@@ -12,6 +12,7 @@ export class Customer {
   @Column()
   contactName: string;
 
+  @Index('idx_customer_mobile1_unique', { unique: true })
   @Column({ unique: true })
   mobile1: string;
 

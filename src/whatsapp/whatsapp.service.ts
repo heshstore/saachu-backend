@@ -6,18 +6,27 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
 import { execSync } from 'child_process';
+import * as crypto from 'crypto';
 import { ReplaySubject, Observable, interval, merge } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { WhatsAppSession } from './entities/whatsapp-session.entity';
 import { WhatsAppMessage } from './entities/whatsapp-message.entity';
 import { appConfig } from '../config/config';
 import { LeadSource } from '../crm/entities/lead.entity';
+import { normalizePhone } from '../crm/normalizers/lead-normalizer';
 
 // Fallback: a known-good recent WA Web version.
 // Updated whenever the dynamic fetch below succeeds — change this string only if the
 // GitHub API is consistently unreachable AND the current fallback starts causing failures.
 const WA_VERSION_FALLBACK =
   'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1021303286-alpha.html';
+
+function isValidWhatsAppPhone(raw: string): boolean {
+  if (!/^\d{8,15}$/.test(raw)) return false;
+  if (raw.startsWith('0')) return false;
+  if (/^(\d)\1+$/.test(raw)) return false;  // all same digit (e.g. 9999999999)
+  return true;
+}
 
 @Injectable()
 export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
@@ -231,8 +240,23 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       this.qrSubject.next(JSON.stringify({ type: 'ready', phone }));
       this.logger.log(`[WhatsApp] Connected as +${phone}`);
       this.startHealthMonitor();
-      // Resolve any open WHATSAPP_DOWN alerts now that the session is healthy
       this.eventEmitter.emit('whatsapp.up');
+
+      // Attach Puppeteer page-level listeners to detect navigation events that
+      // temporarily destroy the JS execution context inside the WA Web frame.
+      // These are informational — the 'disconnected' handler with reason='NAVIGATION'
+      // already handles the session-level recovery; these add finer visibility.
+      const page = this.client?.pupPage;
+      if (page && !page.isClosed()) {
+        page.on('framenavigated', (frame: any) => {
+          if (frame === page.mainFrame()) {
+            this.logger.log('[WhatsApp] Main frame navigated — transient execution context loss expected');
+          }
+        });
+        page.on('load', () => {
+          this.logger.log('[WhatsApp] Page load event — WA Web context reattaching');
+        });
+      }
     });
 
     this.client.on('disconnected', async (reason: string) => {
@@ -330,10 +354,15 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       throw new Error('WhatsApp not connected. Please scan the QR code first.');
     }
     try {
-      await this.client.sendMessage(chatId, body);
+      await this.safeEval(() => this.client.sendMessage(chatId, body));
     } catch (err: any) {
       const msg = err?.message ?? '';
-      if (msg.includes('detached Frame') || msg.includes('Session closed') || msg.includes('Target closed')) {
+      const isContextError =
+        msg.includes('Execution context was destroyed') ||
+        msg.includes('detached Frame') ||
+        msg.includes('Session closed') ||
+        msg.includes('Target closed');
+      if (isContextError) {
         this._ready = false;
         // Use setTimeout (not setImmediate) so the guard check in reinitClient() sees
         // any in-flight _initializing = true that was set by a concurrent reinit path
@@ -351,6 +380,16 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         sent_by: sentBy ?? null,
       }),
     );
+
+    // Only stamp last_salesman_reply_at when a real user sent the message.
+    // Automated system messages (sentBy = null) must NOT clear the WAITING badge —
+    // the customer is still waiting for a human response.
+    if (sentBy) {
+      await this.messageRepo.manager.query(
+        `UPDATE leads SET last_salesman_reply_at = NOW() WHERE whatsapp_chat_id = $1`,
+        [this.normalizeChatId(chatId)],
+      ).catch(() => { /* non-critical */ });
+    }
   }
 
   async sendToPhone(phone: string, body: string, sentBy?: number): Promise<void> {
@@ -489,11 +528,14 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('[WhatsApp] cleanSessionLocks: destroyed existing client');
     }
 
-    // Catch any orphaned Puppeteer/wwebjs processes that survived client.destroy().
-    // These are scoped to the library paths, NOT the user's browser binary.
+    // Kill orphaned Puppeteer/Chromium processes that survived client.destroy().
+    // Chromium must be dead before its SingletonLock can be safely removed.
     const killCmds = [
       "pkill -f 'puppeteer' || true",
       "pkill -f 'whatsapp-web.js' || true",
+      // Kill Chromium instances launched by Puppeteer (identified by --remote-debugging-port
+      // flag that Puppeteer always passes — avoids hitting the user's own browser).
+      "pkill -f 'remote-debugging-port' || true",
     ];
     for (const cmd of killCmds) {
       try { execSync(cmd, { stdio: 'ignore' }); } catch { /* no match — safe */ }
@@ -601,6 +643,29 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     await this.initClient();
   }
 
+  /**
+   * Executes `fn` and retries once if Puppeteer throws an execution-context error.
+   * These errors occur when WhatsApp Web internally navigates (e.g. QR → chat view),
+   * destroying the current JS context mid-evaluate. A single 500 ms delay + retry
+   * is sufficient because the new context is ready almost immediately after load.
+   */
+  private async safeEval<T>(fn: () => Promise<T>, retriesLeft = 1): Promise<T> {
+    try {
+      return await fn();
+    } catch (e: any) {
+      const msg: string = e?.message ?? '';
+      const isContextError =
+        msg.includes('Execution context was destroyed') ||
+        msg.includes('Cannot find context with specified id');
+      if (isContextError && retriesLeft > 0) {
+        this.logger.warn(`[WhatsApp] safeEval: execution context destroyed — retrying once in 500 ms`);
+        await new Promise<void>((r) => setTimeout(r, 500));
+        return this.safeEval(fn, retriesLeft - 1);
+      }
+      throw e;
+    }
+  }
+
   private findChrome(): string | undefined {
     const CANDIDATES = [
       process.env.PUPPETEER_EXECUTABLE_PATH,
@@ -622,6 +687,19 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     return chatId.replace(/:\d+(?=@)/, '');
   }
 
+  private extractPhone(body: string): string | undefined {
+    const matches = body.match(/\+?\d[\d\s-]{8,20}\d/g);
+    if (!matches || matches.length === 0) return undefined;
+    const validNumbers = matches
+      .map(raw => raw.replace(/\D/g, ''))
+      .filter(isValidWhatsAppPhone);
+    if (validNumbers.length === 0) return undefined;
+    validNumbers.sort((a, b) => b.length - a.length);
+    const selected = validNumbers[0];
+    const normalized = normalizePhone(selected);
+    return normalized && normalized !== 'unknown' ? normalized : undefined;
+  }
+
   private detectSource(body: string): LeadSource {
     const u = (body || '').toUpperCase();
     if (u.includes('META_LEAD') || u.includes('FB_LEAD') || u.includes('FACEBOOK')) return LeadSource.META;
@@ -636,8 +714,9 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
     const chatId = this.normalizeChatId(from);
     const body: string = msg.body ?? '';
-    const phone = chatId.split('@')[0].replace(/\D/g, '').slice(-10);
-    this.logger.log(`Inbound chatId=${chatId} phone=${phone} body="${body.slice(0, 50)}"`);
+    const raw = chatId.split('@')[0];
+    const phone = isValidWhatsAppPhone(raw) ? normalizePhone(raw) : undefined;
+    this.logger.log(`Inbound chatId=${chatId} phone=${phone ?? 'unknown'} body="${body.slice(0, 50)}"`);
 
     const savedMsg = await this.messageRepo.save(
       this.messageRepo.create({
@@ -649,23 +728,84 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       }),
     );
 
+    // Production command intercept: DONE/ISSUE/HOLD <jobId>
+    // Handled by ProductionCommandService via event — return early to skip lead flow.
+    if (phone && /^(DONE|ISSUE|HOLD) \d+$/i.test(body.trim())) {
+      this.eventEmitter.emit('whatsapp.command', { phone, body: body.trim().toUpperCase() });
+      return;
+    }
+
     const existing = await this.messageRepo.manager.query(
-      `SELECT id, assigned_to FROM leads WHERE whatsapp_chat_id = $1 AND is_active = true LIMIT 1`,
+      `SELECT id, assigned_to, phone, name FROM leads WHERE whatsapp_chat_id = $1 AND is_active = true LIMIT 1`,
       [chatId],
     );
     if (existing.length > 0) {
       savedMsg.lead_id = existing[0].id;
       await this.messageRepo.save(savedMsg);
+
+      if (!existing[0].phone && body) {
+        const extracted = this.extractPhone(body);
+        if (extracted) {
+          await this.messageRepo.manager.query(
+            `UPDATE leads SET phone = $1 WHERE id = $2`,
+            [extracted, existing[0].id],
+          );
+          this.logger.log({ action: 'PHONE_EXTRACTED_FROM_CHAT', leadId: existing[0].id, phone: extracted });
+        }
+      }
+
+      const trimmedBody = body.trim();
+
+      // Stamp last_customer_reply_at so crons don't need repeated subqueries
+      await this.messageRepo.manager.query(
+        `UPDATE leads SET last_customer_reply_at = NOW() WHERE id = $1`,
+        [existing[0].id],
+      );
+
+      // STOP opt-out: customer asked to stop receiving messages — add automation_off tag
+      if (/^(stop|unsubscribe|opt.?out)$/i.test(trimmedBody)) {
+        await this.messageRepo.manager.query(
+          `UPDATE leads
+           SET tags = COALESCE(tags, '[]'::jsonb) || '["automation_off"]'::jsonb
+           WHERE id = $1
+             AND NOT ('automation_off' = ANY(COALESCE(tags, '[]'::jsonb)))`,
+          [existing[0].id],
+        );
+        this.logger.log({ action: 'OPT_OUT', leadId: existing[0].id });
+        return;
+      }
+
+      // Notify the assigned salesman whenever a customer sends a message
+      if (existing[0].assigned_to && trimmedBody) {
+        this.eventEmitter.emit('whatsapp.customer_replied', {
+          leadId:      existing[0].id,
+          leadName:    existing[0].name ?? 'Customer',
+          assignedTo:  existing[0].assigned_to,
+          messageBody: trimmedBody.slice(0, 200),
+        });
+      }
+
       return;
     }
 
     const contact = await msg.getContact().catch(() => null);
-    const name = contact?.pushname || contact?.name || phone;
+    const name = contact?.pushname || contact?.name || raw || 'Unknown';
     const source = this.detectSource(body);
+    const hash = crypto.createHash('sha256').update(`${from}-${body || ''}`).digest('hex');
+    const hasSerializedId = !!msg.id?._serialized;
+    const messageId: string = msg.id?._serialized || hash;
+    this.logger.log({ action: 'WHATSAPP_EVENT_RECEIVED', phone, messageId, hasSerializedId });
+    console.log('EMITTING LEAD EVENT:', { phone, messageId });
 
     this.eventEmitter.emit('lead.incoming', {
-      phone, name, source,
+      phone,
+      name,
+      source: LeadSource.WHATSAPP,
       whatsapp_chat_id: chatId,
+      messageId,
+      hasSerializedId,
+      product_interest: body || '',
+      context: 'WHATSAPP – Inbound',
       raw_payload: { chatId, body, timestamp: msg.timestamp },
     });
   }

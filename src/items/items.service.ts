@@ -73,6 +73,10 @@ export class ItemsService {
     return this.repo.findOneBy({ id });
   }
 
+  findBySku(sku: string) {
+    return this.repo.findOneBy({ sku });
+  }
+
   async update(id: number, data: any) {
     // Optional: could sanitize here too if numeric fields might appear,
     // but main use is POST, not PUT/PATCH in current pattern.

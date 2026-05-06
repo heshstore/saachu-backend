@@ -1,4 +1,4 @@
-import { Controller, Get, Patch, Param, ParseIntPipe, Request } from '@nestjs/common';
+import { Controller, Get, Patch, Param, Request } from '@nestjs/common';
 import { NotificationService } from './notification.service';
 
 @Controller('notifications')
@@ -7,16 +7,26 @@ export class NotificationController {
 
   @Get()
   getForUser(@Request() req) {
-    return this.notifService.getForUser(req.user.id);
+    return this.notifService.getUserNotifications(req.user.id);
   }
 
-  @Patch(':id/read')
-  markRead(@Param('id', ParseIntPipe) id: number, @Request() req) {
-    return this.notifService.markRead(id, req.user.id);
+  @Get('count')
+  getUnreadCount(@Request() req) {
+    return this.notifService.getUnreadCount(req.user.id).then(count => ({ count }));
+  }
+
+  @Get('next-action')
+  getNextBestAction(@Request() req) {
+    return this.notifService.getNextBestAction(req.user.id);
   }
 
   @Patch('read-all')
   markAllRead(@Request() req) {
     return this.notifService.markAllRead(req.user.id);
+  }
+
+  @Patch(':id/read')
+  markRead(@Param('id') id: string, @Request() req) {
+    return this.notifService.markAsRead(id, req.user.id);
   }
 }

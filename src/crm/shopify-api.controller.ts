@@ -10,6 +10,10 @@ export class ShopifyLeadDto {
   @IsOptional() @IsString() action?: string;
   @IsOptional() @IsString() name?: string;
   @IsOptional() @IsString() phone?: string;
+  @IsOptional() @IsString() email?: string;
+  @IsOptional() @IsString() city?: string;
+  @IsOptional() @IsString() country?: string;
+  @IsOptional() @IsString() context?: string;
   @IsOptional() @IsString() message?: string;
   @IsOptional() @IsString() product?: string;
   @IsOptional() @IsString() product_title?: string;
@@ -18,6 +22,7 @@ export class ShopifyLeadDto {
   @IsOptional() @IsString() lead_type?: string;
   @IsOptional() @IsString() priority?: string;
   @IsOptional() @IsString() timestamp?: string;
+  @IsOptional() @IsString() tag?: string;
 }
 
 @Controller('api/leads')

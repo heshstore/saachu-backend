@@ -38,13 +38,23 @@ export class AppController {
     const [{ current_database }] = await this.ds.query('SELECT current_database()');
 
     const rows = await this.ds.query(`
-      SELECT id, phone, product_interest, channel, created_at
+      SELECT
+        id,
+        name,
+        phone,
+        city,
+        product_interest,
+        notes,
+        raw_payload->>'last_message'    AS last_message,
+        raw_payload->>'last_message_at' AS last_message_at,
+        raw_payload,
+        channel,
+        source,
+        created_at
       FROM leads
       ORDER BY created_at DESC
       LIMIT 10
     `);
-
-    console.log('DEBUG LEADS:', rows);
 
     return { current_database, count: rows.length, leads: rows };
   }

@@ -1,6 +1,18 @@
-import { Controller, Post, Body, Get, Patch, Param, Put, Res, Req, Query } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Get,
+  Patch,
+  Put,
+  Param,
+  Query,
+  Req,
+  Res,
+} from '@nestjs/common';
 import { Request, Response } from 'express';
 import { OrdersService } from './orders.service';
+import { PaymentService } from './payment.service';
 import { PdfService } from '../shared/pdf.service';
 import { MailService } from '../shared/mail.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
@@ -10,6 +22,7 @@ import { SendEmailDto } from '../shared/dto/send-email.dto';
 export class OrdersController {
   constructor(
     private readonly ordersService: OrdersService,
+    private readonly paymentService: PaymentService,
     private readonly pdfService: PdfService,
     private readonly mailService: MailService,
   ) {}
@@ -32,28 +45,10 @@ export class OrdersController {
     return this.ordersService.findPending();
   }
 
-  @Post(':id/payment')
-  @RequirePermission('payment.create')
-  addPayment(@Param('id') id: string, @Body() body: any) {
-    return this.ordersService.addPayment(+id, body);
-  }
-
-  @Patch(':id/approve')
-  @RequirePermission('order.approve')
-  approve(@Param('id') id: string, @Body() body: any) {
-    return this.ordersService.approveOrder(+id, body);
-  }
-
-  @Patch(':id/cancel')
-  @RequirePermission('order.cancel')
-  cancel(@Param('id') id: string) {
-    return this.ordersService.cancel(+id);
-  }
-
-  @Get(':id/split-invoice')
-  @RequirePermission('invoice.create')
-  getSplitInvoice(@Param('id') id: string) {
-    return this.ordersService.splitInvoice(Number(id));
+  @Get(':id')
+  @RequirePermission('order.view')
+  findOne(@Param('id') id: string) {
+    return this.ordersService.findOne(Number(id));
   }
 
   @Put(':id')
@@ -62,10 +57,16 @@ export class OrdersController {
     return this.ordersService.updateOrder(Number(id), body);
   }
 
-  @Patch(':id/convert-to-order')
-  @RequirePermission('quotation.convert')
-  convertToOrder(@Param('id') id: string) {
-    return this.ordersService.convertToOrder(Number(id));
+  @Patch(':id/approve')
+  @RequirePermission('order.approve')
+  approve(@Param('id') id: string, @Body() body: any, @Req() req: Request) {
+    return this.ordersService.approveOrder(Number(id), body?.remarks, (req as any).user);
+  }
+
+  @Patch(':id/reject')
+  @RequirePermission('order.reject')
+  reject(@Param('id') id: string, @Body() body: any, @Req() req: Request) {
+    return this.ordersService.rejectOrder(Number(id), body?.remarks, (req as any).user);
   }
 
   @Patch(':id/send-for-approval')
@@ -74,20 +75,40 @@ export class OrdersController {
     return this.ordersService.sendForApproval(Number(id));
   }
 
-  @Patch(':id/reject')
-  @RequirePermission('order.reject')
-  rejectOrder(@Param('id') id: string, @Body() body: any) {
-    return this.ordersService.rejectOrder(
-      Number(id),
-      body?.reason || '',
-      null
-    );
-  }
-
   @Patch(':id/send-to-production')
   @RequirePermission('production.update')
   sendToProduction(@Param('id') id: string) {
     return this.ordersService.sendToProduction(Number(id));
+  }
+
+  @Patch(':id/complete')
+  @RequirePermission('order.approve')
+  complete(@Param('id') id: string) {
+    return this.ordersService.complete(Number(id));
+  }
+
+  @Patch(':id/cancel')
+  @RequirePermission('order.cancel')
+  cancel(@Param('id') id: string) {
+    return this.ordersService.cancel(Number(id));
+  }
+
+  @Post(':id/payment')
+  @RequirePermission('payment.create')
+  addPayment(@Param('id') id: string, @Body() body: any, @Req() req: Request) {
+    const { amount, payment_mode, mode, payment_reference, reference_no, notes } = body;
+    return this.paymentService.addPayment(Number(id), {
+      amount:             Number(amount),
+      payment_mode:       (payment_mode ?? mode ?? 'cash').toLowerCase(),
+      payment_reference:  payment_reference ?? reference_no ?? undefined,
+      notes:              notes ?? undefined,
+    }, (req as any).user?.id);
+  }
+
+  @Get(':id/split-invoice')
+  @RequirePermission('invoice.create')
+  splitInvoice(@Param('id') id: string) {
+    return this.ordersService.splitInvoice(Number(id));
   }
 
   @Get(':id/pdf')
@@ -111,10 +132,9 @@ export class OrdersController {
     const filePath = await this.pdfService.generateAndSave('order', Number(id), data);
     await this.mailService.sendDocument(
       body.to,
-      `Order ${(data as any).order_number || id}`,
+      `Order ${(data as any).order_no || id}`,
       filePath,
     );
     return { ok: true };
   }
-
 }

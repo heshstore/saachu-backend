@@ -5,7 +5,6 @@ import { Repository } from "typeorm";
 import { City } from "./cities.entity";
 import { CitiesService } from "./cities.service";
 
-@Public()
 @Controller("cities")
 export class CitiesController {
   constructor(
@@ -14,18 +13,27 @@ export class CitiesController {
     private citiesService: CitiesService
   ) {}
 
+  @Public()
   @Get()
   getAll() {
     return this.cityRepo.find();
   }
 
   @Post()
-  async create(@Body() body) {
-    // Removed countryISO field if it was being saved here (not present in this method).
-    const city = this.cityRepo.create(body);
+  async create(
+    @Body() body: { name: string; state: string; country: string; countryISO?: string; countryCode?: string },
+  ) {
+    const city = this.cityRepo.create({
+      name:        body.name,
+      state:       body.state,
+      country:     body.country,
+      countryISO:  body.countryISO,
+      countryCode: body.countryCode,
+    });
     return this.cityRepo.save(city);
   }
 
+  @Public()
   @Get("search")
   search(@Query("q") q: string) {
     return this.citiesService.search(q);

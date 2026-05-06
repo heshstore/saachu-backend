@@ -1,14 +1,37 @@
-import { IsEnum, IsNotEmpty, IsOptional, IsString, IsDateString, IsNumber } from 'class-validator';
+import {
+  IsBoolean, IsEnum, IsOptional, IsString,
+  IsDateString, IsNumber, Matches,
+} from 'class-validator';
+import { Transform } from 'class-transformer';
 import { LeadSource, LeadStatus, LeadPriority } from '../entities/lead.entity';
 
-export class CreateLeadDto {
-  @IsNotEmpty()
-  @IsString()
-  name: string;
+/** Maps legacy/frontend source strings to canonical LeadSource enum values. */
+export const LEGACY_SOURCE_MAP: Record<string, string> = {
+  MANUAL:      'DIRECT',
+  DIRECT_CALL: 'DIRECT',
+  META_ADS:    'META',
+  GOOGLE_ADS:  'GOOGLE',
+};
 
-  @IsNotEmpty()
+/**
+ * Flexible DTO used by webhook controllers and internal service calls.
+ * All fields are optional — validation is relaxed so Shopify/WhatsApp
+ * leads with missing name or phone are still accepted.
+ *
+ * For human-entered leads from the frontend, use CreateManualLeadDto.
+ */
+export class CreateLeadDto {
+  @IsOptional()
   @IsString()
-  phone: string;
+  name?: string;
+
+  /** Phone optional for anonymous Shopify leads. When provided, must be 10 digits or E.164. */
+  @IsOptional()
+  @IsString()
+  @Matches(/^(\+\d{10,15}|\d{10})$/, {
+    message: 'Phone must be a 10-digit number or E.164 format (e.g. +919876543210)',
+  })
+  phone?: string;
 
   @IsOptional()
   @IsString()
@@ -26,6 +49,8 @@ export class CreateLeadDto {
   @IsString()
   country?: string;
 
+  /** Accepts legacy values (MANUAL, META_ADS, etc.) and normalises them to canonical enum. */
+  @Transform(({ value }) => LEGACY_SOURCE_MAP[value] ?? value)
   @IsEnum(LeadSource)
   source: LeadSource;
 
@@ -48,6 +73,15 @@ export class CreateLeadDto {
   @IsOptional()
   @IsString()
   product_interest?: string;
+
+  /** Human-readable context string, e.g. "META – Lead Form". */
+  @IsOptional()
+  @IsString()
+  context?: string;
+
+  @IsOptional()
+  @IsString()
+  requirement_note?: string;
 
   @IsOptional()
   @IsString()
@@ -79,4 +113,20 @@ export class CreateLeadDto {
 
   @IsOptional()
   raw_payload?: Record<string, any>;
+
+  @IsOptional()
+  @IsBoolean()
+  is_phone_valid?: boolean;
+
+  @IsOptional()
+  @IsString()
+  whatsapp_chat_id?: string;
+
+  @IsOptional()
+  @IsString()
+  whatsappMessageId?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  hasSerializedId?: boolean;
 }

@@ -2,10 +2,46 @@
   "permissions": {
     "allow": [
       "Bash(npx tsc *)",
-      "Read(//Users/saachi/Projects/Saachu-app/**)"
+      "Read(//Users/saachi/Projects/Saachu-app/**)",
+      "Bash(curl -s http://localhost:4000/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:4000/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:4000/api/leads/shopify)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" https://backend-service-xady.onrender.com/api/leads/shopify)",
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(timeout 40 cat /private/tmp/claude-501/-Users-saachi-Projects-Saachu-app-backend/9467b0df-5f1f-49ab-b199-87b883f7d6e5/tasks/brb6g81qp.output)",
+      "Bash(curl -s -X POST https://backend-service-xady.onrender.com/api/leads/shopify -H 'Content-Type: application/json' -d '{\"name\":\"QA Test User\",\"phone\":\"9876543210\",\"email\":\"qa@test.com\",\"city\":\"Mumbai\",\"product\":\"QA Test Product\",\"message\":\"Hi, I am interested in QA Test Product\",\"action\":\"whatsapp_click\",\"context\":\"SHOPIFY_WHATSAPP_CLICK\",\"page_url\":\"https://heshstore.in/products/qa-test\",\"source\":\"shopify\"}')",
+      "Bash(curl -s -X POST https://backend-service-xady.onrender.com/analytics/track -H 'Content-Type: application/json' -d '{\"session_id\":\"qa_sess_001\",\"event\":\"whatsapp_click\",\"product\":\"QA Test Product\",\"page_url\":\"https://heshstore.in/products/qa-test\",\"device\":\"desktop\",\"source\":\"shopify\",\"timestamp\":\"2026-04-25T10:00:00.000Z\"}')",
+      "Bash(curl -s --max-time 10 -o /dev/null -w '%{http_code}' https://backend-service-xady.onrender.com/analytics/track -X POST -H 'Content-Type: application/json' -d '{\"session_id\":\"ping\",\"event\":\"ping\",\"page_url\":\"x\"}')",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(curl -s --max-time 15 -o /tmp/qa_wake.json -w '%{http_code}' -X POST https://backend-service-xady.onrender.com/analytics/track -H 'Content-Type: application/json' -d '{\"session_id\":\"qa_wake\",\"event\":\"page_view\",\"page_url\":\"https://heshstore.in\"}')",
+      "Read(//tmp/**)",
+      "Bash(curl -v --max-time 20 -X POST https://backend-service-xady.onrender.com/analytics/track -H 'Content-Type: application/json' -d '{\"session_id\":\"qa_wake\",\"event\":\"page_view\",\"page_url\":\"https://heshstore.in\"}')",
+      "Bash(curl -s --max-time 90 -X POST https://backend-service-xady.onrender.com/analytics/track -H 'Content-Type: application/json' -d '{\"session_id\":\"qa_wake\",\"event\":\"page_view\",\"page_url\":\"https://heshstore.in\"}' -w '\\\\nHTTP_STATUS:%{http_code}')",
+      "Bash(node -e ' *)",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(json.dumps\\({k:d[k] for k in ['dependencies','devDependencies'] if k in d}, indent=2\\)\\)\")",
+      "Bash(node scripts/migrate-orders-payments.js)",
+      "Bash(grep -n \"localhost\\\\|API_URL\\\\|\\\\${API\" /Users/saachi/Projects/Saachu-app/frontend/src/Dashboard.js)",
+      "Bash(grep -n '\"${API_URL}' /Users/saachi/Projects/Saachu-app/frontend/src/ItemList.js /Users/saachi/Projects/Saachu-app/frontend/src/ShopifyItems.js /Users/saachi/Projects/Saachu-app/frontend/src/CustomerList.js)",
+      "Bash(grep -rn \"localhost:3000\\\\|\\\\\".*\\\\${API_URL\" /Users/saachi/Projects/Saachu-app/frontend/src --include=\"*.js\")",
+      "Bash(awk -F: '$2 >= 878 && $2 <= 980')",
+      "Bash(node scripts/migrate-crm-lead-columns.js)",
+      "Bash(grep -n \"phone=\\\\${phone}\\\\|{ leadId.*phone,\" /Users/saachi/Projects/Saachu-app/backend/src/crm/lead.service.ts)",
+      "Bash(grep -v \"Warning\\\\|SECURITY\\\\|next major\\\\|prepare\\\\|sslmode\\\\|uselibpq\\\\|postgresql\\\\|Use \\\\`node\")",
+      "Bash(grep -v \"Warning\\\\|SECURITY\\\\|next major\\\\|prepare\\\\|sslmode\\\\|uselibpq\\\\|postgresql\\\\|Use \\\\`node\\\\|dotenv\")",
+      "Bash(grep -v \"Warning\\\\|SECURITY\\\\|next major\\\\|prepare for\\\\|sslmode\\\\|uselibpq\\\\|postgresql\\\\|Use \\\\`node\\\\|\\\\\\(Use\")",
+      "Bash(node scripts/migrate-production-rbac.js)",
+      "Bash(sed -n '89,105p' /Users/saachi/Projects/Saachu-app/backend/src/orders/production.service.ts)",
+      "Bash(sed -n '460,475p' /Users/saachi/Projects/Saachu-app/backend/src/orders/production.service.ts)",
+      "Bash(node -e \"const p=require\\('./package.json'\\); const deps={...p.dependencies,...p.devDependencies}; ['@nestjs/websockets','socket.io','socket.io-client'].forEach\\(d => console.log\\(d, deps[d] || 'MISSING'\\)\\)\")",
+      "Bash(grep -v \"Warning:\\\\|SECURITY\\\\|In the next\\\\|To prepare\\\\|If you want\\\\|See https\\\\|Use \\\\`node\")",
+      "Bash(npx react-scripts *)",
+      "Bash(sed -n '406,435p' /Users/saachi/Projects/Saachu-app/frontend/src/Dashboard.js)",
+      "Bash(sed -n '432,460p' /Users/saachi/Projects/Saachu-app/backend/src/orders/orders.service.ts)",
+      "Bash(grep -rn \"orders/:id\\\\|/orders/\\\\${\" /Users/saachi/Projects/Saachu-app/frontend/src/)"
     ],
     "additionalDirectories": [
-      "/Users/saachi/Projects/Saachu-app/assets"
+      "/Users/saachi/Projects/Saachu-app/assets",
+      "/tmp"
     ]
   }
 }

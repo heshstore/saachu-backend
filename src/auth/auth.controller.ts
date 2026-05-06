@@ -17,6 +17,11 @@ export class AuthController {
   @HttpCode(200)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   login(@Body() body: { mobile?: string; email?: string; password?: string }) {
+    console.log('[Auth:Controller] Login request received:', {
+      mobile: body.mobile ?? null,
+      email: body.email ?? null,
+      passwordProvided: !!body.password,
+    });
     const loginId = (body.mobile ?? body.email ?? '').trim();
     return this.authService.login(loginId, (body.password ?? '').trim());
   }

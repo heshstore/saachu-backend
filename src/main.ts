@@ -10,6 +10,39 @@ import { AllExceptionsFilter } from './common/all-exceptions.filter';
 
 const logger = new Logger('Bootstrap');
 
+/**
+ * Strip params that raw pg.Client doesn't support (channel_binding) — Neon
+ * includes this in their pooler URLs but it requires SCRAM-SHA-256-PLUS which
+ * pg.Client doesn't implement, causing "password authentication failed" even
+ * when the password is correct.  TypeORM's Pool handles it differently and
+ * succeeds, so only the raw Client calls need this fix.
+ */
+function getSafeDbUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    u.searchParams.delete('channel_binding');
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+function buildSslOption(url: string): { rejectUnauthorized: boolean } | undefined {
+  return /neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(url)
+    ? { rejectUnauthorized: false }
+    : undefined;
+}
+
+/** Creates and connects a one-shot pg Client using DATABASE_URL (channel_binding stripped). */
+async function createMigrationClient(): Promise<Client> {
+  const raw = process.env.DATABASE_URL ?? '';
+  if (!raw) throw new Error('DATABASE_URL is not set');
+  const url = getSafeDbUrl(raw);
+  const client = new Client({ connectionString: url, ssl: buildSslOption(url) });
+  await client.connect();
+  return client;
+}
+
 /** Returns true if nothing is listening on `port`. */
 function isPortFree(port: number): Promise<boolean> {
   return new Promise((resolve) => {
@@ -34,14 +67,10 @@ async function findFreePort(preferred: number): Promise<number> {
 }
 
 async function ensurePromotionTable(): Promise<void> {
-  const url = process.env.DATABASE_URL;
-  if (!url) return;
-  const ssl = /neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(url)
-    ? { rejectUnauthorized: false }
-    : undefined;
-  const client = new Client({ connectionString: url, ssl });
-  await client.connect();
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
   try {
+    client = await createMigrationClient();
     await client.query(`
       CREATE TABLE IF NOT EXISTS promotion_contacts (
         id               SERIAL PRIMARY KEY,
@@ -63,19 +92,15 @@ async function ensurePromotionTable(): Promise<void> {
         WHERE email IS NOT NULL AND email <> ''
     `);
   } finally {
-    await client.end();
+    await client?.end().catch(() => {});
   }
 }
 
 async function ensureAnalyticsTable(): Promise<void> {
-  const url = process.env.DATABASE_URL;
-  if (!url) return;
-  const ssl = /neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(url)
-    ? { rejectUnauthorized: false }
-    : undefined;
-  const client = new Client({ connectionString: url, ssl });
-  await client.connect();
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
   try {
+    client = await createMigrationClient();
     await client.query(`
       CREATE TABLE IF NOT EXISTS analytics_events (
         id         SERIAL PRIMARY KEY,
@@ -90,15 +115,82 @@ async function ensureAnalyticsTable(): Promise<void> {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_analytics_event   ON analytics_events(event)`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_analytics_product ON analytics_events(product)`);
     console.log('📊 ANALYTICS TABLE READY');
-  } catch (err: any) {
-    logger.error('Analytics migration failed (non-fatal):', err?.message);
   } finally {
-    await client.end();
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureLogsTable(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS logs (
+        id         SERIAL PRIMARY KEY,
+        action     TEXT NOT NULL,
+        payload    JSONB,
+        user_id    INT,
+        ip         TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_logs_action     ON logs(action)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at DESC)`);
+    console.log('📋 LOGS TABLE READY');
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+/**
+ * Validates that required columns exist before accepting traffic.
+ * Exits with a clear error only if the schema is provably out of date.
+ * Connection failures are non-fatal — the app may still work if TypeORM connects.
+ */
+async function validateSchema(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    const required: Array<{ table: string; column: string; migration: string }> = [
+      { table: 'leads', column: 'stage', migration: 'npm run migrate:lead-stage' },
+    ];
+
+    const missing: string[] = [];
+    for (const { table, column, migration } of required) {
+      const { rows } = await client.query(
+        `SELECT 1 FROM information_schema.columns
+         WHERE table_name = $1 AND column_name = $2`,
+        [table, column],
+      );
+      if (rows.length === 0) {
+        missing.push(`  ✗ ${table}.${column}  →  run: ${migration}`);
+      }
+    }
+
+    if (missing.length > 0) {
+      logger.error('❌ STARTUP BLOCKED — schema is out of date. Run the missing migrations:\n' + missing.join('\n'));
+      process.exit(1);
+    }
+
+    logger.log('✅ Schema validated');
+  } finally {
+    await client?.end().catch(() => {});
   }
 }
 
 async function bootstrap() {
-  console.log('DB CONNECTED TO:', process.env.DATABASE_URL?.replace(/:\/\/[^@]+@/, '://***@') ?? '(not set)');
+  const dbUrl = process.env.DATABASE_URL ?? '';
+  if (dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1')) {
+    if (process.env.ALLOW_LOCAL_DB !== 'true') {
+      console.error('❌ Local DB is not allowed. Use Neon DB.');
+      process.exit(1);
+    }
+    console.warn('⚠️  ALLOW_LOCAL_DB=true — running with local database.');
+  }
+
+  console.log('DB CONNECTED TO:', dbUrl.replace(/:\/\/[^@]+@/, '://***@') || '(not set)');
 
   try {
     await ensurePromotionTable();
@@ -107,7 +199,23 @@ async function bootstrap() {
     logger.error('Promotion migration failed (non-fatal):', err?.message);
   }
 
-  await ensureAnalyticsTable();
+  try {
+    await ensureAnalyticsTable();
+  } catch (err: any) {
+    logger.error('Analytics migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureLogsTable();
+  } catch (err: any) {
+    logger.error('Logs migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await validateSchema();
+  } catch (err: any) {
+    logger.error('Schema validation failed (non-fatal) — app will start anyway:', err?.message);
+  }
 
   const app = await NestFactory.create(AppModule, { rawBody: true });
   console.log('🚀 PROMOTION ROUTE READY');

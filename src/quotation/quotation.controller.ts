@@ -4,6 +4,7 @@ import {
   Post,
   Put,
   Patch,
+  Delete,
   Body,
   Param,
   Query,
@@ -49,10 +50,34 @@ export class QuotationController {
     return this.quotationService.update(Number(id), body, req.user);
   }
 
+  @Patch(':id/send')
+  @RequirePermission('quotation.edit')
+  send(@Param('id') id: string) {
+    return this.quotationService.send(Number(id));
+  }
+
+  @Patch(':id/approve')
+  @RequirePermission('quotation.edit')
+  approve(@Param('id') id: string) {
+    return this.quotationService.approve(Number(id));
+  }
+
+  @Patch(':id/reject')
+  @RequirePermission('quotation.edit')
+  reject(@Param('id') id: string, @Request() req: any) {
+    return this.quotationService.reject(Number(id), req.user);
+  }
+
   @Patch(':id/cancel')
   @RequirePermission('quotation.cancel')
   cancel(@Param('id') id: string, @Request() req: any) {
     return this.quotationService.cancel(Number(id), req.user);
+  }
+
+  @Delete(':id')
+  @RequirePermission('quotation.delete')
+  remove(@Param('id') id: string, @Request() req: any) {
+    return this.quotationService.softDelete(Number(id), req.user);
   }
 
   @Post(':id/convert-to-order')

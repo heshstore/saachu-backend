@@ -49,11 +49,17 @@ export function normalizePhone(raw: string): string {
 
   const digits = input.replace(/\D/g, '');
 
+  // 10-digit bare number → +91XXXXXXXXXX
   if (digits.length === 10) return '+91' + digits;
 
+  // 11-digit with leading 0 (e.g. 09876543210) → +91XXXXXXXXXX
+  if (digits.length === 11 && digits.startsWith('0')) return '+91' + digits.slice(1);
+
+  // 12-digit with country code 91 → +91XXXXXXXXXX
   if (digits.length === 12 && digits.startsWith('91')) return '+' + digits;
 
-  if (input.startsWith('+')) return input;
+  // 13-digit with leading 0 + country code 91 (e.g. 0919876543210) → +91XXXXXXXXXX
+  if (digits.length === 13 && digits.startsWith('091')) return '+' + digits.slice(1);
 
   return 'unknown';
 }
@@ -61,6 +67,17 @@ export function normalizePhone(raw: string): string {
 /** True if phone is in valid +E.164 format, or the sentinel "unknown" for Shopify leads without a phone. */
 export function isValidPhone(phone: string): boolean {
   return phone === 'unknown' || /^\+\d{10,15}$/.test(phone);
+}
+
+/**
+ * Returns false for obviously fake Shopify phones:
+ * empty/short, all-same-digit (0000000000, 9999999999, etc.).
+ */
+export function isShopifyPhoneReal(raw: string): boolean {
+  const digits = (raw || '').replace(/\D/g, '').slice(-10);
+  if (digits.length < 10) return false;
+  if (/^(\d)\1{9}$/.test(digits)) return false;
+  return true;
 }
 
 // ─── Text utilities ──────────────────────────────────────────────────────────

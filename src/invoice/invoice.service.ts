@@ -23,13 +23,21 @@ export class InvoiceService {
   async createFromOrder(orderId: number, type: 'TALLY' | 'ESTIMATE' = 'TALLY') {
     const order = await this.orderRepository.findOne({
       where: { id: orderId },
-      relations: ['items', 'customer'],
+      relations: ['items'],
     });
 
     if (!order) throw new NotFoundException('Order not found');
 
-    // Credit limit check — scoped to this customer's orders only
-    const customer = order.customer;
+    // Credit limit check — fetch customer directly from customer table
+    let customer: any = null;
+    if (order.customer_id) {
+      const rows = await this.orderRepository.manager.query<any[]>(
+        `SELECT id, "creditLimit", state FROM customer WHERE id = $1 LIMIT 1`,
+        [order.customer_id],
+      );
+      customer = rows[0] ?? null;
+    }
+
     if (customer?.creditLimit && Number(customer.creditLimit) > 0) {
       const outstandingInvoices = await this.invoiceRepository
         .createQueryBuilder('inv')
@@ -55,12 +63,10 @@ export class InvoiceService {
 
     // GST split: CGST+SGST if same state, else IGST
     const total = Number(order.total_amount);
-    const gstRate = Number(order.gst_percentage || 18);
-    const gstAmount = (total * gstRate) / 100;
+    const gstAmount = (total * 18) / 100;
 
-    const customerState = customer?.state || '';
-    const isSameState =
-      customerState.toLowerCase() === appConfig.companyState.toLowerCase();
+    const customerState = (customer?.state || '').toLowerCase();
+    const isSameState = customerState === appConfig.companyState.toLowerCase();
 
     const cgst = isSameState ? gstAmount / 2 : 0;
     const sgst = isSameState ? gstAmount / 2 : 0;
@@ -80,12 +86,7 @@ export class InvoiceService {
       igst,
     });
 
-    const saved = await this.invoiceRepository.save(invoice);
-
-    // Move order to BILLED
-    await this.orderRepository.update(orderId, { status: 'BILLED' });
-
-    return saved;
+    return this.invoiceRepository.save(invoice);
   }
 
   async findAll() {

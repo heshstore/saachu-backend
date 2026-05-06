@@ -1,3 +1,11 @@
+export const DEDUP = {
+  PHONE_WINDOW_MINUTES: 5,
+};
+
+export const IDEMPOTENCY = {
+  KEY_WINDOW_HOURS: 6,
+};
+
 export interface AppConfig {
   companyName: string;
   companyState: string;

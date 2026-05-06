@@ -33,6 +33,9 @@ import { WhatsappModule } from './whatsapp/whatsapp.module';
 import { NotificationsModule } from './notifications/notification.module';
 import { PromotionModule } from './promotion/promotion.module';
 import { AnalyticsModule } from './analytics/analytics.module';
+import { LogsModule } from './logs/logs.module';
+import { DispatchModule }   from './dispatch/dispatch.module';
+import { DashboardModule }  from './dashboard/dashboard.module';
 
 const databaseUrl = process.env.DATABASE_URL || '';
 const useDatabaseSsl =
@@ -54,10 +57,17 @@ const useDatabaseSsl =
       autoLoadEntities: true,
       synchronize: false,
       ssl: useDatabaseSsl ? { rejectUnauthorized: false } : false,
+      // Explicit pool config — pg defaults to max:10 which saturates under pessimistic locks at scale.
+      extra: {
+        max:                    Number(process.env.DB_POOL_MAX)  || 25,
+        min:                    Number(process.env.DB_POOL_MIN)  || 2,
+        idleTimeoutMillis:      30_000,   // release idle connections after 30s
+        connectionTimeoutMillis: 5_000,   // fail fast if pool is exhausted (better than hanging)
+      },
     }),
 
     ScheduleModule.forRoot(),
-    EventEmitterModule.forRoot(),
+    EventEmitterModule.forRoot({ wildcard: false, delimiter: '.', global: true }),
     SharedModule,
     AuthModule,
     RbacModule,
@@ -75,6 +85,9 @@ const useDatabaseSsl =
     NotificationsModule,
     PromotionModule,
     AnalyticsModule,
+    LogsModule,
+    DispatchModule,
+    DashboardModule,
   ],
   providers: [
     AppService,

@@ -35,7 +35,17 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     if (res.headersSent) return;
 
+    const errorCode =
+      status === 400 ? 'VALIDATION_ERROR' :
+      status === 401 ? 'UNAUTHORIZED'     :
+      status === 403 ? 'FORBIDDEN'        :
+      status === 404 ? 'NOT_FOUND'        :
+      status === 409 ? 'CONFLICT'         :
+                       'INTERNAL_ERROR';
+
     res.status(status).json({
+      success: false,
+      errorCode,
       statusCode: status,
       message,
       path: req.url,

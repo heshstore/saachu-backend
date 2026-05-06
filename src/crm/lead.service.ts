@@ -5,13 +5,17 @@ import * as crypto from 'crypto';
 import {
   normalizePhone,
   isValidPhone,
+  isShopifyPhoneReal,
   toSentenceCase,
   sentenceCaseWords,
 } from './normalizers/lead-normalizer';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
-import { Lead, LeadSource, LeadStatus, LeadPriority } from './entities/lead.entity';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Lead, LeadSource, LeadStatus, LeadPriority, LeadStage } from './entities/lead.entity';
+import { LeadContext, contextToLabel } from './enums/lead-context.enum';
+import { LogsService, LogAction } from '../logs/logs.service';
 import { LeadNote, NoteType } from './entities/lead-note.entity';
 import { LeadFollowUp } from './entities/lead-followup.entity';
 import { User } from '../users/entities/user.entity';
@@ -20,6 +24,8 @@ import { UpdateLeadDto } from './dto/update-lead.dto';
 import { LeadAssignmentService } from './lead-assignment.service';
 import { DecisionEngineService, DecisionContext } from './decision-engine.service';
 import { LeadAuditService } from './lead-audit.service';
+import { QuotationService } from '../quotation/quotation.service';
+import { DEDUP } from '../config/config';
 
 // Allowed forward-only status transitions.
 // Admin/COO bypass this check entirely.
@@ -33,6 +39,37 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 };
 
 const WORKFLOW_BYPASS_ROLES = ['Admin', 'COO'];
+
+/**
+ * Deterministic idempotency key for a lead.
+ * Built from the last-10 digits of the phone + product_interest + context, all normalised.
+ * Returns null for anonymous leads (no phone) so every anonymous submission always
+ * creates a new lead instead of being collapsed into a previous one.
+ */
+/** Extracts the first plausible phone number from free-form text and returns it in E.164. */
+function extractPhoneFromText(text: string): string | null {
+  const matches = text.match(/\+?\d[\d\s-]{8,20}\d/g);
+  if (!matches || matches.length === 0) return null;
+  const validNumbers = matches
+    .map(raw => raw.replace(/\D/g, ''))
+    .filter(raw => !raw.startsWith('0') && !/^(\d)\1+$/.test(raw));
+  if (validNumbers.length === 0) return null;
+  validNumbers.sort((a, b) => b.length - a.length);
+  const selected = validNumbers[0];
+  const normalized = normalizePhone(selected);
+  return normalized && normalized !== 'unknown' ? normalized : null;
+}
+
+function generateIdempotencyKey(phone: string | null, dto: Partial<CreateLeadDto>): string | null {
+  if (!phone || phone === 'unknown') return null;
+  const dateHour = new Date().toISOString().slice(0, 13); // "2026-05-02T15"
+  const parts = [
+    phone.replace(/\D/g, '').slice(-10),
+    (dto.product_interest ?? '').toLowerCase().trim(),
+    dateHour,
+  ];
+  return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 32);
+}
 
 /** Idempotency key for Shopify leads.
  *  Known phone → deterministic hash (deduplicates repeat clicks from same customer).
@@ -71,6 +108,9 @@ export class LeadService implements OnModuleInit {
     private assignmentService: LeadAssignmentService,
     private decisionEngine: DecisionEngineService,
     private auditService: LeadAuditService,
+    private logsService: LogsService,
+    private quotationService: QuotationService,
+    private eventEmitter: EventEmitter2,
   ) {}
 
   async onModuleInit() {
@@ -88,6 +128,45 @@ export class LeadService implements OnModuleInit {
         '└─────────────────────────────────────────────────────────────┘',
       );
     }
+
+    // Add is_phone_valid column if it doesn't exist yet (safe — has a default so existing rows are unaffected)
+    try {
+      await this.ds.query(`
+        ALTER TABLE leads
+        ADD COLUMN IF NOT EXISTS is_phone_valid BOOLEAN NOT NULL DEFAULT TRUE
+      `);
+    } catch (e) {
+      this.logger.error('Failed to ensure leads.is_phone_valid column', e);
+    }
+
+    try {
+      await this.ds.query(`
+        ALTER TABLE leads
+        ADD COLUMN IF NOT EXISTS last_customer_reply_at TIMESTAMPTZ
+      `);
+    } catch (e) {
+      this.logger.error('Failed to ensure leads.last_customer_reply_at column', e);
+    }
+
+    try {
+      await this.ds.query(`
+        ALTER TABLE leads
+        ADD COLUMN IF NOT EXISTS last_salesman_reply_at TIMESTAMPTZ
+      `);
+    } catch (e) {
+      this.logger.error('Failed to ensure leads.last_salesman_reply_at column', e);
+    }
+
+  }
+
+  /** Returns the customer id from customer_phones for the given E.164 phone, or null. */
+  private async findCustomerIdByPhone(phone: string | null): Promise<number | null> {
+    if (!phone) return null;
+    const rows = await this.ds.query<{ customer_id: number }[]>(
+      `SELECT customer_id FROM customer_phones WHERE phone = $1 LIMIT 1`,
+      [phone],
+    );
+    return rows.length > 0 ? rows[0].customer_id : null;
   }
 
   // ── Create ──────────────────────────────────────────────────────────────────
@@ -98,14 +177,113 @@ export class LeadService implements OnModuleInit {
     // Coerce legacy 'MANUAL' source values from older clients / DB rows
     if ((dto.source as string) === 'MANUAL') (dto as any).source = LeadSource.DIRECT;
 
-    const phone = normalizePhone(dto.phone);
-    if (!isValidPhone(phone)) {
-      throw new BadRequestException('A valid phone number is required (e.g. 9876543210 or +919876543210).');
+    // Normalize to E.164 (+91XXXXXXXXXX) before any dedup or DB operation.
+    // Anonymous leads (no phone) are allowed — stored as NULL.
+    if (dto.phone) {
+      dto.phone = normalizePhone(dto.phone);
+      if (!dto.phone || dto.phone === 'unknown' || !isValidPhone(dto.phone)) {
+        throw new BadRequestException('A valid phone number is required (e.g. 9876543210 or +919876543210).');
+      }
     }
+    const storedPhone = dto.phone || null;
 
     if (dto.external_id) {
       const existing = await this.findByExternalId(dto.external_id);
       if (existing) return { lead: existing };
+    }
+
+    // ── Idempotency gate: same phone + product_interest + hour within 10 min ──
+    // Catches event storms and double-submissions before the heavier phone dedup.
+    const idempotencyKey = generateIdempotencyKey(storedPhone, dto);
+    if (idempotencyKey) {
+      const idemRows = await this.ds.query<Lead[]>(
+        `SELECT * FROM leads
+         WHERE idempotency_key = $1
+           AND is_active = true
+           AND created_at >= NOW() - INTERVAL '10 minutes'
+         ORDER BY created_at DESC LIMIT 1`,
+        [idempotencyKey],
+      );
+      if (idemRows.length > 0) {
+        this.logger.log(
+          `Idempotency hit key=${idempotencyKey.slice(0, 8)}… → returning lead id=${idemRows[0].id}`,
+        );
+        return { lead: idemRows[0] };
+      }
+    }
+
+    // ── Strict phone dedup: any existing lead for this phone → enrich, not create
+    // Anonymous leads (no phone) always create a new row.
+    if (storedPhone) {
+      const rows = await this.ds.query<Lead[]>(
+        `SELECT * FROM leads
+         WHERE phone = $1
+           AND is_active = true
+         ORDER BY created_at DESC LIMIT 1`,
+        [storedPhone],
+      );
+
+      if (rows.length > 0) {
+        const existing: Lead = rows[0];
+        const patch: Partial<Lead> = {};
+
+        // Append requirement_note; never overwrite prior content.
+        const mergedNote = [existing.requirement_note, dto.requirement_note]
+          .filter(Boolean)
+          .join('\n---\n') || undefined;
+        if (mergedNote && mergedNote !== existing.requirement_note) {
+          patch.requirement_note = mergedNote;
+        }
+
+        // Fill product_interest only when the existing lead has none.
+        if (!existing.product_interest && dto.product_interest) {
+          patch.product_interest = sentenceCaseWords(dto.product_interest);
+        }
+
+        // Accumulate all context labels in contextHistory TEXT[].
+        const mergedHistory = Array.from(new Set([
+          ...(existing.contextHistory || []),
+          ...(dto.context ? [dto.context] : []),
+        ]));
+        if (mergedHistory.length > (existing.contextHistory || []).length) {
+          patch.contextHistory = mergedHistory;
+        }
+
+        // context = latest touch-point only.
+        // context_history = full pipe-separated journey, deduped, newest at end.
+        if (dto.context) {
+          patch.context = dto.context;
+          const historyParts = (existing.context_history || '').split(' | ').map(s => s.trim()).filter(Boolean);
+          if (!historyParts.includes(dto.context)) {
+            patch.context_history = [...historyParts, dto.context].join(' | ');
+          }
+        }
+
+        // Link customer if not already set and a matching customer exists.
+        if (!existing.customer_id) {
+          const linkedCustomerId = await this.findCustomerIdByPhone(storedPhone);
+          if (linkedCustomerId) patch.customer_id = linkedCustomerId;
+        }
+
+        if (Object.keys(patch).length > 0) {
+          await this.leadRepo.update(existing.id, patch);
+        }
+
+        const updated = (await this.leadRepo.findOne({ where: { id: existing.id } })) ?? existing;
+        this.logger.log(
+          `Phone dedup: enriched lead id=${existing.id} phone=${storedPhone}` +
+          (Object.keys(patch).length ? ` — patched: ${Object.keys(patch).join(', ')}` : ' — no changes'),
+        );
+        return { lead: updated };
+      }
+    }
+
+    // Normalize empty-string context to undefined so the DB stores NULL, not ''.
+    if ((dto as any).context === '') (dto as any).context = undefined;
+
+    // Default context for manual (DIRECT) leads when not supplied by the client.
+    if (!dto.context && dto.source === LeadSource.DIRECT) {
+      (dto as any).context = contextToLabel(LeadContext.DIRECT_MANUAL);
     }
 
     let assignedTo = dto.assigned_to;
@@ -116,18 +294,33 @@ export class LeadService implements OnModuleInit {
       }
     }
 
-    const dupCount = await this.leadRepo.count({ where: { phone, is_active: true } });
+    const dupCount = storedPhone
+      ? await this.leadRepo.count({ where: { phone: storedPhone, is_active: true } })
+      : 0;
+
+    // Link to existing customer if phone is already registered.
+    const linkedCustomerId = await this.findCustomerIdByPhone(storedPhone);
 
     const lead = this.leadRepo.create({
       ...dto,
-      name: sentenceCaseWords(dto.name),
-      phone,
+      name: (dto.name && dto.name !== 'Unknown' && dto.name !== 'Unknown Lead')
+        ? sentenceCaseWords(dto.name)
+        : 'Customer',
+      phone: storedPhone as any,
       notes: dto.notes != null && dto.notes !== '' ? toSentenceCase(dto.notes) : undefined,
       product_interest: dto.product_interest != null && dto.product_interest !== '' ? sentenceCaseWords(dto.product_interest) : undefined,
       assigned_to: assignedTo,
       created_by: user?.id,
       duplicate_flag: dupCount > 0,
+      idempotency_key: idempotencyKey ?? undefined,
+      contextHistory: dto.context ? [dto.context] : [],
+      context_history: dto.context ?? undefined,
+      customer_id: linkedCustomerId ?? undefined,
+      whatsappMessageId: dto.whatsappMessageId,
+      hasSerializedId: dto.hasSerializedId ?? false,
     });
+
+    console.log('Saving lead with messageId:', lead.whatsappMessageId);
 
     // WhatsApp fallback: when the channel is down, telecaller must call the customer
     // manually. Escalate priority and surface a clear instruction note so the lead
@@ -147,14 +340,44 @@ export class LeadService implements OnModuleInit {
       );
     }
 
-    const saved = await this.leadRepo.save(lead);
+    let saved: Lead;
+    try {
+      saved = await this.leadRepo.save(lead);
+    } catch (err: any) {
+      // Race condition: two concurrent requests both passed the phone dedup check
+      // and both tried to insert. The partial unique index on phone catches the loser.
+      if (err.code === '23505' && storedPhone) {
+        this.logger.warn(
+          `Race condition on phone=${storedPhone} — unique index caught duplicate, fetching existing lead`,
+        );
+        const rows = await this.ds.query<Lead[]>(
+          `SELECT * FROM leads WHERE phone = $1 AND is_active = true ORDER BY created_at DESC LIMIT 1`,
+          [storedPhone],
+        );
+        if (rows.length > 0) return { lead: rows[0] };
+      }
+      throw err;
+    }
+
     this.logger.log(
-      `Lead created id=${saved.id} phone=${phone} source=${dto.source} assigned_to=${assignedTo ?? 'none'}${dupCount > 0 ? ' [DUPLICATE]' : ''}${this._whatsappDown ? ' [WA_FALLBACK]' : ''}`,
+      `Lead created id=${saved.id} phone=${storedPhone} source=${dto.source} assigned_to=${assignedTo ?? 'none'}${dupCount > 0 ? ' [DUPLICATE]' : ''}${this._whatsappDown ? ' [WA_FALLBACK]' : ''}`,
+    );
+    this.logsService.log(
+      LogAction.LEAD_CREATED,
+      { leadId: saved.id, phone: storedPhone, source: dto.source, assigned_to: assignedTo ?? null, duplicate: dupCount > 0 },
+      user?.id ?? null,
     );
 
-    if (dto.source !== LeadSource.DIRECT) {
-      await this.scheduleFirstFollowUp(saved);
-    }
+    this.eventEmitter.emit('crm.lead.created', {
+      id:               saved.id,
+      name:             saved.name,
+      phone:            saved.phone ?? null,
+      source:           saved.source,
+      assigned_to:      saved.assigned_to ?? null,
+      product_interest: saved.product_interest ?? null,
+    });
+
+    await this.scheduleFirstFollowUp(saved);
 
     return { lead: saved, warning: dupCount > 0 ? 'duplicate_phone' : undefined };
   }
@@ -315,13 +538,26 @@ export class LeadService implements OnModuleInit {
 
       const prevStatus = lead.status;
       Object.assign(lead, dto);
-      const saved = await this.leadRepo.save(lead);
+      let saved = await this.leadRepo.save(lead);
 
       void this.auditService.log(id, user.id, 'STATUS_CHANGED', `${prevStatus} → ${saved.status}`, ip);
 
-      // Auto-schedule follow-up when stage advances
       if (prevStatus !== saved.status) {
+        this.eventEmitter.emit('crm.lead.status_changed', {
+          id:               saved.id,
+          name:             saved.name,
+          phone:            saved.phone ?? null,
+          assigned_to:      saved.assigned_to ?? null,
+          prev_status:      prevStatus,
+          new_status:       saved.status,
+          product_interest: saved.product_interest ?? null,
+        });
+
         await this.autoScheduleFollowUp(saved, saved.status as LeadStatus, user);
+        const targetStage = this.computeTargetStageForStatus(saved.stage, saved.status as LeadStatus);
+        if (targetStage) {
+          saved = await this.updateStage(saved.id, targetStage, user);
+        }
       }
 
       return saved;
@@ -343,13 +579,20 @@ export class LeadService implements OnModuleInit {
     await this.leadRepo.save(lead);
   }
 
-  async assignLead(id: number, userId: number, user: any, ip?: string): Promise<Lead> {
+  async assignLead(id: number, userId: number | null, user: any, ip?: string): Promise<Lead> {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
 
     const managerRoles = ['Admin', 'COO', 'Sales Manager'];
     if (!managerRoles.includes(user?.role)) {
       this.assertAccess(lead, user);
+    }
+
+    if (userId === null) {
+      lead.assigned_to = null as any;
+      const saved = await this.leadRepo.save(lead);
+      void this.auditService.log(id, user.id, 'ASSIGNED', '→ Unassigned', ip);
+      return saved;
     }
 
     const target = await this.leadRepo.manager.findOne(User, {
@@ -374,7 +617,9 @@ export class LeadService implements OnModuleInit {
       type: body.type ?? NoteType.GENERAL,
       created_by: user.id,
     });
-    return this.noteRepo.save(note);
+    const saved = await this.noteRepo.save(note);
+    await this.tryKeywordAdvance(lead, body.note, user);
+    return saved;
   }
 
   async getNotes(leadId: number, user: any): Promise<LeadNote[]> {
@@ -398,6 +643,7 @@ export class LeadService implements OnModuleInit {
     lead.follow_up_date = fu.due_date;
     await this.leadRepo.save(lead);
     const saved = await this.followUpRepo.save(fu);
+    await this.tryKeywordAdvance(lead, body.note, user);
     void this.auditService.log(leadId, user.id, 'FOLLOWUP_CREATED', `due: ${body.due_date}`, ip);
     return saved;
   }
@@ -434,13 +680,17 @@ export class LeadService implements OnModuleInit {
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
-    // Customer table stores bare 10-digit phones; lead.phone is +E.164 — strip for comparison
-    const bare10 = lead.phone.replace(/\D/g, '').slice(-10);
-    const existing = await this.leadRepo.manager.query(
-      `SELECT id, "companyName", "contactName", mobile1, email, city
-       FROM customer WHERE mobile1 = $1 OR mobile1 = $2 LIMIT 1`,
-      [bare10, lead.phone],
-    );
+    // Look up customer via customer_phones index (global unique phone registry)
+    const e164   = lead.phone ?? null;
+    const bare10 = lead.phone ? lead.phone.replace(/\D/g, '').slice(-10) : null;
+    const existing = e164 ? await this.leadRepo.manager.query(
+      `SELECT c.id, c."companyName", c."contactName", c.mobile1, c.email, c.city
+       FROM customer_phones cp
+       JOIN customer c ON c.id = cp.customer_id
+       WHERE cp.phone = $1 OR cp.phone = $2
+       LIMIT 1`,
+      [e164, bare10],
+    ) : [];
 
     const customerExists = existing.length > 0;
     return {
@@ -456,6 +706,159 @@ export class LeadService implements OnModuleInit {
     };
   }
 
+  /** One-click conversion: find-or-create customer, mark lead CONVERTED, return customerId. */
+  async quickConvert(id: number, user: any, ip?: string): Promise<{ customerId: number; isNew: boolean }> {
+    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    if (!lead) throw new NotFoundException('Lead not found');
+    this.assertAccess(lead, user);
+
+    // Already converted — return existing customer id
+    if (lead.status === LeadStatus.CONVERTED && lead.customer_id) {
+      return { customerId: lead.customer_id, isNew: false };
+    }
+
+    const e164   = lead.phone ?? null;
+    const bare10 = lead.phone ? lead.phone.replace(/\D/g, '').slice(-10) : null;
+    let customerId: number | null = null;
+    let isNew = false;
+
+    // 1. Find existing customer via customer_phones index (covers mobile1 + mobile2)
+    if (e164) {
+      const rows = await this.leadRepo.manager.query(
+        `SELECT customer_id AS id FROM customer_phones
+         WHERE phone = $1 OR phone = $2
+         LIMIT 1`,
+        [e164, bare10],
+      );
+      if (rows.length > 0) customerId = rows[0].id;
+    }
+
+    // 2. Create minimal customer if none found; register phone in customer_phones
+    if (!customerId) {
+      const name  = toSentenceCase(lead.name || 'Unknown');
+      const phone = e164 || bare10 || null;
+      const city  = lead.city  || 'TBD';
+      const state = lead.state || 'TBD';
+
+      const inserted = await this.leadRepo.manager.query(
+        `INSERT INTO customer ("companyName", "contactName", mobile1, city, state, pincode, "customerType", "createdBy", "createdAt")
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+         ON CONFLICT (mobile1) DO UPDATE SET "contactName" = EXCLUDED."contactName"
+         RETURNING id`,
+        [name, name, phone, city, state, '000000', 'Retail Shop', String(user.id)],
+      );
+      customerId = inserted[0].id;
+      isNew = true;
+
+      // Register phone in the global index so future lookups hit customer_phones
+      if (phone) {
+        await this.leadRepo.manager.query(
+          `INSERT INTO customer_phones (customer_id, phone)
+           VALUES ($1, $2)
+           ON CONFLICT (phone) DO NOTHING`,
+          [customerId, phone],
+        );
+      }
+    }
+
+    // 3. Mark lead as CONVERTED
+    lead.status      = LeadStatus.CONVERTED;
+    lead.customer_id = customerId;
+    await this.leadRepo.save(lead);
+    void this.auditService.log(id, user.id, 'CONVERTED', `customer_id=${customerId} isNew=${isNew}`, ip);
+
+    return { customerId, isNew };
+  }
+
+  private static readonly QUALIFIED_KEYWORDS = /price|cost|quotation/i;
+
+  /** If note text contains buying-intent keywords and lead is at CONTACTED, advance to QUALIFIED. */
+  private async tryKeywordAdvance(lead: Lead, text: string | undefined, user: any): Promise<void> {
+    if (!text || lead.stage !== LeadStage.CONTACTED) return;
+    if (!LeadService.QUALIFIED_KEYWORDS.test(text)) return;
+    await this.updateStage(lead.id, LeadStage.QUALIFIED, user);
+  }
+
+  /** Returns the LeadStage implied by a status transition, or null if no stage sync is needed. */
+  private computeTargetStageForStatus(currentStage: LeadStage, newStatus: LeadStatus): LeadStage | null {
+    if (currentStage === LeadStage.WON || currentStage === LeadStage.LOST) return null;
+    if (newStatus === LeadStatus.QUOTATION) return LeadStage.QUOTED;
+    if (newStatus === LeadStatus.CONVERTED) return LeadStage.WON;
+    if (newStatus === LeadStatus.LOST) return LeadStage.LOST;
+    return null;
+  }
+
+  // Linear forward-only progression. LOST is a lateral terminal exit handled separately.
+  private static readonly STAGE_ORDER: readonly LeadStage[] = [
+    LeadStage.NEW,
+    LeadStage.CONTACTED,
+    LeadStage.QUALIFIED,
+    LeadStage.QUOTED,
+    LeadStage.WON,
+  ];
+
+  /**
+   * Advance a lead's stage with auto-stepping for skipped stages.
+   *
+   * - NEW → QUALIFIED  becomes  NEW → CONTACTED → QUALIFIED  (two saves, both logged)
+   * - Any downgrade (e.g. QUALIFIED → NEW) is rejected.
+   * - WON and LOST are terminal — no transitions out.
+   * - Transitioning to LOST is always valid from any non-terminal stage.
+   */
+  async updateStage(id: number, newStage: LeadStage, user: any): Promise<Lead> {
+    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    if (!lead) throw new NotFoundException('Lead not found');
+    this.assertAccess(lead, user);
+
+    const currentStage = lead.stage ?? LeadStage.NEW;
+
+    // Terminal stages cannot be exited
+    if (currentStage === LeadStage.WON || currentStage === LeadStage.LOST) {
+      throw new BadRequestException(
+        `Lead is in terminal stage ${currentStage} and cannot be advanced.`,
+      );
+    }
+
+    // LOST is always a valid lateral exit from any active stage
+    if (newStage === LeadStage.LOST) {
+      lead.stage = LeadStage.LOST;
+      const saved = await this.leadRepo.save(lead);
+      this.logger.log(`[CRM] Stage: ${currentStage} → ${LeadStage.LOST} (lead=${id} by user=${user.id})`);
+      return saved;
+    }
+
+    const order       = LeadService.STAGE_ORDER;
+    const currentIdx  = order.indexOf(currentStage);
+    const targetIdx   = order.indexOf(newStage);
+
+    if (targetIdx === -1) {
+      throw new BadRequestException(`Unknown stage: ${newStage}`);
+    }
+
+    // Reject downgrades
+    if (targetIdx < currentIdx) {
+      throw new BadRequestException(
+        `Cannot downgrade stage from ${currentStage} to ${newStage}.`,
+      );
+    }
+
+    // Already at target — no-op
+    if (targetIdx === currentIdx) return lead;
+
+    // Walk forward through each intermediate stage, persisting every step
+    let saved: Lead = lead;
+    for (let i = currentIdx + 1; i <= targetIdx; i++) {
+      const prev = saved.stage;
+      saved.stage = order[i];
+      saved = await this.leadRepo.save({ ...saved });
+      this.logger.log(
+        `[CRM] Stage: ${prev} → ${saved.stage} (lead=${id} by user=${user.id}${i < targetIdx ? ' [auto-step]' : ''})`,
+      );
+    }
+
+    return saved;
+  }
+
   async markConverted(id: number, customerId: number, quotationId: number, user: any, ip?: string): Promise<Lead> {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
@@ -463,7 +866,12 @@ export class LeadService implements OnModuleInit {
     lead.status = LeadStatus.CONVERTED;
     lead.customer_id = customerId;
     lead.quotation_id = quotationId;
-    const saved = await this.leadRepo.save(lead);
+    let saved = await this.leadRepo.save(lead);
+
+    if (saved.stage !== LeadStage.LOST && saved.stage !== LeadStage.WON) {
+      saved = await this.updateStage(id, LeadStage.WON, user);
+    }
+
     void this.auditService.log(id, user.id, 'CONVERTED', `customer_id=${customerId} quotation_id=${quotationId}`, ip);
     return saved;
   }
@@ -472,27 +880,46 @@ export class LeadService implements OnModuleInit {
    *  Routes through the standard create() so dedup, assignment, and follow-up all apply. */
   async createFromShopifyClick(payload: {
     source?: string; action?: string; name?: string; phone?: string;
-    email?: string; city?: string; country?: string;
+    email?: string; city?: string; country?: string; context?: string;
     message?: string; product?: string; product_title?: string; product_url?: string;
     page_url?: string; lead_type?: string; priority?: string; timestamp?: string;
+    tag?: string;
   }): Promise<{ ok: boolean; leadId?: number; error?: string }> {
     console.log('📥 SERVICE PAYLOAD:', JSON.stringify(payload));
 
     const externalId = generateShopifyExternalId(payload);
 
+    const rawName    = (payload.name || '').trim();
+    const rawEmail   = (payload.email || '').trim();
+    const rawCity    = (payload.city || '').trim();
+    const rawCountry = (payload.country || '').trim();
+    const rawContext = (payload.context || '').trim();
+
+    // Validate phone: reject empty, too-short, and all-same-digit fakes (0000000000, 9999999999…)
+    const phoneIsReal     = isShopifyPhoneReal(payload.phone ?? '');
+    const normalizedPhone = phoneIsReal ? normalizePhone(payload.phone ?? '') : 'unknown';
+    const resolvedPhone   = phoneIsReal && normalizedPhone !== 'unknown' ? normalizedPhone : undefined;
+
     const leadData: CreateLeadDto = {
-      name:              payload.name    || 'Unknown',
-      phone:             payload.phone   || 'unknown',
-      email:             payload.email   || undefined,
-      city:              payload.city    || undefined,
-      country:           payload.country || undefined,
+      name:              rawName    || undefined,
+      phone:             resolvedPhone,
+      is_phone_valid:    phoneIsReal,
+      email:             rawEmail   || undefined,
+      city:              rawCity    || undefined,
+      country:           rawCountry || undefined,
+      // Use a Shopify-specific fallback so leads with no action/context never get 'DIRECT – Manual Entry'.
+      context:           contextToLabel(rawContext || payload.action || LeadContext.SHOPIFY_PRODUCT_FORM),
       product_interest:  payload.product || payload.product_title || payload.page_url || 'General Inquiry',
       notes:             payload.message ? payload.message : `Lead from ${payload.page_url || ''}`,
       source:            LeadSource.SHOPIFY,
-      lead_source_label: `SHOPIFY – ${payload.action || 'CLICK'}`,
+      lead_source_label: contextToLabel(rawContext || payload.action || LeadContext.SHOPIFY_PRODUCT_FORM),
       landing_page:      payload.page_url || '',
       external_id:       externalId,
-      raw_payload:       payload,
+      raw_payload:       {
+        ...payload,
+        last_message:    payload.message || '',
+        last_message_at: new Date().toISOString(),
+      },
     };
 
     console.log('📧 EMAIL:', leadData.email);
@@ -500,12 +927,44 @@ export class LeadService implements OnModuleInit {
       phone:   leadData.phone,
       email:   leadData.email,
       product: leadData.product_interest,
+      context: leadData.context,
     });
+
+    // ── Time-based idempotency ────────────────────────────────────────────────
+    // Same phone + same product within 30 min → touch updated_at and return.
+    // Prevents duplicate CRM entries from repeated button/form interactions.
+    const recentDup = await this.findRecentShopifyDuplicate(
+      resolvedPhone ?? null,
+      leadData.product_interest ?? '',
+      LeadSource.SHOPIFY,
+    );
+    if (recentDup) {
+      const existingRp =
+        recentDup.raw_payload && typeof recentDup.raw_payload === 'object' && !Array.isArray(recentDup.raw_payload)
+          ? recentDup.raw_payload
+          : {};
+      await this.leadRepo.update(recentDup.id, {
+        raw_payload: {
+          ...existingRp,
+          last_message:    payload.message || existingRp['last_message'] || '',
+          last_message_at: new Date().toISOString(),
+        } as any,
+      });
+      this.logger.log(
+        `Shopify duplicate suppressed — returning existing lead id=${recentDup.id} (within 30-min window)`,
+      );
+      return { ok: true, leadId: recentDup.id };
+    }
 
     try {
       const { lead } = await this.create(leadData, { id: null, role: 'Admin' });
       console.log('LEAD CREATED:', { id: lead.id, phone: lead.phone, source: lead.source });
       this.logger.log(`Shopify lead id=${lead.id} external_id=${externalId}`);
+      if (!phoneIsReal) {
+        try {
+          await this.addNote(lead.id, { note: 'Phone not provided from Shopify', type: NoteType.GENERAL }, { id: null, role: 'Admin' });
+        } catch { /* note failure must not block lead creation */ }
+      }
       return { ok: true, leadId: lead.id };
     } catch (e: any) {
       console.error('SHOPIFY ERROR:', e?.message, e?.stack);
@@ -516,6 +975,7 @@ export class LeadService implements OnModuleInit {
         if (existing) return { ok: true, leadId: existing.id };
       }
       this.logger.error(`createFromShopifyClick failed: ${e?.message}`, e?.stack);
+      this.logsService.log(LogAction.ERROR, { context: 'createFromShopifyClick', message: e?.message, payload });
       return { ok: false, error: e?.message };
     }
   }
@@ -536,7 +996,7 @@ export class LeadService implements OnModuleInit {
     this.logger.log('[LeadService] WhatsApp restored — normal lead priority resumed');
   }
 
-  @OnEvent('lead.incoming')
+  @OnEvent('lead.incoming', { async: true })
   async handleIncomingLead(payload: {
     phone: string;
     name: string;
@@ -544,27 +1004,233 @@ export class LeadService implements OnModuleInit {
     whatsapp_chat_id?: string;
     raw_payload?: any;
     external_id?: string;
+    messageId?: string;
+    hasSerializedId?: boolean;
   }): Promise<void> {
+    console.log('LEAD SERVICE RECEIVED:', payload);
     try {
-      await this.create(
-        {
-          phone: payload.phone,
-          name: payload.name,
-          source: payload.source,
-          whatsapp_chat_id: payload.whatsapp_chat_id,
-          raw_payload: payload.raw_payload,
-          external_id: payload.external_id,
-          channel: 'WHATSAPP',
-          lead_source_label: 'inbound_message',
-        } as CreateLeadDto,
-        { id: null, role: 'Admin' },
-      );
+      const { messageId } = payload;
+      const normalized = normalizePhone(payload.phone ?? '');
+      const phone = normalized === 'unknown' ? undefined : normalized;
+
+      if (!phone) {
+        this.logger.warn({
+          action: 'WHATSAPP_NO_PHONE',
+          rawPhone: payload.phone ?? null,
+          messageId: messageId ?? null,
+        });
+      }
+
+      // Stage 0: exact message-ID dedup — durable across restarts, blocks event storms
+      if (messageId) {
+        const existingByMsgId = await this.leadRepo.findOne({
+          where: { whatsappMessageId: messageId },
+        });
+        if (existingByMsgId) {
+          this.logger.log({
+            action: 'WHATSAPP_DUPLICATE_SKIPPED',
+            messageId: messageId,
+            existingLeadId: existingByMsgId.id,
+          });
+          return;
+        }
+      }
+
+      const existing = await this.findRecentWhatsAppLead(phone);
+
+      if (existing) {
+        // Append the new message to notes rather than creating a duplicate row
+        const incomingMessage: string = payload.raw_payload?.body ?? payload.raw_payload?.message ?? '';
+        if (incomingMessage) {
+          const timestamp = new Date().toISOString();
+          const appendLine = `\n[${timestamp}] ${incomingMessage}`;
+          const safePayload =
+            existing.raw_payload &&
+            typeof existing.raw_payload === 'object' &&
+            !Array.isArray(existing.raw_payload)
+              ? existing.raw_payload
+              : {};
+
+          await this.leadRepo.update(existing.id, {
+            notes: (existing.notes ?? '') + appendLine,
+            raw_payload: {
+              ...safePayload,
+              last_message: incomingMessage,
+              last_message_at: timestamp,
+            } as any,
+          });
+        } else {
+          await this.leadRepo.update(existing.id, { updated_at: new Date() });
+        }
+
+        if (!existing.phone && incomingMessage) {
+          const extracted = extractPhoneFromText(incomingMessage);
+          if (extracted) {
+            await this.leadRepo.update(existing.id, { phone: extracted });
+            this.logger.log({ action: 'PHONE_EXTRACTED_FROM_CHAT', leadId: existing.id, phone: extracted });
+          }
+        }
+
+        this.logger.log(
+          `WhatsApp dedup — phone=${phone} merged into lead id=${existing.id} (within 5-min window)`,
+        );
+        return;
+      }
+
+      const rp = payload.raw_payload ?? {};
+      // Enrich from raw_payload when WhatsApp contact info is richer than the emitted payload
+      const enrichedName  = payload.name || rp.pushname || rp.name || rp.contact_name || undefined;
+      const enrichedCity  = rp.city || rp.location || undefined;
+      const inboundBody   = rp.body || rp.message || '';
+      const timestamp     = new Date().toISOString();
+
+      const dto: CreateLeadDto = {
+        phone,                          // undefined for invalid/missing phones → anonymous lead
+        name:               enrichedName,
+        city:               enrichedCity,
+        source:             payload.source,
+        context:            contextToLabel(LeadContext.WHATSAPP_INBOUND),
+        whatsapp_chat_id:   payload.whatsapp_chat_id,
+        notes:              inboundBody || undefined,
+        raw_payload:        {
+          ...rp,
+          raw_phone:       payload.phone ?? null,  // preserve original for analytics
+          last_message:    inboundBody || null,
+          last_message_at: timestamp,
+        },
+        external_id:        payload.external_id,
+        channel:            'WHATSAPP',
+        lead_source_label:  'inbound_message',
+        whatsappMessageId:  messageId,
+        hasSerializedId:    payload.hasSerializedId ?? false,
+      };
+
+      console.log('Saving lead with messageId:', dto.whatsappMessageId);
+
+      try {
+        const { lead: savedLead } = await this.create(dto, { id: null, role: 'Admin' });
+
+        if (!savedLead.phone && inboundBody) {
+          const extracted = extractPhoneFromText(inboundBody);
+          if (extracted) {
+            await this.leadRepo.update(savedLead.id, { phone: extracted });
+            this.logger.log({ action: 'PHONE_EXTRACTED_FROM_CHAT', leadId: savedLead.id, phone: extracted });
+          }
+        }
+
+        this.logger.log({
+          action:    'WHATSAPP_LEAD_CREATED',
+          phone,
+          messageId: messageId ?? null,
+        });
+      } catch (err: any) {
+        if (err?.code === '23505' && messageId) {
+          this.logger.warn({
+            action:    'WHATSAPP_DUPLICATE_DB_BLOCKED',
+            messageId: messageId,
+          });
+          await this.leadRepo.findOne({ where: { whatsappMessageId: messageId } });
+          return;
+        }
+        throw err;
+      }
     } catch (e) {
-      this.logger.error(`handleIncomingLead failed for phone=${payload.phone}: ${e?.message}`, e?.stack);
+      this.logger.error(`handleIncomingLead failed for phone=${normalizePhone(payload.phone ?? '')}: ${e?.message}`, e?.stack);
     }
   }
 
+  /** Returns the most recent active WHATSAPP lead for this phone within the configured dedup window. */
+  private async findRecentWhatsAppLead(phone: string): Promise<Lead | null> {
+    if (!phone || phone === 'unknown') return null;
+
+    const rows: Lead[] = await this.ds.query(
+      `SELECT * FROM leads
+       WHERE phone = $1
+         AND source = 'WHATSAPP'
+         AND is_active = true
+         AND created_at > NOW() - INTERVAL '1 minute' * $2
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [phone, DEDUP.PHONE_WINDOW_MINUTES],
+    );
+
+    return rows.length > 0 ? rows[0] : null;
+  }
+
   // ── Private helpers ──────────────────────────────────────────────────────────
+
+  /**
+   * Time-based idempotency for Shopify leads.
+   * Returns an existing active lead if the same normalised phone + product_interest
+   * was submitted within the last 30 minutes. Unknown phone is excluded — every
+   * anonymous click is always a new lead.
+   */
+  private async findRecentShopifyDuplicate(
+    phone: string | null,
+    productInterest: string,
+    source: string,
+  ): Promise<Lead | null> {
+    if (phone && phone !== 'unknown') {
+      // Phone-based dedup: 30-min window
+      const windowStart = new Date(Date.now() - 30 * 60 * 1000);
+      const rows: Lead[] = await this.ds.query(
+        `SELECT * FROM leads
+         WHERE phone = $1
+           AND product_interest = $2
+           AND source = 'SHOPIFY'
+           AND is_active = true
+           AND created_at >= $3
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [phone, productInterest, windowStart],
+      );
+      return rows.length > 0 ? rows[0] : null;
+    }
+
+    // Fallback for null-phone leads: same product + same source within 10 min
+    const windowStart = new Date(Date.now() - 10 * 60 * 1000);
+    const rows: Lead[] = await this.ds.query(
+      `SELECT * FROM leads
+       WHERE phone IS NULL
+         AND product_interest = $1
+         AND source = $2
+         AND is_active = true
+         AND created_at >= $3
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [productInterest, source, windowStart],
+    );
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  async createQuotationFromLead(id: number, user: any, ip?: string): Promise<any> {
+    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    if (!lead) throw new NotFoundException('Lead not found');
+    this.assertAccess(lead, user);
+
+    const quotation = await this.quotationService.create(
+      {
+        lead_id:          lead.id,
+        customer_name:    lead.name,
+        salesman_id:      user?.id,
+        items:            [],
+      },
+      user,
+    );
+
+    // Link quotation back to the lead
+    await this.leadRepo.update(id, { quotation_id: quotation.id });
+
+    // Advance stage to QUOTED if not already there or past it
+    const advanceable: LeadStage[] = [LeadStage.NEW, LeadStage.CONTACTED, LeadStage.QUALIFIED];
+    if (advanceable.includes(lead.stage)) {
+      await this.updateStage(id, LeadStage.QUOTED, user);
+    }
+
+    void this.auditService.log(id, user.id, 'QUOTATION_CREATED', `quotation_id=${quotation.id}`, ip);
+
+    return quotation;
+  }
 
   private assertAccess(lead: Lead, user: any) {
     const fullAccess = ['Admin', 'COO', 'Sales Manager'];
@@ -593,24 +1259,34 @@ export class LeadService implements OnModuleInit {
 
   /** Auto-schedule the next follow-up when a lead advances to a new stage. */
   private async autoScheduleFollowUp(lead: Lead, newStatus: LeadStatus, user: any): Promise<void> {
-    let daysAhead: number | null = null;
+    let hoursAhead: number | null = null;
     let noteText: string | null = null;
 
     if (newStatus === LeadStatus.CONTACTED) {
-      daysAhead = 2;
-      noteText = 'Auto-scheduled: follow up after first contact';
+      // Hot inbound sources: first follow-up in 4h — they just expressed intent
+      const hotSources: string[] = [LeadSource.META, LeadSource.GOOGLE, LeadSource.LINKEDIN];
+      if (hotSources.includes(lead.source as string)) {
+        hoursAhead = 4;
+        noteText = 'Auto-scheduled: quick follow up (hot inbound lead)';
+      } else if (lead.source === LeadSource.INDIAMART) {
+        hoursAhead = 24;
+        noteText = 'Auto-scheduled: follow up after first contact';
+      } else {
+        hoursAhead = 48;
+        noteText = 'Auto-scheduled: follow up after first contact';
+      }
     } else if (newStatus === LeadStatus.INTERESTED) {
-      daysAhead = 1;
+      hoursAhead = 24;
       noteText = 'Auto-scheduled: send quotation';
     } else if (newStatus === LeadStatus.QUOTATION) {
-      daysAhead = 3;
+      hoursAhead = 72;
       noteText = 'Auto-scheduled: follow up on quotation';
     }
 
-    if (!daysAhead) return;
+    if (!hoursAhead) return;
 
     const due = new Date();
-    due.setDate(due.getDate() + daysAhead);
+    due.setTime(due.getTime() + hoursAhead * 60 * 60 * 1000);
     const fu = this.followUpRepo.create({
       lead_id: lead.id,
       due_date: due,
@@ -620,5 +1296,60 @@ export class LeadService implements OnModuleInit {
     await this.followUpRepo.save(fu);
     lead.follow_up_date = due;
     await this.leadRepo.save(lead);
+  }
+
+  // ── Automation settings ──────────────────────────────────────────────────────
+
+  private static readonly AUTOMATION_KEYS = [
+    'automation.lead_greeting',
+    'automation.followup_reminders',
+    'automation.payment_followups',
+  ] as const;
+
+  async getAutomationSettings(): Promise<Record<string, string | boolean>> {
+    // Returns automation toggles (bool) + cron last-run timestamps (string ISO)
+    const rows: { key: string; value: string }[] = await this.ds.query(
+      `SELECT key, value FROM crm_settings
+       WHERE key LIKE 'automation.%' OR key LIKE 'cron.%'`,
+    );
+    const map: Record<string, string | boolean> = {
+      'automation.lead_greeting':      true,
+      'automation.followup_reminders': true,
+      'automation.payment_followups':  true,
+    };
+    for (const row of rows) {
+      if (row.key.startsWith('automation.')) {
+        map[row.key] = row.value !== 'false';
+      } else {
+        map[row.key] = row.value;   // ISO timestamp strings, returned as-is
+      }
+    }
+    return map;
+  }
+
+  async updateAutomationSettings(settings: Record<string, boolean>): Promise<Record<string, string | boolean>> {
+    for (const key of LeadService.AUTOMATION_KEYS) {
+      if (key in settings) {
+        await this.ds.query(
+          `INSERT INTO crm_settings (key, value, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,
+          [key, String(settings[key])],
+        );
+      }
+    }
+    return this.getAutomationSettings();
+  }
+
+  async setAutomationPaused(id: number, paused: boolean): Promise<Lead> {
+    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    if (!lead) throw new NotFoundException('Lead not found');
+    const tags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
+    if (paused) {
+      if (!tags.includes('automation_off')) lead.tags = [...tags, 'automation_off'];
+    } else {
+      lead.tags = tags.filter(t => t !== 'automation_off');
+    }
+    return this.leadRepo.save(lead);
   }
 }

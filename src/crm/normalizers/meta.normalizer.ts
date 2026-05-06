@@ -1,5 +1,6 @@
 import { normalizePhone, toSentenceCase } from './lead-normalizer';
 import { LeadSource } from '../entities/lead.entity';
+import { LeadContext, contextToLabel } from '../enums/lead-context.enum';
 
 interface MetaGraphResponse {
   field_data?: { name: string; values: string[] }[];
@@ -50,6 +51,7 @@ export function normalizeMetaLead(graphData: MetaGraphResponse, leadgenId: strin
     source:           LeadSource.META,
     product_interest: productInterest,
     notes,
+    context:          contextToLabel(LeadContext.META_LEAD_FORM),
     lead_source_label: 'meta_lead_form',
     channel:          'FORM',
     utm_source:       'meta',

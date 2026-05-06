@@ -1,15 +1,19 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { PromotionContact } from './entities/promotion-contact.entity';
 import { PromotionCaptureDto } from './dto/promotion-capture.dto';
+import { LogsService, LogAction } from '../logs/logs.service';
 
 @Injectable()
 export class PromotionService {
+  private readonly logger = new Logger(PromotionService.name);
+
   constructor(
     @InjectRepository(PromotionContact)
     private readonly repo: Repository<PromotionContact>,
     private readonly dataSource: DataSource,
+    private readonly logsService: LogsService,
   ) {}
 
   private async ensureTable(): Promise<void> {
@@ -23,51 +27,160 @@ export class PromotionService {
         created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    await this.dataSource.query(`
-      CREATE INDEX IF NOT EXISTS idx_promo_whatsapp
-        ON promotion_contacts(whatsapp_number)
-    `);
-    await this.dataSource.query(`
-      CREATE INDEX IF NOT EXISTS idx_promo_email
-        ON promotion_contacts(email)
-    `);
+    await this.dataSource.query(
+      `CREATE INDEX IF NOT EXISTS idx_promo_whatsapp ON promotion_contacts(whatsapp_number)`,
+    );
+    await this.dataSource.query(
+      `CREATE INDEX IF NOT EXISTS idx_promo_email ON promotion_contacts(email)`,
+    );
   }
 
-  async create(dto: PromotionCaptureDto): Promise<{ success: boolean; message: string; data: PromotionContact }> {
+  /**
+   * Normalise an arbitrary phone string to E.164 (+91XXXXXXXXXX) for comparison
+   * against the leads table. Returns empty string if input is unusable.
+   */
+  private normalizePhone(raw: string): string {
+    if (!raw) return '';
+    const digits = raw.replace(/\D/g, '');
+    if (digits.length === 10) return '+91' + digits;
+    if (digits.length === 12 && digits.startsWith('91')) return '+' + digits;
+    if (raw.startsWith('+') && digits.length >= 10) return '+' + digits;
+    return '';
+  }
+
+  /**
+   * Returns true if any active lead in the CRM already owns this phone number.
+   * Compares both the E.164 form and the bare 10-digit form to cover both storage
+   * conventions (older leads may be stored without the country prefix).
+   */
+  private async phoneExistsInLeads(rawPhone: string): Promise<boolean> {
+    const normalized = this.normalizePhone(rawPhone);
+    if (!normalized) return false;
+
+    const bare10 = normalized.replace(/\D/g, '').slice(-10);
+
+    const rows: { id: number }[] = await this.dataSource.query(
+      `SELECT id FROM leads
+       WHERE (phone = $1 OR phone = $2)
+         AND is_active = true
+       LIMIT 1`,
+      [normalized, bare10],
+    );
+    return rows.length > 0;
+  }
+
+  /**
+   * Inserts a minimal lead row for a name+phone submission that arrived via the
+   * promotion endpoint. Uses raw SQL to avoid importing LeadService (circular dep).
+   * Phone is normalised to E.164 before insert. Returns the new lead id.
+   */
+  private async saveAsLead(
+    name: string,
+    phone: string,
+    email: string | undefined,
+    source: string | undefined,
+    pageUrl: string | undefined,
+  ): Promise<number> {
+    const normalized = this.normalizePhone(phone);
+
+    const rows: { id: number }[] = await this.dataSource.query(
+      `INSERT INTO leads
+         (name, phone, email, source, status, lead_priority, lead_source_label,
+          landing_page, tags, is_active, duplicate_flag, created_at, updated_at)
+       VALUES
+         ($1, $2, $3, 'SHOPIFY', 'NEW', 'MEDIUM', $4, $5, '[]', true, false, now(), now())
+       ON CONFLICT DO NOTHING
+       RETURNING id`,
+      [
+        name,
+        normalized || phone,
+        email ?? null,
+        source ?? 'SHOPIFY – Promotion Form',
+        pageUrl ?? null,
+      ],
+    );
+
+    // ON CONFLICT DO NOTHING returns 0 rows — fetch the existing one
+    if (rows.length === 0) {
+      const existing: { id: number }[] = await this.dataSource.query(
+        `SELECT id FROM leads WHERE phone = $1 AND is_active = true ORDER BY created_at DESC LIMIT 1`,
+        [normalized || phone],
+      );
+      return existing[0]?.id ?? 0;
+    }
+
+    return rows[0].id;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  async create(dto: PromotionCaptureDto): Promise<{
+    success: boolean;
+    message: string;
+    routed_to: 'lead' | 'promotion' | 'skipped';
+    id?: number;
+  }> {
     await this.ensureTable();
 
-    dto.whatsapp_number = dto.whatsapp_number || undefined;
-    dto.email = dto.email || undefined;
+    // Normalise empty strings to undefined
+    const name    = (dto.name            || '').trim() || undefined;
+    const phone   = (dto.whatsapp_number || '').trim() || undefined;
+    const email   = (dto.email           || '').trim() || undefined;
 
-    console.log('Promotion Capture:', dto);
-
-    if (!dto.whatsapp_number && !dto.email) {
+    if (!phone && !email) {
       throw new BadRequestException('At least one of whatsapp_number or email is required.');
     }
 
-    // Deduplication: check whatsapp_number first, then email
-    if (dto.whatsapp_number) {
-      const existing = await this.repo.findOne({ where: { whatsapp_number: dto.whatsapp_number } });
-      if (existing) {
-        return { success: true, message: 'Already exists', data: existing };
+    console.log('Promotion Capture:', { name, phone, email });
+
+    // ── Rule 1: name + phone → save as CRM lead, not promotion ───────────────
+    if (name && phone) {
+      const leadId = await this.saveAsLead(name, phone, email, dto.source, dto.page_url);
+      this.logger.log(`Promotion routed to lead id=${leadId} (name+phone present)`);
+      this.logsService.log(LogAction.LEAD_CREATED, { leadId, phone, routed_from: 'promotion', name });
+      return { success: true, message: 'Saved as lead', routed_to: 'lead', id: leadId };
+    }
+
+    // ── Rule 2: phone present but phone already in CRM leads → skip ───────────
+    if (phone) {
+      const inLeads = await this.phoneExistsInLeads(phone);
+      if (inLeads) {
+        this.logger.log(`Promotion skipped — phone already in leads (phone=${phone})`);
+        this.logsService.log(LogAction.PROMOTION_SKIPPED, { phone, reason: 'phone_in_leads' });
+        return { success: true, message: 'Already a lead', routed_to: 'skipped' };
       }
     }
 
-    if (dto.email) {
-      const existing = await this.repo.findOne({ where: { email: dto.email } });
+    // ── Rule 3: email-only or new phone-only → save to promotion_contacts ─────
+    if (phone) {
+      const existing = await this.repo.findOne({ where: { whatsapp_number: phone } });
       if (existing) {
-        return { success: true, message: 'Already exists', data: existing };
+        return { success: true, message: 'Already exists', routed_to: 'promotion', id: existing.id };
+      }
+    }
+
+    if (email) {
+      const existing = await this.repo.findOne({ where: { email } });
+      if (existing) {
+        return { success: true, message: 'Already exists', routed_to: 'promotion', id: existing.id };
       }
     }
 
     const record = this.repo.create({
-      whatsapp_number: dto.whatsapp_number ?? null,
-      email:           dto.email           ?? null,
-      source:          dto.source,
-      page_url:        dto.page_url,
+      whatsapp_number: phone ?? null,
+      email:           email ?? null,
+      source:          dto.source  || 'SHOPIFY',
+      page_url:        dto.page_url || null,
+      tag:             dto.tag     || 'promotion_capture',
     });
 
     const saved = await this.repo.save(record);
-    return { success: true, message: 'Saved', data: saved };
+    this.logger.log(`Promotion contact saved id=${saved.id}`);
+    this.logsService.log(LogAction.PROMOTION_CAPTURED, { id: saved.id, phone: phone ?? null, email: email ?? null, tag: saved.tag });
+    return { success: true, message: 'Saved', routed_to: 'promotion', id: saved.id };
+  }
+
+  async findAll(): Promise<PromotionContact[]> {
+    return this.repo.find({ order: { created_at: 'DESC' }, take: 500 });
   }
 }

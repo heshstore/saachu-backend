@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import { normalizePhone } from './lead-normalizer';
 import { LeadSource } from '../entities/lead.entity';
+import { LeadContext, contextToLabel } from '../enums/lead-context.enum';
 
 function buildWebhookExternalId(phone: string, email: string): string | undefined {
   const p = phone.replace(/\D/g, '').slice(-10);
@@ -8,6 +9,14 @@ function buildWebhookExternalId(phone: string, email: string): string | undefine
   const key = p || e;
   if (!key) return undefined;
   return 'sh_wh_' + crypto.createHash('sha256').update(key).digest('hex').slice(0, 24);
+}
+
+function resolveShopifyContext(action: string): string {
+  const a = action.toLowerCase();
+  if (a.includes('whatsapp')) return contextToLabel(LeadContext.SHOPIFY_WHATSAPP_CLICK);
+  if (a.includes('exit') || a.includes('popup')) return contextToLabel(LeadContext.SHOPIFY_EXIT_POPUP);
+  if (a.includes('float')) return contextToLabel(LeadContext.SHOPIFY_FLOATING_BUTTON);
+  return contextToLabel(LeadContext.SHOPIFY_PRODUCT_FORM);
 }
 
 export function normalizeShopify(payload: any) {
@@ -23,6 +32,7 @@ export function normalizeShopify(payload: any) {
     source:           LeadSource.SHOPIFY,
     product_interest: payload.product || payload.product_title || undefined,
     notes:            payload.message || payload.body || undefined,
+    context:          resolveShopifyContext(action),
     lead_source_label: (action || 'shopify_webhook').slice(0, 50),
     channel:          action.toLowerCase().includes('whatsapp') ? 'WHATSAPP' : 'FORM',
     utm_source:       action || 'shopify_contact',

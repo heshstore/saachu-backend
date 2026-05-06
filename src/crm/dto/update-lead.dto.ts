@@ -35,6 +35,14 @@ export class UpdateLeadDto {
   product_interest?: string;
 
   @IsOptional()
+  @IsString()
+  country?: string;
+
+  @IsOptional()
+  @IsString()
+  requirement_note?: string;
+
+  @IsOptional()
   @IsEnum(LeadPriority)
   lead_priority?: LeadPriority;
 

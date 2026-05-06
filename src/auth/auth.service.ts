@@ -27,9 +27,11 @@ export class AuthService {
 
   async login(loginId: string, password: string) {
     const trimmed = (loginId || '').trim();
-    this.logger.log(`Login attempt: "${trimmed}"`);
+    const loginType = trimmed.includes('@') ? 'email' : 'mobile';
+    console.log(`[Auth:Service] Login attempt | type=${loginType} | loginId="${trimmed}"`);
+
     if (!trimmed || !password) {
-      this.logger.warn(`Login rejected: empty credentials`);
+      console.warn('[Auth:Service] Rejected: empty credentials');
       throw new UnauthorizedException('Invalid mobile or password');
     }
 
@@ -43,7 +45,9 @@ export class AuthService {
         .getOne();
     } else {
       const key = mobileMatchKey(trimmed);
+      console.log(`[Auth:Service] Mobile lookup key="${key}"`);
       if (!key) {
+        console.warn('[Auth:Service] Rejected: could not derive mobile key');
         throw new UnauthorizedException('Invalid mobile or password');
       }
       user = await this.userRepo
@@ -59,9 +63,11 @@ export class AuthService {
     }
 
     if (!user) {
-      this.logger.warn(`Login failed: no user found for "${trimmed}"`);
+      console.warn(`[Auth:Service] User NOT found for loginId="${trimmed}"`);
       throw new UnauthorizedException('Invalid mobile or password');
     }
+
+    console.log(`[Auth:Service] User found | id=${user.id} name="${user.name}" role="${user.role}" mobile="${user.mobile}" passwordHashPresent=${!!user.password_hash}`);
 
     const normalizedRole = normalizeUserRole(user.role);
     const normalizedMobile = normalizeUserMobile(user.mobile);
@@ -74,17 +80,20 @@ export class AuthService {
     }
 
     if (!user.password_hash) {
+      console.error(`[Auth:Service] No password_hash set for uid=${user.id} — account not configured`);
       throw new UnauthorizedException('Account not set up. Contact admin.');
     }
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
+    console.log(`[Auth:Service] bcrypt.compare result=${isMatch} for uid=${user.id}`);
+
     if (!isMatch) {
-      this.logger.warn(`Login failed: wrong password for uid=${user.id} (${trimmed})`);
+      console.warn(`[Auth:Service] Password mismatch for uid=${user.id} loginId="${trimmed}"`);
       throw new UnauthorizedException('Invalid mobile or password');
     }
 
     if (!user.is_active) {
-      this.logger.warn(`Login failed: inactive account uid=${user.id}`);
+      console.warn(`[Auth:Service] Account inactive uid=${user.id}`);
       throw new UnauthorizedException('Account is inactive');
     }
 
@@ -99,7 +108,7 @@ export class AuthService {
       can_approve_order: user.can_approve_order,
     };
 
-    this.logger.log(`Login success: uid=${user.id} name="${user.name}" role=${normalizedRole}`);
+    console.log(`[Auth:Service] Login SUCCESS | uid=${user.id} name="${user.name}" role=${normalizedRole}`);
     return {
       access_token: this.jwtService.sign(payload),
       user: {

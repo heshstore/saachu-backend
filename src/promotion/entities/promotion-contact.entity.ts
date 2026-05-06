@@ -11,11 +11,14 @@ export class PromotionContact {
   @Column({ type: 'varchar', length: 255, nullable: true })
   email: string;
 
-  @Column({ type: 'text' })
+  @Column({ type: 'text', nullable: true })
   source: string;
 
-  @Column({ type: 'text' })
+  @Column({ type: 'text', nullable: true })
   page_url: string;
+
+  @Column({ type: 'text', nullable: true, default: 'promotion_capture' })
+  tag: string;
 
   @CreateDateColumn({ type: 'timestamp' })
   created_at: Date;

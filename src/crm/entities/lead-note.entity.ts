@@ -29,8 +29,8 @@ export class LeadNote {
   @Column({ type: 'varchar', length: 20, default: NoteType.GENERAL })
   type: NoteType;
 
-  @Column()
-  created_by: number;
+  @Column({ nullable: true })
+  created_by: number | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   created_at: Date;

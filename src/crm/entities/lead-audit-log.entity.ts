@@ -10,7 +10,8 @@ export type AuditAction =
   | 'CALLED'
   | 'FOLLOWUP_CREATED'
   | 'FOLLOWUP_COMPLETED'
-  | 'CONVERTED';
+  | 'CONVERTED'
+  | 'QUOTATION_CREATED';
 
 @Entity('lead_audit_logs')
 export class LeadAuditLog {

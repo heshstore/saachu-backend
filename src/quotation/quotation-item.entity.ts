@@ -12,6 +12,10 @@ export class QuotationItem {
   @PrimaryGeneratedColumn()
   id: number;
 
+  /** Explicit FK column — readable without loading the relation. */
+  @Column({ nullable: true })
+  quotation_id: number;
+
   @ManyToOne(() => Quotation, (q) => q.items, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'quotation_id' })
   quotation: Quotation;
@@ -28,6 +32,11 @@ export class QuotationItem {
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 1 })
   qty: number;
 
+  /** Price from item master at the time of quotation — rate cannot go below this. */
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  base_rate: number;
+
+  /** Actual rate offered — must be >= base_rate. */
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   rate: number;
 

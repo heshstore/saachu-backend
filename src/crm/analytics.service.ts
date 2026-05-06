@@ -87,6 +87,7 @@ export class AnalyticsService {
       SELECT
         COUNT(*) AS total,
         COUNT(*) FILTER (WHERE l.status = 'CONVERTED') AS converted,
+        COUNT(*) FILTER (WHERE l.status = 'CONVERTED' AND l.updated_at::date = CURRENT_DATE) AS converted_today,
         COUNT(*) FILTER (WHERE l.status = 'LOST') AS lost,
         COUNT(*) FILTER (WHERE l.follow_up_date::date = CURRENT_DATE) AS due_today
       FROM leads l
@@ -107,6 +108,7 @@ export class AnalyticsService {
     return {
       total: +r.total,
       converted: +r.converted,
+      convertedToday: +r.converted_today,
       lost: +r.lost,
       dueToday: +r.due_today,
       overdueFollowUps: +pendingFu[0].cnt,
@@ -212,6 +214,79 @@ export class AnalyticsService {
     };
   }
 
+  /**
+   * Leads grouped by context ("META – Lead Form", "SHOPIFY – WhatsApp Click", etc.).
+   * Null/empty context rows are consolidated into "Unknown".
+   * Full-access roles see the whole org; others see only their own leads.
+   */
+  async getContextBreakdown(user: any) {
+    const selectClause = `
+      SELECT
+        COALESCE(NULLIF(l.context, ''), 'Unknown') AS context,
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE l.status IN ('QUOTATION','CONVERTED')) AS to_quotation,
+        COUNT(*) FILTER (WHERE l.status = 'CONVERTED') AS converted
+      FROM leads l
+    `;
+    const tail = `GROUP BY 1 ORDER BY total DESC`;
+
+    let rows: any[];
+    if (this.isFullAccess(user)) {
+      rows = await this.ds.query(`${selectClause} WHERE l.is_active = true ${tail}`);
+    } else {
+      rows = await this.ds.query(
+        `${selectClause} WHERE l.is_active = true AND (l.assigned_to = $1 OR l.created_by = $1) ${tail}`,
+        [user.id],
+      );
+    }
+
+    return rows.map((r: any) => ({
+      context: r.context,
+      total: +r.total,
+      toQuotation: +r.to_quotation,
+      converted: +r.converted,
+      conversionPct: r.total > 0 ? Math.round((r.converted / r.total) * 100) : 0,
+    }));
+  }
+
+  /**
+   * Leads created per day for the last N days (default 30).
+   * Returns an array sorted by date ASC for easy charting.
+   */
+  async getDateBreakdown(days: number, user: any) {
+    const safeDays = Math.min(Math.max(days || 30, 1), 365);
+    const selectClause = `
+      SELECT
+        l.created_at::date AS day,
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE l.status = 'CONVERTED') AS converted
+      FROM leads l
+    `;
+    const tail = `
+      AND l.created_at >= NOW() - ($1 || ' days')::INTERVAL
+      GROUP BY 1 ORDER BY 1 ASC
+    `;
+
+    let rows: any[];
+    if (this.isFullAccess(user)) {
+      rows = await this.ds.query(
+        `${selectClause} WHERE l.is_active = true ${tail}`,
+        [String(safeDays)],
+      );
+    } else {
+      rows = await this.ds.query(
+        `${selectClause} WHERE l.is_active = true AND (l.assigned_to = $2 OR l.created_by = $2) ${tail}`,
+        [String(safeDays), user.id],
+      );
+    }
+
+    return rows.map((r: any) => ({
+      date: r.day,
+      total: +r.total,
+      converted: +r.converted,
+    }));
+  }
+
   async getTelecallerStats(telecallerId: number, user: any) {
     const rows = await this.ds.query(`
       SELECT
@@ -232,5 +307,171 @@ export class AnalyticsService {
       telecaller: user_row[0] ?? null,
       breakdown: rows,
     };
+  }
+
+  async getResponseSpeed(user: any) {
+    const where = this.isFullAccess(user)
+      ? `WHERE is_active = true`
+      : `WHERE is_active = true AND (assigned_to = $1 OR created_by = $1)`;
+    const params = this.isFullAccess(user) ? [] : [user.id];
+
+    const [r] = await this.ds.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE last_customer_reply_at IS NOT NULL) AS total_with_reply,
+        COUNT(*) FILTER (
+          WHERE last_salesman_reply_at >= last_customer_reply_at
+            AND EXTRACT(EPOCH FROM (last_salesman_reply_at - last_customer_reply_at)) / 60 <= 30
+        ) AS within_30min,
+        COUNT(*) FILTER (
+          WHERE last_salesman_reply_at >= last_customer_reply_at
+            AND EXTRACT(EPOCH FROM (last_salesman_reply_at - last_customer_reply_at)) / 60 <= 120
+        ) AS within_2h,
+        ROUND(AVG(
+          CASE WHEN last_salesman_reply_at >= last_customer_reply_at
+            THEN EXTRACT(EPOCH FROM (last_salesman_reply_at - last_customer_reply_at)) / 60
+          END
+        )::numeric, 1) AS avg_reply_min,
+        COUNT(*) FILTER (
+          WHERE last_customer_reply_at IS NOT NULL
+            AND status NOT IN ('CONVERTED', 'LOST')
+            AND (last_salesman_reply_at IS NULL OR last_salesman_reply_at < last_customer_reply_at)
+        ) AS currently_unanswered
+      FROM leads l
+      ${where}
+    `, params);
+
+    const totalWithReply = +r.total_with_reply;
+    return {
+      totalWithReply,
+      within30MinCount: +r.within_30min,
+      within2hCount: +r.within_2h,
+      within30MinPct: totalWithReply > 0 ? Math.round((+r.within_30min / totalWithReply) * 100) : null,
+      within2hPct: totalWithReply > 0 ? Math.round((+r.within_2h / totalWithReply) * 100) : null,
+      avgReplyMin: r.avg_reply_min ? +r.avg_reply_min : null,
+      currentlyUnanswered: +r.currently_unanswered,
+    };
+  }
+
+  async getFunnel(user: any) {
+    const where = this.isFullAccess(user)
+      ? `WHERE is_active = true`
+      : `WHERE is_active = true AND (assigned_to = $1 OR created_by = $1)`;
+    const params = this.isFullAccess(user) ? [] : [user.id];
+
+    const [r] = await this.ds.query(`
+      SELECT
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE status IN ('CONTACTED','INTERESTED','QUOTATION','CONVERTED')) AS contacted,
+        COUNT(*) FILTER (WHERE status IN ('INTERESTED','QUOTATION','CONVERTED')) AS interested,
+        COUNT(*) FILTER (WHERE status IN ('QUOTATION','CONVERTED')) AS quotation,
+        COUNT(*) FILTER (WHERE status = 'CONVERTED') AS converted,
+        COUNT(*) FILTER (WHERE status = 'LOST') AS lost
+      FROM leads l
+      ${where}
+    `, params);
+
+    const total = +r.total || 1;
+    return {
+      total: +r.total,
+      contacted: +r.contacted,
+      interested: +r.interested,
+      quotation: +r.quotation,
+      converted: +r.converted,
+      lost: +r.lost,
+      rates: {
+        contactedPct: Math.round((+r.contacted / total) * 100),
+        interestedPct: Math.round((+r.interested / total) * 100),
+        quotationPct: Math.round((+r.quotation / total) * 100),
+        convertedPct: Math.round((+r.converted / total) * 100),
+      },
+    };
+  }
+
+  async getRiskSignals(user: any) {
+    const where = this.isFullAccess(user)
+      ? `WHERE is_active = true`
+      : `WHERE is_active = true AND (assigned_to = $1 OR created_by = $1)`;
+    const params = this.isFullAccess(user) ? [] : [user.id];
+
+    const [r] = await this.ds.query(`
+      SELECT
+        COUNT(*) FILTER (
+          WHERE last_customer_reply_at IS NOT NULL
+            AND status NOT IN ('CONVERTED', 'LOST')
+            AND (last_salesman_reply_at IS NULL OR last_salesman_reply_at < last_customer_reply_at)
+            AND EXTRACT(EPOCH FROM (NOW() - last_customer_reply_at)) / 60 >= 240
+        ) AS overdue_count,
+        COUNT(*) FILTER (
+          WHERE last_customer_reply_at IS NOT NULL
+            AND status NOT IN ('CONVERTED', 'LOST')
+            AND (last_salesman_reply_at IS NULL OR last_salesman_reply_at < last_customer_reply_at)
+            AND EXTRACT(EPOCH FROM (NOW() - last_customer_reply_at)) / 60 >= 120
+            AND EXTRACT(EPOCH FROM (NOW() - last_customer_reply_at)) / 60 < 240
+        ) AS waiting_critical_count,
+        COUNT(*) FILTER (
+          WHERE status = 'NEW'
+            AND created_at < NOW() - INTERVAL '3 days'
+        ) AS stale_new_count,
+        COUNT(*) FILTER (
+          WHERE status = 'INTERESTED'
+            AND updated_at < NOW() - INTERVAL '7 days'
+        ) AS stale_interested_count
+      FROM leads l
+      ${where}
+    `, params);
+
+    return {
+      overdueCount: +r.overdue_count,
+      waitingCriticalCount: +r.waiting_critical_count,
+      staleNewCount: +r.stale_new_count,
+      staleInterestedCount: +r.stale_interested_count,
+    };
+  }
+
+  async getResponseBuckets(user: any) {
+    const where = this.isFullAccess(user)
+      ? `WHERE last_customer_reply_at IS NOT NULL AND is_active = true`
+      : `WHERE last_customer_reply_at IS NOT NULL AND is_active = true AND (assigned_to = $1 OR created_by = $1)`;
+    const params = this.isFullAccess(user) ? [] : [user.id];
+
+    const rows = await this.ds.query(`
+      SELECT
+        CASE
+          WHEN last_salesman_reply_at IS NULL OR last_salesman_reply_at < last_customer_reply_at THEN 'unanswered'
+          WHEN EXTRACT(EPOCH FROM (last_salesman_reply_at - last_customer_reply_at)) / 60 < 30  THEN 'under_30min'
+          WHEN EXTRACT(EPOCH FROM (last_salesman_reply_at - last_customer_reply_at)) / 60 < 120 THEN '30min_to_2h'
+          WHEN EXTRACT(EPOCH FROM (last_salesman_reply_at - last_customer_reply_at)) / 60 < 240 THEN '2h_to_4h'
+          ELSE 'over_4h'
+        END AS bucket,
+        COUNT(*) AS total,
+        COUNT(*) FILTER (WHERE status = 'CONVERTED') AS converted
+      FROM leads l
+      ${where}
+      GROUP BY 1
+      ORDER BY
+        CASE bucket
+          WHEN 'under_30min' THEN 1
+          WHEN '30min_to_2h' THEN 2
+          WHEN '2h_to_4h'    THEN 3
+          WHEN 'over_4h'     THEN 4
+          WHEN 'unanswered'  THEN 5
+        END
+    `, params);
+
+    const BUCKET_LABELS: Record<string, string> = {
+      under_30min: '< 30 min',
+      '30min_to_2h': '30 min – 2 h',
+      '2h_to_4h': '2 h – 4 h',
+      over_4h: '> 4 h',
+      unanswered: 'Unanswered',
+    };
+
+    return rows.map((r: any) => ({
+      bucket: r.bucket,
+      label: BUCKET_LABELS[r.bucket] || r.bucket,
+      total: +r.total,
+      converted: +r.converted,
+      conversionPct: +r.total > 0 ? Math.round((+r.converted / +r.total) * 100) : 0,
+    }));
   }
 }

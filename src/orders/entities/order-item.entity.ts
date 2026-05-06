@@ -1,55 +1,52 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { Order } from './order.entity';
 
-@Entity()
+@Entity('order_item')
 export class OrderItem {
   @PrimaryGeneratedColumn()
   id: number;
 
-  @Column()
-  itemName: string;
+  @Column({ nullable: true })
+  sku: string;
 
-  @Column()
-  quantity: number;
+  @Column({ nullable: true })
+  item_name: string;
 
-  // 🔥 NEW FIELDS (VERY IMPORTANT)
-  @Column('float')
-  msp_price: number;
+  @Column({ nullable: true })
+  hsn_code: string;
 
-  @Column('float', { default: 0 })
-  discount_amount: number;
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 1 })
+  qty: number;
 
-  @Column('float', { default: 0 })
-  discount_percent: number;
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  base_rate: number;
 
-  // ✅ FINAL VALUES
-  @Column('float')
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   rate: number;
 
-  @Column('float')
+  @Column({ type: 'varchar', length: 10, default: 'percent', nullable: true })
+  discount_type: string;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  discount_value: number;
+
+  @Column({ type: 'decimal', precision: 5, scale: 2, default: 0 })
+  gst_percent: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   amount: number;
 
-  // ✅ OPTIONAL (already in your code)
-  @Column({ default: 'stock' })
-  item_type: string;
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  gst_amount: number;
 
-  @Column({ default: 'pending' })
-  status: string;
+  @Column({ type: 'text', nullable: true })
+  instruction: string;
 
+  @Index('idx_order_item_order')
   @Column({ nullable: true })
-  productId: string;
+  order_id: number;
 
-  // 🔗 RELATION
-  @ManyToOne(() => Order, (order) => order.items, {
-    onDelete: 'CASCADE',
-  })
+  @ManyToOne(() => Order, (order) => order.items, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'order_id' })
   order: Order;
-
-  @Column({ nullable: true })
-  image: string;
-
-  @Column({ default: true })
-  isActive: boolean;
 }
-
-

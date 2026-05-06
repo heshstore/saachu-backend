@@ -25,9 +25,11 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   async validate(payload: any) {
     // Re-read from DB on every request so role changes and deactivations take effect immediately
     const user = await this.userRepo.findOne({ where: { id: payload.sub } });
+
     if (!user || !user.is_active) {
       throw new UnauthorizedException('Account not found or inactive');
     }
+
     return {
       id: user.id,
       name: user.name,

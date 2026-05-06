@@ -3,10 +3,30 @@ import {
   PrimaryGeneratedColumn,
   Column,
   CreateDateColumn,
+  UpdateDateColumn,
+  DeleteDateColumn,
   OneToMany,
+  Index,
 } from 'typeorm';
 import { QuotationItem } from './quotation-item.entity';
 
+export enum QuotationStatus {
+  DRAFT     = 'DRAFT',
+  SENT      = 'SENT',
+  APPROVED  = 'APPROVED',
+  REJECTED  = 'REJECTED',
+  CANCELLED = 'CANCELLED',
+  CONVERTED = 'CONVERTED', // quotation → order
+}
+
+export enum QuotationDiscountType {
+  PERCENT = 'PERCENT',
+  FLAT    = 'FLAT',
+}
+
+@Index('idx_quotation_customer', ['customer_id'])
+@Index('idx_quotation_salesman', ['salesman_id'])
+@Index('idx_quotation_status',   ['status'])
 @Entity('quotation')
 export class Quotation {
   @PrimaryGeneratedColumn()
@@ -16,10 +36,26 @@ export class Quotation {
   quotation_no: string;
 
   @Column({ nullable: true })
-  customer_id: number;
+  lead_id: number;
 
   @Column({ nullable: true })
+  customer_id: number;
+
+  // ── Customer snapshot — frozen at creation, never read from live customer table ─
+  @Column({ nullable: true })
   customer_name: string;
+
+  @Column({ nullable: true })
+  customer_phone: string;
+
+  @Column({ type: 'text', nullable: true })
+  billing_address: string;
+
+  @Column({ type: 'text', nullable: true })
+  shipping_address: string;
+
+  @Column({ nullable: true })
+  gst_number: string;
 
   @Column({ nullable: true })
   bill_to_id: number;
@@ -30,8 +66,8 @@ export class Quotation {
   @Column({ nullable: true })
   salesman_id: number;
 
-  @Column({ default: 'OPEN' })
-  status: string;
+  @Column({ type: 'varchar', length: 20, default: QuotationStatus.DRAFT })
+  status: QuotationStatus;
 
   @Column({ default: 15 })
   validity_days: number;
@@ -51,6 +87,14 @@ export class Quotation {
   @Column({ type: 'text', nullable: true })
   delivery_instructions: string;
 
+  // ── Header-level discount ────────────────────────────────────────────────────
+  @Column({ type: 'varchar', length: 10, default: QuotationDiscountType.PERCENT, nullable: true })
+  discount_type: QuotationDiscountType;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  discount_value: number;
+
+  // ── Additional charges ───────────────────────────────────────────────────────
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   charges_packing: number;
 
@@ -66,17 +110,19 @@ export class Quotation {
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   charges_loading: number;
 
+  // ── Totals ───────────────────────────────────────────────────────────────────
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   sub_total: number;
 
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   total_amount: number;
 
-  @Column({ type: 'timestamp', nullable: true })
-  cancelled_at: Date;
-
+  // ── Audit ────────────────────────────────────────────────────────────────────
   @Column({ nullable: true })
   cancelled_by: number;
+
+  @Column({ type: 'timestamp', nullable: true })
+  cancelled_at: Date;
 
   @Column({ nullable: true })
   created_by: number;
@@ -84,11 +130,17 @@ export class Quotation {
   @Column({ default: false })
   is_wholesaler: boolean;
 
+  @Column({ default: 1 })
+  version: number;
+
   @CreateDateColumn()
   created_at: Date;
 
-  @Column({ default: 1 })
-  version: number;
+  @UpdateDateColumn({ nullable: true })
+  updated_at: Date;
+
+  @DeleteDateColumn({ nullable: true })
+  deleted_at: Date;
 
   @OneToMany(() => QuotationItem, (item) => item.quotation, {
     cascade: true,

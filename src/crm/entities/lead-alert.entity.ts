@@ -1,20 +1,20 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column, CreateDateColumn,
+  Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn,
 } from 'typeorm';
 
 export type AlertType =
   | 'NOT_CONTACTED'
   | 'HIGH_PRIORITY_STALE'
   | 'FOLLOWUP_OVERDUE'
-  | 'WHATSAPP_DOWN';   // system-level — lead_id is null
+  | 'WHATSAPP_DOWN';
 
 @Entity('lead_alerts')
 export class LeadAlert {
   @PrimaryGeneratedColumn()
   id: number;
 
-  /** Null for system-level alerts (e.g. WHATSAPP_DOWN) that aren't tied to a lead. */
-  @Column({ nullable: true })
+  /** Null for system-level alerts (e.g. WHATSAPP_DOWN) not tied to a specific lead. */
+  @Column({ nullable: true, type: 'int' })
   lead_id: number | null;
 
   @Column({ length: 50 })
@@ -26,6 +26,9 @@ export class LeadAlert {
   @Column({ default: false })
   resolved: boolean;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ type: 'timestamptz' })
   created_at: Date;
+
+  @UpdateDateColumn({ type: 'timestamptz' })
+  updated_at: Date;
 }

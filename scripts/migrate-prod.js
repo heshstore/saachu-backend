@@ -2,14 +2,27 @@
 /**
  * Full production migration: RBAC tables + CRM tables + permissions + Admin user.
  * Run once against the prod DB:
- *   node scripts/migrate-prod.js
+ *   DATABASE_URL=<your-neon-url> node scripts/migrate-prod.js
+ *   — or —
+ *   node scripts/migrate-prod.js   (picks up DATABASE_URL from .env)
  *
  * Safe to re-run (all statements use IF NOT EXISTS / ON CONFLICT DO NOTHING).
  */
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const bcrypt = require('bcrypt');
 const { Client } = require('pg');
 
-const DB_URL = 'postgresql://neondb_owner:npg_hlAOPvN2r6po@ep-noisy-pond-a1nmenkk-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require';
+function stripChannelBinding(url) {
+  try {
+    const u = new URL(url);
+    u.searchParams.delete('channel_binding');
+    return u.toString();
+  } catch { return url; }
+}
+
+const rawUrl = process.env.DATABASE_URL;
+if (!rawUrl) { console.error('❌ DATABASE_URL is not set. Export it or add it to .env'); process.exit(1); }
+const DB_URL = stripChannelBinding(rawUrl);
 
 const ADMIN_MOBILE   = '9000000001';
 const ADMIN_PASSWORD = 'Saachu@2026';
@@ -125,9 +138,10 @@ const ROLE_PERMISSIONS = {
 };
 
 async function main() {
+  const useSSL = /neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(DB_URL);
   const client = new Client({
     connectionString: DB_URL,
-    ssl: { rejectUnauthorized: false },
+    ssl: useSSL ? { rejectUnauthorized: false } : false,
   });
   await client.connect();
   console.log('Connected to prod DB.\n');

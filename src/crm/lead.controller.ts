@@ -1,12 +1,15 @@
 import {
-  Controller, Get, Post, Put, Patch, Delete,
+  Controller, Get, Post, Put, Patch, Delete, ForbiddenException,
   Param, Body, Query, Request, ParseIntPipe,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { LeadService } from './lead.service';
 import { CreateLeadDto } from './dto/create-lead.dto';
+import { CreateManualLeadDto } from './dto/create-manual-lead.dto';
 import { UpdateLeadDto } from './dto/update-lead.dto';
 import { NoteType } from './entities/lead-note.entity';
 import { RequirePermission } from '../auth/require-permission.decorator';
+import { LeadStage } from './entities/lead.entity';
 
 @Controller('crm/leads')
 export class LeadController {
@@ -18,10 +21,16 @@ export class LeadController {
     return this.leadService.findAll(filters, req.user);
   }
 
+  /**
+   * Manual lead creation from the frontend.
+   * Uses strict DTO — name, phone, city, country, product_interest are required.
+   * Throttled to 10 creates/min per IP to prevent double-submit duplicates.
+   */
   @Post()
   @RequirePermission('lead.create')
-  create(@Body() dto: CreateLeadDto, @Request() req) {
-    return this.leadService.create(dto, req.user);
+  @Throttle({ default: { ttl: 60_000, limit: 10 } })
+  create(@Body() dto: CreateManualLeadDto, @Request() req) {
+    return this.leadService.create(dto as unknown as CreateLeadDto, req.user);
   }
 
   @Get('queue')
@@ -72,9 +81,10 @@ export class LeadController {
   @RequirePermission('lead.assign')
   assign(
     @Param('id', ParseIntPipe) id: number,
-    @Body('userId', ParseIntPipe) userId: number,
+    @Body('userId') rawUserId: number | null,
     @Request() req,
   ) {
+    const userId = rawUserId === null || rawUserId === undefined ? null : Number(rawUserId);
     return this.leadService.assignLead(id, userId, req.user, req.ip);
   }
 
@@ -113,10 +123,42 @@ export class LeadController {
     return this.leadService.completeFollowUp(fid, req.user, req.ip);
   }
 
+  /**
+   * Check-convert: returns whether a customer record already exists for this lead,
+   * plus prefill data for the ConvertToCustomerModal. Does NOT create anything.
+   * The frontend uses this to decide whether to open the modal or navigate directly to quotation.
+   */
   @Post(':id/convert')
   @RequirePermission('lead.convert')
-  checkConvert(@Param('id', ParseIntPipe) id: number, @Request() req) {
+  convertLead(@Param('id', ParseIntPipe) id: number, @Request() req) {
     return this.leadService.checkConvert(id, req.user);
+  }
+
+  /**
+   * Quick-convert: one-click flow that finds or creates a customer record,
+   * marks the lead CONVERTED, and returns the customerId. Used by automated
+   * flows and integrations — not called directly by the main frontend modal.
+   */
+  @Post(':id/quick-convert')
+  @RequirePermission('lead.convert')
+  quickConvert(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    return this.leadService.quickConvert(id, req.user, req.ip);
+  }
+
+  @Patch(':id/stage')
+  @RequirePermission('lead.edit')
+  updateStage(
+    @Param('id', ParseIntPipe) id: number,
+    @Body('stage') stage: LeadStage,
+    @Request() req,
+  ) {
+    return this.leadService.updateStage(id, stage, req.user);
+  }
+
+  @Post(':id/create-quotation')
+  @RequirePermission('lead.edit')
+  createQuotation(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    return this.leadService.createQuotationFromLead(id, req.user, req.ip);
   }
 
   @Patch(':id/mark-converted')
@@ -127,5 +169,33 @@ export class LeadController {
     @Request() req,
   ) {
     return this.leadService.markConverted(id, body.customerId, body.quotationId, req.user, req.ip);
+  }
+
+  // ── Per-lead automation pause ─────────────────────────────────────────────────
+
+  @Patch(':id/automation')
+  @RequirePermission('lead.edit')
+  setAutomationPaused(
+    @Param('id', ParseIntPipe) id: number,
+    @Body('paused') paused: boolean,
+  ) {
+    return this.leadService.setAutomationPaused(id, paused);
+  }
+
+  // ── Automation settings (Admin only) ─────────────────────────────────────────
+
+  @Get('automation/settings')
+  @RequirePermission('lead.view')
+  getAutomationSettings() {
+    return this.leadService.getAutomationSettings();
+  }
+
+  @Put('automation/settings')
+  @RequirePermission('lead.view')
+  updateAutomationSettings(@Body() body: Record<string, boolean>, @Request() req) {
+    if (req.user?.role !== 'Admin' && req.user?.role !== 'COO') {
+      throw new ForbiddenException('Only Admin or COO can change automation settings');
+    }
+    return this.leadService.updateAutomationSettings(body);
   }
 }

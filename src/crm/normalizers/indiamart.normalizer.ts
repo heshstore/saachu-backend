@@ -1,5 +1,6 @@
 import { normalizePhone, toSentenceCase, sentenceCaseWords } from './lead-normalizer';
 import { LeadSource } from '../entities/lead.entity';
+import { LeadContext, contextToLabel } from '../enums/lead-context.enum';
 
 export function normalizeIndiaMart(payload: any) {
   const rawPhone = payload.SENDER_MOBILE || payload.sender_mobile || '';
@@ -11,6 +12,7 @@ export function normalizeIndiaMart(payload: any) {
     source:           LeadSource.INDIAMART,
     product_interest: payload.product || payload.product_title || payload.QUERY_PRODUCT_NAME || payload.SUBJECT || undefined,
     notes:            toSentenceCase(payload.QUERY_MESSAGE || '') || undefined,
+    context:          contextToLabel(LeadContext.INDIAMART_QUERY),
     lead_source_label: 'indiamart_query',
     channel:          'FORM',
     utm_source:       'indiamart',

@@ -31,8 +31,8 @@ export class LeadFollowUp {
   @Column({ nullable: true })
   completed_by: number;
 
-  @Column()
-  created_by: number;
+  @Column({ nullable: true })
+  created_by: number | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   created_at: Date;

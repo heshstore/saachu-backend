@@ -44,7 +44,7 @@ export class WebhookController {
     setImmediate(async () => {
       try {
         const dto = normalizeIndiaMart(body);
-        if (!dto.phone) return;
+        if (!dto.phone || dto.phone === 'unknown') return;
         await this.leadService.create(dto as any, { id: null, role: 'Admin' });
       } catch (e) {
         this.logger.error('[IndiaMart] processing failed', e?.message);

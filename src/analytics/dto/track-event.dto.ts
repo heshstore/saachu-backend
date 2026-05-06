@@ -16,4 +16,20 @@ export class TrackEventDto {
   @IsString()
   @IsNotEmpty()
   page_url: string;
+
+  @IsOptional()
+  @IsString()
+  device?: string;
+
+  @IsOptional()
+  @IsString()
+  city?: string;
+
+  @IsOptional()
+  @IsString()
+  source?: string;
+
+  @IsOptional()
+  @IsString()
+  timestamp?: string;
 }
