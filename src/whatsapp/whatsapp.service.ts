@@ -286,6 +286,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
       if (reason === 'CONFLICT') {
         // Another session is active — reiniting immediately just loops forever.
+        this.eventEmitter.emit('whatsapp.down', { reason: 'CONFLICT' });
         this.qrSubject.next(JSON.stringify({
           type: 'error',
           message: 'WhatsApp conflict: another session is using this account. Close web.whatsapp.com or other linked devices, then click "Force Reconnect".',
@@ -313,6 +314,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         type: 'error',
         message: 'Authentication failed. Clearing session — a fresh QR will appear shortly.',
       }));
+      this.eventEmitter.emit('whatsapp.down', { reason: 'AUTH_FAILURE' });
       await this.clearSessionFiles();
       setTimeout(() => this.reinitClient().catch((e) => this.logger.error('[WhatsApp] Reinit after auth_failure failed', e?.message)), 3_000);
     });
@@ -332,6 +334,10 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`[WhatsApp] Inbound from=${msg.from} id=${msgId}`);
       await this.handleInbound(msg);
     };
+
+    this.client.on('loading_screen', (percent: number, message: string) => {
+      this.logger.log(`[WhatsApp] Loading ${percent}% — ${message}`);
+    });
 
     this.client.on('message', onMsg);
     this.client.on('message_create', onMsg);
