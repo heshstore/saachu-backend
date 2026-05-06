@@ -7,38 +7,17 @@ import { AppModule } from './app.module';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { LoggingInterceptor } from './common/logging.interceptor';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
+import { sanitizeDatabaseUrl, buildSslOption, redactDatabaseUrl } from './utils/db-url.util';
 
 const logger = new Logger('Bootstrap');
-
-/**
- * Strip params that raw pg.Client doesn't support (channel_binding) — Neon
- * includes this in their pooler URLs but it requires SCRAM-SHA-256-PLUS which
- * pg.Client doesn't implement, causing "password authentication failed" even
- * when the password is correct.  TypeORM's Pool handles it differently and
- * succeeds, so only the raw Client calls need this fix.
- */
-function getSafeDbUrl(url: string): string {
-  try {
-    const u = new URL(url);
-    u.searchParams.delete('channel_binding');
-    return u.toString();
-  } catch {
-    return url;
-  }
-}
-
-function buildSslOption(url: string): { rejectUnauthorized: boolean } | undefined {
-  return /neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(url)
-    ? { rejectUnauthorized: false }
-    : undefined;
-}
 
 /** Creates and connects a one-shot pg Client using DATABASE_URL (channel_binding stripped). */
 async function createMigrationClient(): Promise<Client> {
   const raw = process.env.DATABASE_URL ?? '';
   if (!raw) throw new Error('DATABASE_URL is not set');
-  const url = getSafeDbUrl(raw);
-  const client = new Client({ connectionString: url, ssl: buildSslOption(url) });
+  const url = sanitizeDatabaseUrl(raw);
+  const ssl  = buildSslOption(url);
+  const client = new Client({ connectionString: url, ssl: ssl === false ? undefined : ssl });
   await client.connect();
   return client;
 }
@@ -181,7 +160,9 @@ async function validateSchema(): Promise<void> {
 }
 
 async function bootstrap() {
-  const dbUrl = process.env.DATABASE_URL ?? '';
+  const rawDbUrl = process.env.DATABASE_URL ?? '';
+  const dbUrl    = sanitizeDatabaseUrl(rawDbUrl);
+
   if (dbUrl.includes('localhost') || dbUrl.includes('127.0.0.1')) {
     if (process.env.ALLOW_LOCAL_DB !== 'true') {
       console.error('❌ Local DB is not allowed. Use Neon DB.');
@@ -190,7 +171,7 @@ async function bootstrap() {
     console.warn('⚠️  ALLOW_LOCAL_DB=true — running with local database.');
   }
 
-  console.log('DB CONNECTED TO:', dbUrl.replace(/:\/\/[^@]+@/, '://***@') || '(not set)');
+  logger.log(`DB (sanitized): ${redactDatabaseUrl(dbUrl) || '(not set)'}`);
 
   try {
     await ensurePromotionTable();

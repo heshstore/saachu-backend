@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, Logger } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { ConfigModule } from '@nestjs/config';
@@ -7,6 +7,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { sanitizeDatabaseUrl, buildSslOption, redactDatabaseUrl } from './utils/db-url.util';
 
 import { OrdersModule } from './orders/orders.module';
 import { InvoiceModule } from './invoice/invoice.module';
@@ -37,10 +38,14 @@ import { LogsModule } from './logs/logs.module';
 import { DispatchModule }   from './dispatch/dispatch.module';
 import { DashboardModule }  from './dashboard/dashboard.module';
 
-const databaseUrl = process.env.DATABASE_URL || '';
-const useDatabaseSsl =
-  /neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(databaseUrl) ||
-  process.env.DATABASE_SSL === 'true';
+const _rawDbUrl      = process.env.DATABASE_URL || '';
+const databaseUrl    = sanitizeDatabaseUrl(_rawDbUrl);
+const useDatabaseSsl = buildSslOption(databaseUrl) !== false || process.env.DATABASE_SSL === 'true';
+
+// Startup log — confirms channel_binding is gone before TypeORM connects
+new Logger('AppModule').log(
+  `DB URL (sanitized): ${redactDatabaseUrl(databaseUrl) || '(not set)'}`,
+);
 
 @Module({
   controllers: [AppController],
@@ -52,17 +57,16 @@ const useDatabaseSsl =
 
     TypeOrmModule.forRoot({
       type: 'postgres',
-      url: process.env.DATABASE_URL,
+      url: databaseUrl,           // sanitized — channel_binding stripped
       entities: [Order, OrderItem, Invoice, Commission, User, Product],
       autoLoadEntities: true,
       synchronize: false,
       ssl: useDatabaseSsl ? { rejectUnauthorized: false } : false,
-      // Explicit pool config — pg defaults to max:10 which saturates under pessimistic locks at scale.
       extra: {
-        max:                    Number(process.env.DB_POOL_MAX)  || 25,
-        min:                    Number(process.env.DB_POOL_MIN)  || 2,
-        idleTimeoutMillis:      30_000,   // release idle connections after 30s
-        connectionTimeoutMillis: 5_000,   // fail fast if pool is exhausted (better than hanging)
+        max:                     Number(process.env.DB_POOL_MAX)  || 25,
+        min:                     Number(process.env.DB_POOL_MIN)  || 2,
+        idleTimeoutMillis:       30_000,
+        connectionTimeoutMillis:  5_000,
       },
     }),
 
