@@ -63,10 +63,12 @@ new Logger('AppModule').log(
       synchronize: false,
       ssl: useDatabaseSsl ? { rejectUnauthorized: false } : false,
       extra: {
-        max:                     Number(process.env.DB_POOL_MAX)  || 25,
-        min:                     Number(process.env.DB_POOL_MIN)  || 2,
-        idleTimeoutMillis:       30_000,
-        connectionTimeoutMillis:  5_000,
+        max:                          Number(process.env.DB_POOL_MAX) || 10,
+        min:                          0,
+        idleTimeoutMillis:            30_000,
+        connectionTimeoutMillis:      15_000,
+        keepAlive:                    true,
+        keepAliveInitialDelayMillis:  10_000,
       },
     }),
 
