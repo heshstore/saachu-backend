@@ -219,7 +219,7 @@ export class LeadAutomationService {
          AND l.status NOT IN ('CONVERTED', 'LOST')
          AND l.is_active = true
          AND l.assigned_to IS NOT NULL
-         AND NOT ('automation_off' = ANY(COALESCE(l.tags, '[]'::jsonb)))
+         AND NOT (COALESCE(l.tags, '[]'::jsonb) ? 'automation_off')
          AND (l.last_customer_reply_at IS NULL OR l.last_customer_reply_at < NOW() - INTERVAL '6 hours')
        ORDER BY l.follow_up_date ASC
        LIMIT 50`,
@@ -272,7 +272,7 @@ export class LeadAutomationService {
          AND l.created_at < NOW() - INTERVAL '24 hours'
          AND l.is_active = true
          AND l.assigned_to IS NOT NULL
-         AND NOT ('automation_off' = ANY(COALESCE(l.tags, '[]'::jsonb)))
+         AND NOT (COALESCE(l.tags, '[]'::jsonb) ? 'automation_off')
        ORDER BY l.created_at ASC
        LIMIT 100`,
     );
@@ -327,7 +327,7 @@ export class LeadAutomationService {
          AND l.updated_at > NOW() - INTERVAL '7 days'
          AND l.is_active = true
          AND l.assigned_to IS NOT NULL
-         AND NOT ('automation_off' = ANY(COALESCE(l.tags, '[]'::jsonb)))
+         AND NOT (COALESCE(l.tags, '[]'::jsonb) ? 'automation_off')
        ORDER BY l.updated_at ASC
        LIMIT 30`,
     );
@@ -379,7 +379,7 @@ export class LeadAutomationService {
          AND l.updated_at < NOW() - INTERVAL '2 days'
          AND l.updated_at > NOW() - INTERVAL '6 days'
          AND l.is_active = true
-         AND NOT ('automation_off' = ANY(COALESCE(l.tags, '[]'::jsonb)))
+         AND NOT (COALESCE(l.tags, '[]'::jsonb) ? 'automation_off')
          AND (l.last_customer_reply_at IS NULL OR l.last_customer_reply_at < NOW() - INTERVAL '48 hours')
          AND (
            SELECT COUNT(*) FROM whatsapp_messages wm
@@ -446,7 +446,7 @@ export class LeadAutomationService {
        WHERE l.status = 'NEW'
          AND l.is_active = true
          AND l.assigned_to IS NOT NULL
-         AND NOT ('automation_off' = ANY(COALESCE(l.tags, '[]'::jsonb)))
+         AND NOT (COALESCE(l.tags, '[]'::jsonb) ? 'automation_off')
          AND (
            (l.source IN ('META', 'GOOGLE')
             AND l.created_at BETWEEN NOW() - INTERVAL '4 hours' AND NOW() - INTERVAL '45 minutes')
@@ -507,7 +507,7 @@ export class LeadAutomationService {
        WHERE l.status NOT IN ('CONVERTED', 'LOST')
          AND l.is_active = true
          AND l.assigned_to IS NOT NULL
-         AND NOT ('automation_off' = ANY(COALESCE(l.tags, '[]'::jsonb)))
+         AND NOT (COALESCE(l.tags, '[]'::jsonb) ? 'automation_off')
          AND l.last_customer_reply_at IS NOT NULL
          AND l.last_customer_reply_at < NOW() - INTERVAL '30 minutes'
          AND l.last_customer_reply_at > NOW() - INTERVAL '6 hours'
