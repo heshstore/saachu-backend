@@ -3,8 +3,8 @@
 /node_modules
 /build
 
-# Logs
-logs
+# Logs — /logs anchors to repo root only, prevents matching src/logs/ source directory
+/logs
 *.log
 npm-debug.log*
 pnpm-debug.log*
