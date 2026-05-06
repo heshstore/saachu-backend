@@ -218,22 +218,30 @@ async function bootstrap() {
   // Trust the first proxy hop (Render, Cloudflare) so ThrottlerGuard sees real client IPs
   app.getHttpAdapter().getInstance().set('trust proxy', 1);
 
+  // Always-allowed origins (dev + known prod domains)
+  const SAFE_ORIGINS = [
+    'http://localhost:3000',
+    'http://localhost:4000',
+    'https://heshstore.in',
+    'https://www.heshstore.in',
+  ];
+
+  // CORS_ORIGIN env var: '*' = wildcard, comma-separated list = merge with safe defaults
   const corsRaw = (process.env.CORS_ORIGIN || '').trim();
-  // '*' is only for local dev; unset CORS_ORIGIN rejects all cross-origin requests in production
-  const corsOrigin: boolean | string | string[] =
+  const corsOrigin: boolean | string[] =
     corsRaw === '*'
-      ? true
-      : corsRaw.includes(',')
-        ? corsRaw.split(',').map((s) => s.trim()).filter(Boolean)
-        : corsRaw || false;
+      ? true   // wildcard (dev only)
+      : [
+          ...new Set([
+            ...SAFE_ORIGINS,
+            ...corsRaw.split(',').map((s) => s.trim()).filter(Boolean),
+          ]),
+        ];
+
+  logger.log(`CORS allowed origins: ${corsOrigin === true ? '*' : (corsOrigin as string[]).join(', ')}`);
 
   app.enableCors({
-    origin: [
-      'http://localhost:3000',
-      'http://localhost:4000',
-      'https://heshstore.in',
-      'https://www.heshstore.in',
-    ],
+    origin: corsOrigin,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     allowedHeaders: 'Content-Type, Authorization',
     credentials: true,
