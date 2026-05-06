@@ -50,6 +50,8 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   private qrGenerated = false;
   // Timestamp of the most recent unplanned disconnect — used to log recovery duration.
   private _disconnectedAt: Date | null = null;
+  // Prevents concurrent post-reconnect recovery scans if ready fires multiple times rapidly.
+  private _recovering = false;
 
   constructor(
     @InjectRepository(WhatsAppSession)
@@ -248,6 +250,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`[WhatsApp] Connected as +${phone}`);
       this.startHealthMonitor();
       this.eventEmitter.emit('whatsapp.up');
+      setTimeout(() => this.recoverMissedMessages().catch((e) => this.logger.warn(`[WhatsApp] Recovery scan failed: ${e?.message}`)), 3_000);
 
       // Attach Puppeteer page-level listeners to detect navigation events that
       // temporarily destroy the JS execution context inside the WA Web frame.
@@ -842,6 +845,64 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       context: 'WHATSAPP – Inbound',
       raw_payload: { chatId, body, timestamp: msg.timestamp },
     });
+  }
+
+  private async recoverMissedMessages(): Promise<void> {
+    if (this._recovering) {
+      this.logger.warn('[WhatsApp] Recovery scan already in progress — skipping');
+      return;
+    }
+    if (!this.isConnected()) return;
+
+    this._recovering = true;
+    try {
+      this.logger.log('[WhatsApp] Starting reconnect recovery scan');
+      const cutoff = Date.now() - 30 * 60 * 1000;
+
+      const chats: any[] = await this.client.getChats();
+      const dmChats = chats.filter((c: any) => !c.isGroup).slice(0, 20);
+
+      for (const chat of dmChats) {
+        if (!this.isConnected()) break;
+
+        let msgs: any[];
+        try {
+          msgs = await chat.fetchMessages({ limit: 10 });
+        } catch (e: any) {
+          this.logger.warn(`[WhatsApp] Recovery scan: could not fetch messages for chat ${chat.id?._serialized}: ${e?.message}`);
+          continue;
+        }
+
+        for (const msg of msgs) {
+          if (msg.fromMe) continue;
+          if ((msg.timestamp * 1000) < cutoff) continue;
+
+          const msgId: string = msg.id?._serialized ?? `${msg.from}-${msg.timestamp}`;
+          if (this.seenMsgIds.has(msgId)) continue;
+
+          // Mirror seenMsgIds bookkeeping from onMsg so a concurrent 'message' event
+          // for the same msg doesn't process it a second time.
+          this.seenMsgIds.add(msgId);
+          if (this.seenMsgIds.size > 500) {
+            const first = this.seenMsgIds.values().next().value;
+            this.seenMsgIds.delete(first);
+          }
+
+          this.logger.log(`[WhatsApp] Recovered missed message: ${msgId}`);
+          try {
+            await this.handleInbound(msg);
+          } catch (e: any) {
+            this.logger.warn(`[WhatsApp] Recovery scan: handleInbound failed for msg ${msgId}: ${e?.message}`);
+          }
+        }
+      }
+
+      this.logger.log('[WhatsApp] Recovery scan complete');
+    } catch (e: any) {
+      this.logger.warn(`[WhatsApp] Recovery scan failed: ${e?.message}`);
+    } finally {
+      this._recovering = false;
+    }
   }
 
   private async updateSession(data: Partial<WhatsAppSession>): Promise<void> {
