@@ -21,5 +21,8 @@ export class WhatsAppSession {
   connected_at: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
+  disconnected_at: Date;
+
+  @Column({ type: 'timestamptz', nullable: true })
   last_active_at: Date;
 }

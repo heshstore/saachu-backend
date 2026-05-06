@@ -99,6 +99,20 @@ async function ensureAnalyticsTable(): Promise<void> {
   }
 }
 
+async function ensureWhatsappSessionColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      ALTER TABLE whatsapp_sessions
+        ADD COLUMN IF NOT EXISTS disconnected_at TIMESTAMPTZ
+    `);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 async function ensureLogsTable(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
   let client: Client | null = null;
@@ -190,6 +204,13 @@ async function bootstrap() {
     await ensureLogsTable();
   } catch (err: any) {
     logger.error('Logs migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureWhatsappSessionColumns();
+    logger.log('✅ WhatsApp session columns ready');
+  } catch (err: any) {
+    logger.error('WhatsApp session migration failed (non-fatal):', err?.message);
   }
 
   try {

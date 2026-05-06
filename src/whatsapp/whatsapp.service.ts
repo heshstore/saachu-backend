@@ -48,6 +48,8 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   // True once a QR is displayed and the user hasn't scanned yet.
   // Prevents the retry loop from tearing down the client mid-scan.
   private qrGenerated = false;
+  // Timestamp of the most recent unplanned disconnect — used to log recovery duration.
+  private _disconnectedAt: Date | null = null;
 
   constructor(
     @InjectRepository(WhatsAppSession)
@@ -236,7 +238,12 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       this.qrGenerated = false;
       const info = this.client.info;
       const phone = info?.wid?.user ?? null;
-      await this.updateSession({ status: 'CONNECTED', qr_code: null, phone_number: phone, connected_at: new Date() });
+      if (this._disconnectedAt) {
+        const mins = Math.round((Date.now() - this._disconnectedAt.getTime()) / 60_000);
+        this.logger.log(`[WhatsApp] Session recovered after ${mins} minute(s)`);
+        this._disconnectedAt = null;
+      }
+      await this.updateSession({ status: 'CONNECTED', qr_code: null, phone_number: phone, connected_at: new Date(), disconnected_at: null });
       this.qrSubject.next(JSON.stringify({ type: 'ready', phone }));
       this.logger.log(`[WhatsApp] Connected as +${phone}`);
       this.startHealthMonitor();
@@ -271,7 +278,11 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
       this._ready = false;
       this.stopHealthMonitor();
-      await this.updateSession({ status: 'DISCONNECTED' });
+      if (!this._disconnectedAt) {
+        this._disconnectedAt = new Date();
+        this.logger.log('[WhatsApp] Session downtime started');
+      }
+      await this.updateSession({ status: 'DISCONNECTED', disconnected_at: this._disconnectedAt });
       this.qrSubject.next(JSON.stringify({ type: 'disconnected', reason }));
 
       // disconnectAndReset() sets _manualDisconnect before calling logout() to prevent
@@ -309,7 +320,11 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     this.client.on('auth_failure', async (msg: string) => {
       this._ready = false;
       this.logger.error(`[WhatsApp] Auth failure: ${msg} — clearing session and restarting`);
-      await this.updateSession({ status: 'DISCONNECTED' });
+      if (!this._disconnectedAt) {
+        this._disconnectedAt = new Date();
+        this.logger.log('[WhatsApp] Session downtime started');
+      }
+      await this.updateSession({ status: 'DISCONNECTED', disconnected_at: this._disconnectedAt });
       this.qrSubject.next(JSON.stringify({
         type: 'error',
         message: 'Authentication failed. Clearing session — a fresh QR will appear shortly.',
@@ -608,7 +623,11 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       if (this._ready && !this.isConnected()) {
         this.logger.warn('[WhatsApp] Health check: _ready=true but page is gone — silent disconnect, reiniting');
         this._ready = false;
-        await this.updateSession({ status: 'DISCONNECTED' });
+        if (!this._disconnectedAt) {
+          this._disconnectedAt = new Date();
+          this.logger.log('[WhatsApp] Session downtime started');
+        }
+        await this.updateSession({ status: 'DISCONNECTED', disconnected_at: this._disconnectedAt });
         this.qrSubject.next(JSON.stringify({ type: 'disconnected', reason: 'SILENT' }));
         // Raise a WHATSAPP_DOWN alert — this path bypasses the 'disconnected' event handler
         this.eventEmitter.emit('whatsapp.down', { reason: 'SILENT' });
