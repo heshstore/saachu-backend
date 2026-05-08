@@ -198,6 +198,41 @@ async function ensureActivityTable(): Promise<void> {
   }
 }
 
+async function ensureKpiTable(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS kpi_snapshots (
+        id           UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        scope        VARCHAR(10)  NOT NULL,
+        scope_id     INT,
+        module       VARCHAR(20)  NOT NULL,
+        metric_key   VARCHAR(60)  NOT NULL,
+        metric_value NUMERIC(14,4) NOT NULL,
+        metric_unit  VARCHAR(20),
+        period       VARCHAR(10)  NOT NULL,
+        period_start TIMESTAMPTZ  NOT NULL,
+        period_end   TIMESTAMPTZ  NOT NULL,
+        metadata     JSONB,
+        created_at   TIMESTAMPTZ  NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_kpi_scope        ON kpi_snapshots(scope, scope_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_kpi_module       ON kpi_snapshots(module)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_kpi_metric       ON kpi_snapshots(metric_key)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_kpi_period       ON kpi_snapshots(period)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_kpi_period_start ON kpi_snapshots(period_start)`);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_kpi_snapshot
+        ON kpi_snapshots(scope, COALESCE(scope_id::text,''), module, metric_key, period, period_start)
+    `);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 async function ensureSlaTable(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
   let client: Client | null = null;
@@ -366,6 +401,13 @@ async function bootstrap() {
     logger.log('✅ Notification columns ready');
   } catch (err: any) {
     logger.error('Notification column migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureKpiTable();
+    logger.log('✅ KPI table ready');
+  } catch (err: any) {
+    logger.error('KPI table migration failed (non-fatal):', err?.message);
   }
 
   try {

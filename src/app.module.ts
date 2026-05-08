@@ -40,6 +40,7 @@ import { DashboardModule }  from './dashboard/dashboard.module';
 import { HealthModule }     from './health/health.module';
 import { SlaModule }        from './sla/sla.module';
 import { ActivityModule }   from './activity/activity.module';
+import { KpiModule }        from './kpi/kpi.module';
 
 const _rawDbUrl      = process.env.DATABASE_URL || '';
 const databaseUrl    = sanitizeDatabaseUrl(_rawDbUrl);
@@ -100,6 +101,7 @@ new Logger('AppModule').log(
     HealthModule,
     SlaModule,
     ActivityModule,
+    KpiModule,
   ],
   providers: [
     AppService,

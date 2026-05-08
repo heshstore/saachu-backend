@@ -257,11 +257,13 @@ export class NotificationEngineService {
     try {
       // Raw SQL to avoid hard-coupling Lead entity into this module.
       // Fails silently if table/column structure differs.
-      const rows: Array<{ assigned_to: number; id: number; customer_name: string }> =
+      const rows: Array<{ assigned_to: number; id: number; name: string }> =
         await this.userRepo.manager.query(`
-          SELECT assigned_to, id, customer_name
+          SELECT assigned_to, id, name
           FROM leads
-          WHERE status = 'HOT'
+          WHERE lead_priority = 'HIGH'
+            AND is_active = true
+            AND status NOT IN ('CONVERTED', 'LOST')
             AND assigned_to IS NOT NULL
           LIMIT 100
         `);
@@ -283,7 +285,7 @@ export class NotificationEngineService {
           category:        NotificationCategory.CRM,
           title:           `${count} HOT lead${count > 1 ? 's' : ''} need follow-up`,
           message:         count === 1
-            ? `"${leads[0].customer_name}" is a hot lead awaiting your contact.`
+            ? `"${leads[0].name}" is a hot lead awaiting your contact.`
             : `${count} hot leads are waiting for follow-up. Act now to convert them.`,
           entity_type:     count === 1 ? 'lead' : null,
           entity_id:       count === 1 ? leads[0].id : null,
