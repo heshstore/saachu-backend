@@ -43,10 +43,10 @@ export class OrderItem {
   instruction: string;
 
   @Index('idx_order_item_order')
-  @Column({ nullable: true })
+  @Column({ name: 'orderId', nullable: true })
   order_id: number;
 
   @ManyToOne(() => Order, (order) => order.items, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'order_id' })
+  @JoinColumn({ name: 'orderId' })
   order: Order;
 }

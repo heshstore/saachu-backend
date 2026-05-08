@@ -7,7 +7,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThanOrEqual } from 'typeorm';
+import { Repository, MoreThanOrEqual, In } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Quotation, QuotationStatus, QuotationDiscountType } from './quotation.entity';
 import { QuotationItem } from './quotation-item.entity';
@@ -179,8 +179,9 @@ export class QuotationService {
   // ── Guards ────────────────────────────────────────────────────────────────────
 
   private assertEditable(quotation: Quotation): void {
-    if (quotation.status !== QuotationStatus.DRAFT) {
-      throw new ForbiddenException('Only DRAFT quotations can be modified');
+    const nonEditable = [QuotationStatus.CONVERTED, QuotationStatus.CANCELLED];
+    if (nonEditable.includes(quotation.status)) {
+      throw new ForbiddenException(`Cannot modify a ${quotation.status} quotation`);
     }
   }
 
@@ -218,11 +219,12 @@ export class QuotationService {
       );
     }
 
-    // Lead-based idempotency — one DRAFT per lead
+    // Lead-based idempotency — one active quotation per lead
     if (data.lead_id) {
       const existing = await this.quotationRepo.findOne({
-        where: { lead_id: data.lead_id, status: QuotationStatus.DRAFT },
+        where: { lead_id: data.lead_id, status: In([QuotationStatus.DRAFT, QuotationStatus.SENT]) },
         relations: ['items'],
+        order: { id: 'DESC' },
       });
       if (existing) return existing;
     }
@@ -230,7 +232,10 @@ export class QuotationService {
     // Customer idempotency within configured window
     const windowStart = new Date(Date.now() - appConfig.idempotencyWindowSeconds * 1000);
     const recent = await this.quotationRepo.findOne({
-      where: { customer_id: data.customer_id, created_at: MoreThanOrEqual(windowStart), status: QuotationStatus.DRAFT },
+      where: [
+        { customer_id: data.customer_id, created_at: MoreThanOrEqual(windowStart), status: QuotationStatus.DRAFT },
+        { customer_id: data.customer_id, created_at: MoreThanOrEqual(windowStart), status: QuotationStatus.SENT },
+      ],
     });
     if (recent) return recent;
 
@@ -263,7 +268,7 @@ export class QuotationService {
       bill_to_id:            data.bill_to_id,
       ship_to_id:            data.ship_to_id,
       salesman_id:           data.salesman_id || user?.id,
-      status:                QuotationStatus.DRAFT,
+      status:                QuotationStatus.SENT,
       validity_days:         validityDays,
       valid_till,
       delivery_by:           data.delivery_by,
@@ -299,7 +304,6 @@ export class QuotationService {
     const qb = this.quotationRepo
       .createQueryBuilder('q')
       .leftJoinAndSelect('q.items', 'items')
-      .where('q.status != :cancelled', { cancelled: QuotationStatus.CANCELLED })
       .orderBy('q.id', 'DESC');
 
     const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
@@ -321,6 +325,12 @@ export class QuotationService {
     return q;
   }
 
+  async findByNo(quotation_no: string): Promise<Quotation> {
+    const q = await this.quotationRepo.findOne({ where: { quotation_no }, relations: ['items'] });
+    if (!q) throw new NotFoundException(`Quotation ${quotation_no} not found`);
+    return q;
+  }
+
   // ── Update ────────────────────────────────────────────────────────────────────
 
   async update(id: number, data: any, user?: any): Promise<Quotation> {
@@ -330,12 +340,10 @@ export class QuotationService {
     delete data.sub_total;
     delete data.total_amount;
 
-    // Block restricted fields on non-DRAFT quotations.
-    if (quotation.status !== QuotationStatus.DRAFT) {
-      const restricted = Object.keys(data).filter(k => QuotationService.DRAFT_ONLY_FIELDS.has(k));
-      if (restricted.length > 0) {
-        throw new ForbiddenException('Only DRAFT quotations can be modified');
-      }
+    // Block edits on terminal statuses.
+    const nonEditable = [QuotationStatus.CONVERTED, QuotationStatus.CANCELLED];
+    if (nonEditable.includes(quotation.status)) {
+      throw new ForbiddenException(`Cannot modify a ${quotation.status} quotation`);
     }
 
     let effectiveItems = quotation.items;

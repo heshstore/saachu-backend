@@ -37,7 +37,19 @@
       "Bash(npx react-scripts *)",
       "Bash(sed -n '406,435p' /Users/saachi/Projects/Saachu-app/frontend/src/Dashboard.js)",
       "Bash(sed -n '432,460p' /Users/saachi/Projects/Saachu-app/backend/src/orders/orders.service.ts)",
-      "Bash(grep -rn \"orders/:id\\\\|/orders/\\\\${\" /Users/saachi/Projects/Saachu-app/frontend/src/)"
+      "Bash(grep -rn \"orders/:id\\\\|/orders/\\\\${\" /Users/saachi/Projects/Saachu-app/frontend/src/)",
+      "Bash(xargs ls *)",
+      "Bash(pkill -f \"ts-node.*main\")",
+      "Bash(pkill -f \"nodemon\")",
+      "Bash(echo \"Backend restarting PID=$!\")",
+      "Bash(pkill -f \"ts-node.*main\\\\|nodemon\\\\|nest start\")",
+      "Bash(echo \"PID=$!\")",
+      "Bash(pkill -f \"ts-node.*main\\\\|nodemon\\\\|nest start\\\\|react-scripts start\\\\|react-scripts/scripts/start\")",
+      "Bash(echo \"Backend PID=$!\")",
+      "Bash(npm start *)",
+      "Bash(echo \"Frontend PID=$!\")",
+      "Bash(ps -p 48646 -p 92675 -o pid,command)",
+      "Bash(pkill -f \"ts-node.*main\\\\|nodemon\\\\|nest start\\\\|react-scripts\")"
     ],
     "additionalDirectories": [
       "/Users/saachi/Projects/Saachu-app/assets",

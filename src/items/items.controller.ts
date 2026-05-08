@@ -1,58 +1,34 @@
-import { Controller, Get, Post, Body, Param, Delete, Query } from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import { ItemsService } from './items.service';
-import { RequirePermission } from '../auth/require-permission.decorator';
 
+/**
+ * Unified facade used by:
+ *   - DocumentForm  → GET /items?master=1
+ *   - UniversalSearch → GET /items/search?q=
+ *   - Dashboard / Sidebar → GET /items/stats
+ *
+ * All CRUD is now on /service-items and /shopify-catalog.
+ */
 @Controller('items')
 export class ItemsController {
   constructor(private readonly itemsService: ItemsService) {}
 
-  @Post()
-  @RequirePermission('item.create')
-  async create(@Body() data: any) {
-    if (data && data.sku) {
-      await this.itemsService.removeBySku(data.sku);
-    }
-    return this.itemsService.create(data);
-  }
-
-  @Post('bulk')
-  @RequirePermission('item.shopify_sync')
-  createBulk(@Body() data: any[]) {
-    return this.itemsService.createBulk(data);
-  }
-
   /**
-   * GET /items          → all items (used by ShopifyItems page)
-   * GET /items?master=1 → only items with HSN + costPrice filled
-   *                       (used by QuotationForm, OrderForm, Invoice)
+   * GET /items?master=1  → unified master list (quotation/order/invoice dropdowns)
+   * GET /items           → alias for master list
    */
   @Get()
-  findAll(@Query('master') master?: string) {
-    return master === '1'
-      ? this.itemsService.findMaster()
-      : this.itemsService.findAll();
+  findMaster(@Query('master') master?: string) {
+    return this.itemsService.findMaster();
   }
 
-  /**
-   * Search only within master-ready items so incomplete Shopify items
-   * never appear as options when building a quotation/order.
-   */
   @Get('search')
-  async searchItems(@Query('q') q: string) {
+  searchItems(@Query('q') q: string) {
     return this.itemsService.searchItems(q);
   }
 
-  @Get(':id')
-  findOne(@Param('id') id: string) {
-    return this.itemsService.findOne(+id);
-  }
-
-  // NOTE: PUT is not used by frontend; POST is always used to "update" (replace)
-  // PATCH and PUT not exposed to enforce strict INSERT/DELETE-then-POST
-
-  @Delete(':sku')
-  @RequirePermission('item.edit')
-  removeBySku(@Param('sku') sku: string) {
-    return this.itemsService.removeBySku(sku);
+  @Get('stats')
+  getStats() {
+    return this.itemsService.getStats();
   }
 }

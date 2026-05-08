@@ -41,4 +41,8 @@ export class Item {
 
   @Column({ type: 'float', default: 0 })
   wholesale_price: number;
+
+  /** Soft-delete for Shopify items: true = skip on next sync, hide from catalog */
+  @Column({ type: 'boolean', default: false })
+  syncIgnored: boolean;
 }

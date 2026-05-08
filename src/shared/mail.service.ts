@@ -22,6 +22,15 @@ export class MailService {
   }
 
   async sendDocument(to: string, subject: string, pdfPath: string) {
+    return this.sendDocumentWithBody(
+      to,
+      subject,
+      `Please find the attached document from ${appConfig.companyName}.`,
+      pdfPath,
+    );
+  }
+
+  async sendDocumentWithBody(to: string, subject: string, body: string, pdfPath: string) {
     if (!this.transporter) {
       throw new Error('SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS in .env');
     }
@@ -31,7 +40,7 @@ export class MailService {
       from: `"${appConfig.companyName}" <${appConfig.smtpUser}>`,
       to,
       subject,
-      text: `Please find the attached document from ${appConfig.companyName}.`,
+      text: body,
       attachments: [
         {
           filename: path.basename(fullPath),

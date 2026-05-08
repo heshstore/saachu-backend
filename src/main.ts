@@ -198,6 +198,95 @@ async function ensureActivityTable(): Promise<void> {
   }
 }
 
+async function ensureNewItemTables(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`CREATE SEQUENCE IF NOT EXISTS svc_item_code_seq START 1`);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS shopify_catalog_items (
+        id                 SERIAL PRIMARY KEY,
+        item_code          VARCHAR UNIQUE NOT NULL,
+        shopify_product_id VARCHAR,
+        shopify_variant_id VARCHAR UNIQUE NOT NULL,
+        item_name          VARCHAR,
+        sku                VARCHAR UNIQUE,
+        selling_price      DOUBLE PRECISION NOT NULL DEFAULT 0,
+        retail_price       DOUBLE PRECISION NOT NULL DEFAULT 0,
+        wholesale_price    DOUBLE PRECISION NOT NULL DEFAULT 0,
+        image              TEXT,
+        unit               VARCHAR NOT NULL DEFAULT 'Nos',
+        hsn_code           VARCHAR NOT NULL DEFAULT '',
+        gst                DOUBLE PRECISION NOT NULL DEFAULT 0,
+        cost_price         DOUBLE PRECISION NOT NULL DEFAULT 0,
+        sync_ignored       BOOLEAN NOT NULL DEFAULT FALSE,
+        source             VARCHAR NOT NULL DEFAULT 'SHOPIFY',
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `).catch(() => {});
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS service_items (
+        id            SERIAL PRIMARY KEY,
+        item_code     VARCHAR UNIQUE NOT NULL,
+        item_name     VARCHAR,
+        sku           VARCHAR UNIQUE,
+        hsn_code      VARCHAR NOT NULL DEFAULT '',
+        gst           DOUBLE PRECISION NOT NULL DEFAULT 0,
+        cost_price    DOUBLE PRECISION NOT NULL DEFAULT 0,
+        selling_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+        unit          VARCHAR NOT NULL DEFAULT 'Nos',
+        source        VARCHAR NOT NULL DEFAULT 'MANUAL',
+        is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `).catch(() => {});
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureOrderColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now()`,
+    ).catch(() => {});
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureItemColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    const cols = [
+      `ALTER TABLE item ADD COLUMN IF NOT EXISTS source              VARCHAR`,
+      `ALTER TABLE item ADD COLUMN IF NOT EXISTS "shopifyVariantId"  VARCHAR`,
+      `ALTER TABLE item ADD COLUMN IF NOT EXISTS unit                 VARCHAR NOT NULL DEFAULT 'Nos'`,
+      `ALTER TABLE item ADD COLUMN IF NOT EXISTS image                TEXT`,
+      `ALTER TABLE item ADD COLUMN IF NOT EXISTS retail_price         DOUBLE PRECISION NOT NULL DEFAULT 0`,
+      `ALTER TABLE item ADD COLUMN IF NOT EXISTS wholesale_price      DOUBLE PRECISION NOT NULL DEFAULT 0`,
+      `ALTER TABLE item ADD COLUMN IF NOT EXISTS "syncIgnored"        BOOLEAN NOT NULL DEFAULT FALSE`,
+    ];
+    for (const sql of cols) {
+      await client.query(sql).catch(() => {});
+    }
+    // Normalize source values: null/service → manual, keep shopify as-is
+    await client.query(
+      `UPDATE item SET source = 'manual' WHERE source IS NULL OR LOWER(source) = 'service'`,
+    ).catch(() => {});
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 async function ensureKpiTable(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
   let client: Client | null = null;
@@ -401,6 +490,21 @@ async function bootstrap() {
     logger.log('✅ Notification columns ready');
   } catch (err: any) {
     logger.error('Notification column migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureOrderColumns();
+    logger.log('✅ Order columns ready (created_at)');
+  } catch (err: any) {
+    logger.error('Order column migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureNewItemTables();
+    await ensureItemColumns();
+    logger.log('✅ Item columns ready (source, shopifyVariantId, unit, image, retail_price, wholesale_price)');
+  } catch (err: any) {
+    logger.error('Item column migration failed (non-fatal):', err?.message);
   }
 
   try {

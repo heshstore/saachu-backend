@@ -1,9 +1,11 @@
-import { Controller, Get, Param } from '@nestjs/common';
+import { Controller, Get, Param, Logger } from '@nestjs/common';
 import { ShopifyService, getSyncStatus } from './shopify.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
 @Controller('shopify')
 export class ShopifyController {
+  private readonly logger = new Logger(ShopifyController.name);
+
   constructor(private readonly shopifyService: ShopifyService) {}
 
   @Get('products')
@@ -15,32 +17,26 @@ export class ShopifyController {
   @Get('sync-products')
   @RequirePermission('item.shopify_sync')
   async syncProducts() {
-    console.log("STEP5 API HIT");
+    this.logger.log('[SHOPIFY] Manual sync triggered via GET /shopify/sync-products');
     try {
       const result = await this.shopifyService.syncProducts();
-
-      const count = Array.isArray(result)
-        ? result.length
-        : result?.count || 0;
-
+      this.logger.log(
+        `[SHOPIFY] Sync finished — fetched=${result.fetched} variants=${result.variants} inserted=${result.inserted} updated=${result.updated} skipped=${result.skipped} errors=${result.errors}`,
+      );
+      return result;
+    } catch (error: any) {
+      this.logger.error('[SHOPIFY] Controller-level error:', error?.message);
       return {
-        count,
-        data: result || [],
-      };
-    } catch (error) {
-      console.log("STEP10 ERROR:", error);
-      console.error("❌ Shopify Sync Error:", error);
-
-      return {
-        count: 0,
-        error: error.message || "Sync failed",
+        fetched: 0, active: 0, variants: 0,
+        inserted: 0, updated: 0, skipped: 0,
+        skippedReasons: {}, errors: 1, error: error?.message ?? 'Sync failed',
       };
     }
   }
 
   @Get('sync')
   @RequirePermission('item.shopify_sync')
-  async syncProductsAlias() {
+  syncProductsAlias() {
     return this.syncProducts();
   }
 

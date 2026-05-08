@@ -16,7 +16,9 @@ import { QuotationService } from './quotation.service';
 import { PdfService } from '../shared/pdf.service';
 import { MailService } from '../shared/mail.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
+import { Public } from '../auth/public.decorator';
 import { SendEmailDto } from '../shared/dto/send-email.dto';
+import { appConfig } from '../config/config';
 
 @Controller('quotations')
 export class QuotationController {
@@ -93,21 +95,59 @@ export class QuotationController {
     const buffer = await this.pdfService.generateBuffer(
       this.pdfService.quotationTemplate(data),
     );
+    const filename = ((data as any).quotation_no || `QUO-${id}`).replace(/\//g, '-') + '.pdf';
     res.set({
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="quotation-${id}.pdf"`,
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    });
+    res.send(buffer);
+  }
+
+  @Get('public/:quotation_no/pdf')
+  @Public()
+  async getPublicPdf(@Param('quotation_no') quotation_no: string, @Res() res: Response) {
+    const data = await this.quotationService.findByNo(quotation_no);
+    const buffer = await this.pdfService.generateBuffer(
+      this.pdfService.quotationTemplate(data),
+    );
+    const filename = quotation_no.replace(/\//g, '-') + '.pdf';
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename="${filename}"`,
+      'Cache-Control': 'public, max-age=300',
     });
     res.send(buffer);
   }
 
   @Post(':id/email')
   @RequirePermission('quotation.view')
-  async sendEmail(@Param('id') id: string, @Body() body: SendEmailDto) {
-    const data = await this.quotationService.findOne(Number(id));
+  async sendEmail(
+    @Param('id') id: string,
+    @Body() body: SendEmailDto & { publicUrl?: string },
+  ) {
+    const data     = await this.quotationService.findOne(Number(id));
     const filePath = await this.pdfService.generateAndSave('quotation', Number(id), data);
-    await this.mailService.sendDocument(
+    const qNo      = (data as any).quotation_no || id;
+    const amount   = Number((data as any).total_amount || 0).toLocaleString('en-IN');
+    const pdfLink  = body.publicUrl || '';
+
+    const emailBody = [
+      `Dear ${(data as any).customer_name || 'Customer'},`,
+      ``,
+      `Please find attached your quotation.`,
+      ``,
+      `Quotation No: ${qNo}`,
+      `Amount: ₹${amount}`,
+      pdfLink ? `\nDownload PDF:\n${pdfLink}` : '',
+      ``,
+      `Regards,`,
+      appConfig.companyName,
+    ].join('\n');
+
+    await this.mailService.sendDocumentWithBody(
       body.to,
-      `Quotation ${(data as any).quotation_no || id}`,
+      `Quotation - ${qNo}`,
+      emailBody,
       filePath,
     );
     return { ok: true };

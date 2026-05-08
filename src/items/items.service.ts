@@ -1,113 +1,151 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, ILike, In } from 'typeorm';
+import { Repository } from 'typeorm';
+import { ShopifyCatalogItem } from '../shopify-catalog/entities/shopify-catalog-item.entity';
+import { ServiceItem } from '../service-items/entities/service-item.entity';
 
-import { Item } from './entities/item.entity';
+/** Normalised shape returned to quotation/order/invoice consumers */
+export interface UnifiedItem {
+  id: number;
+  itemName: string;
+  sku: string;
+  hsnCode: string;
+  gst: number;
+  costPrice: number;
+  sellingPrice: number;
+  retail_price: number;
+  wholesale_price: number;
+  unit: string;
+  image: string | null;
+  source: string;
+}
 
-// 🚀 STRICT MODE — FIX ITEM SERVICE
-function safeNumber(value: any): number {
-  const num = Number(value);
-  return isNaN(num) ? 0 : num;
+function fromShopify(s: ShopifyCatalogItem): UnifiedItem {
+  return {
+    id:            s.id,
+    itemName:      s.itemName,
+    sku:           s.sku,
+    hsnCode:       s.hsnCode,
+    gst:           s.gst,
+    costPrice:     s.costPrice,
+    sellingPrice:  s.sellingPrice,
+    retail_price:  s.retailPrice,
+    wholesale_price: s.wholesalePrice,
+    unit:          s.unit,
+    image:         s.image ?? null,
+    source:        'SHOPIFY',
+  };
+}
+
+function fromService(s: ServiceItem): UnifiedItem {
+  return {
+    id:            s.id,
+    itemName:      s.itemName,
+    sku:           s.sku,
+    hsnCode:       s.hsnCode,
+    gst:           s.gst,
+    costPrice:     s.costPrice,
+    sellingPrice:  s.sellingPrice,
+    retail_price:  s.sellingPrice,
+    wholesale_price: 0,
+    unit:          s.unit,
+    image:         null,
+    source:        'MANUAL',
+  };
 }
 
 @Injectable()
 export class ItemsService {
   constructor(
-    @InjectRepository(Item)
-    private repo: Repository<Item>,
+    @InjectRepository(ShopifyCatalogItem)
+    private readonly shopifyRepo: Repository<ShopifyCatalogItem>,
+    @InjectRepository(ServiceItem)
+    private readonly serviceRepo: Repository<ServiceItem>,
   ) {}
 
-  create(data: any) {
-    console.log("CREATE DATA:", data);
+  /**
+   * Used by QuotationService and OrderService to look up an item by SKU
+   * when building line items. Checks service items first, then Shopify catalog.
+   */
+  async findBySku(sku: string): Promise<UnifiedItem | null> {
+    const svcItem = await this.serviceRepo.findOneBy({ sku, isActive: true });
+    if (svcItem) return fromService(svcItem);
 
-    return this.repo.save({
-      itemName: data.itemName,
-      sku: data.sku,
-      hsnCode: data.hsnCode || '',
-      gst: safeNumber(data.gst),
-      costPrice: safeNumber(data.costPrice),
-      sellingPrice: safeNumber(data.sellingPrice),
-      source: data.source || 'service', // <-- ADDED THIS LINE
-    });
+    const shopItem = await this.shopifyRepo.findOneBy({ sku });
+    if (shopItem) return fromShopify(shopItem);
+
+    return null;
   }
 
-  async createBulk(dataArray: any[]) {
-    // 🔥 delete existing SKUs first
-    const skus = dataArray.map(d => d.sku);
+  /**
+   * Master list for quotation/order/invoice item dropdowns:
+   * - ALL active service items (always selectable)
+   * - ONLY sales-ready Shopify items (HSN + costPrice > 0, not ignored)
+   */
+  async findMaster(): Promise<UnifiedItem[]> {
+    const [serviceItems, shopifyReady] = await Promise.all([
+      this.serviceRepo.find({ where: { isActive: true }, order: { itemName: 'ASC' } }),
+      this.shopifyRepo
+        .createQueryBuilder('s')
+        .where("s.hsn_code IS NOT NULL AND s.hsn_code != '' AND s.cost_price > 0")
+        .andWhere('s.sync_ignored = false')
+        .orderBy('s.item_name', 'ASC')
+        .getMany(),
+    ]);
 
-    await this.repo.delete({ sku: In(skus) });
-
-    // 🔥 save all at once
-    const cleanData = dataArray.map(data => ({
-      itemName: data.itemName,
-      sku: data.sku,
-      hsnCode: data.hsnCode || '',
-      gst: safeNumber(data.gst),
-      costPrice: safeNumber(data.costPrice),
-      sellingPrice: safeNumber(data.sellingPrice),
-      retail_price: safeNumber(data.retail_price ?? data.sellingPrice),
-      wholesale_price: safeNumber(data.wholesale_price ?? 0),
-      image: data.image || null,
-      unit: data.unit || 'Nos',
-      source: data.source || 'service',
-    }));
-
-    return this.repo.save(cleanData);
+    return [
+      ...serviceItems.map(fromService),
+      ...shopifyReady.map(fromShopify),
+    ].sort((a, b) => (a.itemName ?? '').localeCompare(b.itemName ?? ''));
   }
 
-  findAll() {
-    return this.repo.find({ order: { itemName: 'ASC' } });
-  }
-
-  /** Only items with HSN Code and Cost Price filled — safe to use in orders */
-  findMaster() {
-    return this.repo
-      .createQueryBuilder('item')
-      .where("item.hsnCode IS NOT NULL AND item.hsnCode != ''")
-      .andWhere('item.costPrice > 0')
-      .orderBy('item.itemName', 'ASC')
-      .getMany();
-  }
-
-  findOne(id: number) {
-    return this.repo.findOneBy({ id });
-  }
-
-  findBySku(sku: string) {
-    return this.repo.findOneBy({ sku });
-  }
-
-  async update(id: number, data: any) {
-    // Optional: could sanitize here too if numeric fields might appear,
-    // but main use is POST, not PUT/PATCH in current pattern.
-    await this.repo.update(id, data);
-    return { message: 'Updated' };
-  }
-
-  async remove(id: number) {
-    await this.repo.delete(id);
-    return { message: 'Deleted' };
-  }
-
-  async searchItems(q: string) {
+  /**
+   * Search used by universal search and document form type-ahead:
+   * - service items always searchable
+   * - Shopify items only if sales-ready
+   */
+  async searchItems(q: string): Promise<UnifiedItem[]> {
     if (!q) return [];
+    const like = `%${q}%`;
 
-    return this.repo
-      .createQueryBuilder('item')
-      .where(
-        "(item.itemName ILIKE :q OR item.sku ILIKE :q)",
-        { q: `%${q}%` },
-      )
-      .andWhere("item.hsnCode IS NOT NULL AND item.hsnCode != ''")
-      .andWhere('item.costPrice > 0')
-      .orderBy('item.sku', 'ASC')
-      .take(15)
-      .getMany();
+    const [svcResults, shopResults] = await Promise.all([
+      this.serviceRepo
+        .createQueryBuilder('s')
+        .where('(s.item_name ILIKE :q OR s.sku ILIKE :q)', { q: like })
+        .andWhere('s.is_active = true')
+        .orderBy('s.sku', 'ASC')
+        .take(10)
+        .getMany(),
+      this.shopifyRepo
+        .createQueryBuilder('s')
+        .where('(s.item_name ILIKE :q OR s.sku ILIKE :q)', { q: like })
+        .andWhere("s.hsn_code IS NOT NULL AND s.hsn_code != '' AND s.cost_price > 0")
+        .andWhere('s.sync_ignored = false')
+        .orderBy('s.sku', 'ASC')
+        .take(10)
+        .getMany(),
+    ]);
+
+    return [...svcResults.map(fromService), ...shopResults.map(fromShopify)]
+      .sort((a, b) => (a.sku ?? '').localeCompare(b.sku ?? ''))
+      .slice(0, 15);
   }
 
-  // 🚀 STRICT MODE — FIX removeBySku
-  async removeBySku(sku: string) {
-    if (!sku) return;
-    return this.repo.delete({ sku });
+  /** Stats for sidebar badge and admin dashboard */
+  async getStats() {
+    const [manual, pending, ready, ignored] = await Promise.all([
+      this.serviceRepo.count({ where: { isActive: true } }),
+      this.shopifyRepo
+        .createQueryBuilder('s')
+        .where("(s.hsn_code IS NULL OR s.hsn_code = '' OR s.cost_price <= 0)")
+        .andWhere('s.sync_ignored = false').getCount(),
+      this.shopifyRepo
+        .createQueryBuilder('s')
+        .where("s.hsn_code IS NOT NULL AND s.hsn_code != '' AND s.cost_price > 0")
+        .andWhere('s.sync_ignored = false').getCount(),
+      this.shopifyRepo
+        .createQueryBuilder('s').where('s.sync_ignored = true').getCount(),
+    ]);
+    return { manual, shopifyPending: pending, shopifyReady: ready, shopifyIgnored: ignored };
   }
 }

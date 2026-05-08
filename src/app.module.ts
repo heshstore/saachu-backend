@@ -19,6 +19,8 @@ import { User } from './users/entities/user.entity';
 import { CommissionModule } from './commission/commission.module';
 import { Product } from './products/entities/product.entity';
 import { ShopifyModule } from './shopify/shopify.module';
+import { ShopifyCatalogModule } from './shopify-catalog/shopify-catalog.module';
+import { ServiceItemsModule } from './service-items/service-items.module';
 import { CustomersModule } from './customers/customers.module';
 import { ItemsModule } from './items/items.module';
 import { CitiesModule } from './cities/cities.module';
@@ -86,6 +88,8 @@ new Logger('AppModule').log(
     InvoiceModule,
     CommissionModule,
     ShopifyModule,
+    ShopifyCatalogModule,
+    ServiceItemsModule,
     CustomersModule,
     ItemsModule,
     CitiesModule,

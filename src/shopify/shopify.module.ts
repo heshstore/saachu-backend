@@ -1,16 +1,12 @@
 import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { ShopifyService } from './shopify.service';
 import { ShopifyController } from './shopify.controller';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import { Product } from '../products/entities/product.entity';
-import { Item } from '../items/entities/item.entity';
-import { ItemsModule } from '../items/items.module';
+import { ShopifyCatalogItem } from '../shopify-catalog/entities/shopify-catalog-item.entity';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([Product, Item]),
-    ItemsModule,
-  ],
+  imports: [TypeOrmModule.forFeature([Product, ShopifyCatalogItem])],
   controllers: [ShopifyController],
   providers: [ShopifyService],
 })
