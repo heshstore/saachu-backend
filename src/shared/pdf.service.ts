@@ -32,206 +32,278 @@ export class PdfService {
   }
 
   quotationTemplate(data: any) {
-    const fmt = (n: any) => `₹${Number(n || 0).toFixed(2)}`;
-    const date = (d: any) => d ? new Date(d).toLocaleDateString('en-IN') : '-';
+    const NAVY  = '#1e3a8a';
+    const SLATE = '#64748b';
+    const LIGHT = '#f1f5f9';
+    const RULE  = '#94a3b8';
+    const inr   = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const date  = (d: any) => d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
 
-    const rows = (data.items || []);
-
-    // GST summary — group by rate
-    const gstMap: Record<string, { taxable: number; gst: number }> = {};
-    for (const item of rows) {
-      const taxable   = Number(item.amount || 0);
-      const pct       = Number(item.gst_percent || 0);
-      const gstAmt    = taxable * pct / 100;
-      const key       = `${pct}`;
-      if (!gstMap[key]) gstMap[key] = { taxable: 0, gst: 0 };
+    const rows       = (data.items || []) as any[];
+    const gstMap: Record<string, { pct: number; taxable: number; gst: number }> = {};
+    for (const it of rows) {
+      const taxable = Number(it.amount || 0);
+      const pct     = Number(it.gst_percent || 0);
+      if (pct <= 0) continue;
+      const key     = String(pct);
+      if (!gstMap[key]) gstMap[key] = { pct, taxable: 0, gst: 0 };
       gstMap[key].taxable += taxable;
-      gstMap[key].gst     += gstAmt;
+      gstMap[key].gst     += taxable * pct / 100;
     }
-
-    const subTotal       = Number(data.sub_total || 0);
-    const discountType   = data.discount_type  || 'PERCENT';
-    const discountValue  = Number(data.discount_value || 0);
-    const headerDiscount = discountType === 'FLAT'
-      ? discountValue
-      : (subTotal * discountValue) / 100;
-    const charges =
-      Number(data.charges_packing || 0) +
-      Number(data.charges_cartage || 0) +
-      Number(data.charges_forwarding || 0) +
+    const gstSlabs      = Object.values(gstMap).sort((a, b) => a.pct - b.pct);
+    const subTotal      = Number(data.sub_total || 0);
+    const discType      = data.discount_type || 'PERCENT';
+    const discValue     = Number(data.discount_value || 0);
+    const headerDisc    = discType === 'FLAT' ? discValue : (subTotal * discValue) / 100;
+    const totalCharges  =
+      Number(data.charges_packing      || 0) +
+      Number(data.charges_cartage      || 0) +
+      Number(data.charges_forwarding   || 0) +
       Number(data.charges_installation || 0) +
-      Number(data.charges_loading || 0);
-    const totalGst = Object.values(gstMap).reduce((s, g) => s + g.gst, 0);
-    const grandTotal = Number(data.total_amount || 0);
+      Number(data.charges_loading      || 0);
+    const totalGst      = gstSlabs.reduce((s, r) => s + r.gst, 0);
+    const grandTotal    = Number(data.total_amount || 0);
 
-    const itemRows = rows.map((item: any, i: number) => {
-      const taxable = Number(item.amount || 0);
-      const gstAmt  = taxable * Number(item.gst_percent || 0) / 100;
+    // Items rows
+    const itemRows = rows.map((it: any, i: number) => {
+      const taxable = Number(it.amount || 0);
+      const gstAmt  = taxable * Number(it.gst_percent || 0) / 100;
       return [
-        { text: String(i + 1),                        alignment: 'center' },
-        { text: item.item_name || item.itemName || '-' },
-        { text: item.hsn_code || '-',                  alignment: 'center' },
-        { text: String(Number(item.qty || 0)),          alignment: 'center' },
-        { text: fmt(item.rate),                         alignment: 'right' },
-        { text: `${Number(item.gst_percent || 0)}%`,    alignment: 'center' },
-        { text: fmt(gstAmt),                            alignment: 'right' },
-        { text: fmt(taxable + gstAmt),                  alignment: 'right', bold: true },
+        { text: String(i + 1),                           alignment: 'center', fontSize: 8 },
+        {
+          stack: [
+            { text: it.item_name || '-',                 bold: true, fontSize: 8.5 },
+            ...(it.sku ? [{ text: `SKU: ${it.sku}`,     color: SLATE, fontSize: 7 }] : []),
+          ],
+        },
+        { text: it.hsn_code || '—',                      alignment: 'center', fontSize: 8 },
+        { text: String(Number(it.qty || 0)),              alignment: 'center', fontSize: 8 },
+        { text: inr(it.rate),                             alignment: 'right',  fontSize: 8 },
+        { text: `${Number(it.gst_percent || 0)}%`,        alignment: 'center', fontSize: 8 },
+        { text: inr(gstAmt),                              alignment: 'right',  fontSize: 8 },
+        { text: inr(taxable + gstAmt),                    alignment: 'right',  fontSize: 8, bold: true },
       ];
     });
 
-    const gstRows = Object.entries(gstMap).map(([pct, val]) => [
-      { text: `GST @ ${pct}%`, colSpan: 3, alignment: 'right' }, {}, {},
-      { text: fmt(val.taxable), alignment: 'right' },
-      { text: fmt(val.gst / 2), alignment: 'right' },
-      { text: fmt(val.gst / 2), alignment: 'right' },
-      { text: fmt(val.gst), alignment: 'right', colSpan: 2 }, {},
+    // Totals rows
+    const totalRows: any[] = [
+      [{ text: 'Sub Total', fontSize: 8 }, { text: inr(subTotal), alignment: 'right', fontSize: 8 }],
+      ...(totalGst > 0 ? [[{ text: 'Total GST', fontSize: 8 }, { text: inr(totalGst), alignment: 'right', fontSize: 8 }]] : []),
+      ...(headerDisc > 0 ? [[{ text: 'Discount', fontSize: 8, color: '#dc2626' }, { text: `−${inr(headerDisc)}`, alignment: 'right', fontSize: 8, color: '#dc2626' }]] : []),
+      ...(totalCharges > 0 ? [[{ text: 'Extra Charges', fontSize: 8 }, { text: inr(totalCharges), alignment: 'right', fontSize: 8 }]] : []),
+      [{ text: 'Grand Total', bold: true, fontSize: 10, color: '#fff', fillColor: NAVY }, { text: inr(grandTotal), alignment: 'right', bold: true, fontSize: 10, color: '#fff', fillColor: NAVY }],
+    ];
+
+    // GST summary rows
+    const gstSummaryRows = gstSlabs.map((r) => [
+      { text: `${r.pct}%`,    fontSize: 8 },
+      { text: inr(r.taxable), alignment: 'right', fontSize: 8 },
+      { text: inr(r.gst / 2), alignment: 'right', fontSize: 8 },
+      { text: inr(r.gst / 2), alignment: 'right', fontSize: 8 },
+      { text: inr(r.gst),     alignment: 'right', fontSize: 8, bold: true },
     ]);
+
+    const billingCell = (label: string, name: string, addr: string, extra?: string) => ({
+      stack: [
+        { text: label,    fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 2] },
+        { text: name,     fontSize: 9, bold: true },
+        ...(addr  ? [{ text: addr,  fontSize: 7.5, color: SLATE, margin: [0, 1, 0, 0] }] : []),
+        ...(extra ? [{ text: extra, fontSize: 7.5,               margin: [0, 1, 0, 0] }] : []),
+      ],
+      margin: [0, 0, 0, 0],
+    });
 
     return {
       pageSize: 'A4',
-      pageMargins: [40, 40, 40, 40],
+      pageMargins: [34, 34, 34, 34],
       content: [
-        // ── Company header ──────────────────────────────────────────
+        // ── Header: company left | title centre | (no logo in pdfmake) ─
         {
           columns: [
             {
               stack: [
-                { text: appConfig.companyName, style: 'companyName' },
-                { text: `State: ${appConfig.companyState}`, style: 'companyMeta' },
-              ],
-            },
-            {
-              stack: [
-                { text: 'QUOTATION', style: 'docTitle' },
-                { text: `No: ${data.quotation_no || '-'}`, style: 'docMeta' },
-                { text: `Date: ${date(data.created_at)}`,  style: 'docMeta' },
-                { text: `Valid Till: ${date(data.valid_till)}`, style: 'docMeta' },
-              ],
-              alignment: 'right',
-            },
-          ],
-          margin: [0, 0, 0, 12],
-        },
-        { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 515, y2: 0, lineWidth: 1 }], margin: [0, 0, 0, 10] },
-
-        // ── Billing block ───────────────────────────────────────────
-        {
-          columns: [
-            {
-              stack: [
-                { text: 'BILL TO', style: 'blockLabel' },
-                { text: data.customer_name || '-', bold: true, fontSize: 10 },
-                { text: data.billing_address || '', fontSize: 9, color: '#555' },
-                data.gst_number ? { text: `GSTIN: ${data.gst_number}`, fontSize: 9 } : {},
+                { text: appConfig.companyName,       style: 'coName' },
+                { text: `State: ${appConfig.companyState}`, style: 'coMeta' },
               ],
               width: '*',
             },
             {
               stack: [
-                { text: 'SHIP TO', style: 'blockLabel' },
-                { text: data.customer_name || '-', bold: true, fontSize: 10 },
-                { text: data.shipping_address || data.billing_address || '', fontSize: 9, color: '#555' },
+                { text: 'PROFORMA INVOICE', style: 'docTitle', alignment: 'center' },
               ],
-              width: '*',
+              width: 'auto',
+              alignment: 'center',
             },
+            { text: '', width: '*' },
           ],
-          margin: [0, 0, 0, 12],
+          margin: [0, 0, 0, 6],
+        },
+        { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 527, y2: 0, lineWidth: 1.5, lineColor: NAVY }], margin: [0, 0, 0, 6] },
+
+        // ── 3-column billing block ────────────────────────────────────
+        {
+          table: {
+            widths: ['*', '*', 110],
+            body: [[
+              billingCell(
+                'BILL TO',
+                data.customer_name || '—',
+                [data.billing_address, data.gst_number ? `GSTIN: ${data.gst_number}` : '', data.customer_phone ? `Ph: ${data.customer_phone}` : ''].filter(Boolean).join('\n'),
+              ),
+              billingCell(
+                'DELIVERY TO',
+                data.customer_name || '—',
+                data.shipping_address || data.billing_address || '',
+              ),
+              {
+                stack: [
+                  { text: 'DOCUMENT DETAILS', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 2] },
+                  { text: [{ text: 'PI No: ', bold: true }, data.quotation_no || '—'], fontSize: 8 },
+                  { text: [{ text: 'Date: ', bold: true }, date(data.created_at)],     fontSize: 8, margin: [0, 1, 0, 0] },
+                  ...(data.valid_till ? [{ text: [{ text: 'Valid Till: ', bold: true }, date(data.valid_till)], fontSize: 8, margin: [0, 1, 0, 0] }] : []),
+                  ...(data.payment_type ? [{ text: [{ text: 'Payment: ', bold: true }, data.payment_type],   fontSize: 8, margin: [0, 1, 0, 0] }] : []),
+                  { text: [{ text: 'Customer: ', bold: true }, data.is_wholesaler ? 'Wholesale' : 'Retail'], fontSize: 8, margin: [0, 1, 0, 0] },
+                ],
+              },
+            ]],
+          },
+          layout: {
+            hLineWidth: () => 0.5,
+            vLineWidth: () => 0.5,
+            hLineColor: () => RULE,
+            vLineColor: () => RULE,
+            paddingLeft:   () => 6,
+            paddingRight:  () => 6,
+            paddingTop:    () => 5,
+            paddingBottom: () => 5,
+          },
+          margin: [0, 0, 0, 6],
         },
 
-        // ── Items table ─────────────────────────────────────────────
+        // ── Items table ───────────────────────────────────────────────
         {
           table: {
             headerRows: 1,
-            widths: ['auto', '*', 'auto', 'auto', 'auto', 'auto', 'auto', 'auto'],
+            widths: [16, '*', 40, 28, 55, 28, 45, 50],
             body: [
               [
-                { text: '#',        style: 'th', alignment: 'center' },
-                { text: 'Item',     style: 'th' },
-                { text: 'HSN',      style: 'th', alignment: 'center' },
-                { text: 'Qty',      style: 'th', alignment: 'center' },
-                { text: 'Rate',     style: 'th', alignment: 'right' },
-                { text: 'GST%',     style: 'th', alignment: 'center' },
-                { text: 'GST Amt',  style: 'th', alignment: 'right' },
-                { text: 'Total',    style: 'th', alignment: 'right' },
+                { text: '#',          style: 'th', alignment: 'center' },
+                { text: 'Description',style: 'th' },
+                { text: 'HSN',        style: 'th', alignment: 'center' },
+                { text: 'Qty',        style: 'th', alignment: 'center' },
+                { text: 'Rate (₹)',   style: 'th', alignment: 'right' },
+                { text: 'GST%',       style: 'th', alignment: 'center' },
+                { text: 'GST Amt',    style: 'th', alignment: 'right' },
+                { text: 'Amount (₹)', style: 'th', alignment: 'right' },
               ],
               ...itemRows,
             ],
           },
-          layout: 'lightHorizontalLines',
-          margin: [0, 0, 0, 8],
+          layout: {
+            hLineWidth: (i: number, node: any) => (i === 0 || i === node.table.headerRows || i === node.table.body.length) ? 0.75 : 0.35,
+            vLineWidth: () => 0,
+            hLineColor: (i: number) => i === 0 ? NAVY : RULE,
+            fillColor:  (row: number) => row === 0 ? NAVY : (row % 2 === 0 ? LIGHT : null),
+            paddingLeft:   () => 4,
+            paddingRight:  () => 4,
+            paddingTop:    () => 3,
+            paddingBottom: () => 3,
+          },
+          margin: [0, 0, 0, 6],
         },
 
-        // ── GST summary ─────────────────────────────────────────────
-        ...(Object.keys(gstMap).length > 0 ? [
-          {
-            table: {
-              widths: ['*', 'auto', 'auto', 'auto', 'auto', 'auto', 'auto', 'auto'],
-              body: [
-                [
-                  { text: 'GST Rate', style: 'th', colSpan: 3 }, {}, {},
-                  { text: 'Taxable', style: 'th', alignment: 'right' },
-                  { text: 'CGST', style: 'th', alignment: 'right' },
-                  { text: 'SGST', style: 'th', alignment: 'right' },
-                  { text: 'Total GST', style: 'th', alignment: 'right', colSpan: 2 }, {},
-                ],
-                ...gstRows,
-              ],
-            },
-            layout: 'lightHorizontalLines',
-            margin: [0, 0, 0, 8],
-          },
-        ] : []),
-
-        // ── Totals ──────────────────────────────────────────────────
+        // ── GST summary (left) + Totals (right) ───────────────────────
         {
           columns: [
-            { text: '', width: '*' },
-            {
-              width: 220,
+            gstSlabs.length > 0 ? {
+              width: '*',
               table: {
-                widths: ['*', 'auto'],
+                headerRows: 1,
+                widths: [28, '*', '*', '*', '*'],
                 body: [
-                  [{ text: 'Sub Total', alignment: 'left' }, { text: fmt(subTotal), alignment: 'right' }],
-                  ...(totalGst > 0 ? [[{ text: 'Total GST', alignment: 'left' }, { text: fmt(totalGst), alignment: 'right' }]] : []),
-                  ...(headerDiscount > 0 ? [[{ text: 'Discount', alignment: 'left', color: '#dc2626' }, { text: `-${fmt(headerDiscount)}`, alignment: 'right', color: '#dc2626' }]] : []),
-                  ...(charges > 0 ? [[{ text: 'Extra Charges', alignment: 'left' }, { text: fmt(charges), alignment: 'right' }]] : []),
-                  [{ text: 'Grand Total', bold: true, fontSize: 11 }, { text: fmt(grandTotal), bold: true, fontSize: 11, alignment: 'right' }],
+                  [
+                    { text: 'Rate',     style: 'gstTh' },
+                    { text: 'Taxable',  style: 'gstTh', alignment: 'right' },
+                    { text: 'CGST',     style: 'gstTh', alignment: 'right' },
+                    { text: 'SGST',     style: 'gstTh', alignment: 'right' },
+                    { text: 'GST Tot.', style: 'gstTh', alignment: 'right' },
+                  ],
+                  ...gstSummaryRows,
                 ],
               },
-              layout: 'lightHorizontalLines',
+              layout: {
+                hLineWidth: (i: number, node: any) => (i === 0 || i === node.table.headerRows || i === node.table.body.length) ? 0.5 : 0.25,
+                vLineWidth: () => 0,
+                hLineColor: () => RULE,
+                fillColor:  (row: number) => row === 0 ? LIGHT : null,
+                paddingLeft:   () => 3,
+                paddingRight:  () => 3,
+                paddingTop:    () => 2,
+                paddingBottom: () => 2,
+              },
+            } : { text: '', width: '*' },
+            {
+              width: 170,
+              table: {
+                widths: ['*', 'auto'],
+                body: totalRows,
+              },
+              layout: {
+                hLineWidth: (i: number, node: any) => (i === node.table.body.length - 1 || i === node.table.body.length) ? 0 : 0.35,
+                vLineWidth: () => 0,
+                hLineColor: () => RULE,
+                fillColor:  (_row: number, node: any, col: number) => (col === 0 ? null : null),
+                paddingLeft:   () => 4,
+                paddingRight:  () => 4,
+                paddingTop:    () => 3,
+                paddingBottom: () => 3,
+              },
             },
           ],
-          margin: [0, 0, 0, 16],
+          margin: [0, 0, 0, 10],
         },
 
-        // ── Delivery / payment ──────────────────────────────────────
+        // ── Delivery / payment terms ──────────────────────────────────
         ...(data.payment_type || data.delivery_type || data.delivery_by ? [
-          { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 515, y2: 0, lineWidth: 0.5 }], margin: [0, 4, 0, 6] },
+          { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 527, y2: 0, lineWidth: 0.5, lineColor: RULE }], margin: [0, 2, 0, 4] },
           {
             columns: [
-              data.payment_type  ? { text: `Payment: ${data.payment_type}`,  fontSize: 9, color: '#444' } : {},
-              data.delivery_type ? { text: `Delivery: ${data.delivery_type}`, fontSize: 9, color: '#444' } : {},
-              data.delivery_by   ? { text: `Deliver By: ${data.delivery_by}`, fontSize: 9, color: '#444' } : {},
+              ...(data.delivery_type ? [{ text: [`Delivery Mode: `, { text: data.delivery_type, bold: true }], fontSize: 8, width: '*' }] : []),
+              ...(data.delivery_by   ? [{ text: [`Deliver By: `,    { text: data.delivery_by,   bold: true }], fontSize: 8, width: '*' }] : []),
+              ...(data.payment_type  ? [{ text: [`Payment Terms: `, { text: data.payment_type,  bold: true }], fontSize: 8, width: '*' }] : []),
             ],
+            margin: [0, 0, 0, 4],
           },
         ] : []),
 
-        // ── Footer note ─────────────────────────────────────────────
+        // ── Terms & Conditions ────────────────────────────────────────
+        { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 527, y2: 0, lineWidth: 0.5, lineColor: RULE }], margin: [0, 2, 0, 4] },
+        { text: 'TERMS & CONDITIONS', fontSize: 7.5, bold: true, color: NAVY, margin: [0, 0, 0, 2] },
         {
-          text: 'This is a computer-generated quotation and does not require a signature.',
-          fontSize: 8, color: '#888', margin: [0, 16, 0, 0], alignment: 'center',
+          ol: [
+            `Prices valid for the period stated. Subject to revision if validity lapses. GST applicable as per ${appConfig.companyState} norms.`,
+            'Payment as per agreed terms. Goods remain property of seller until full payment received.',
+            'All disputes subject to local jurisdiction only. E & O.E.',
+          ],
+          fontSize: 7.5,
+          color: SLATE,
+          margin: [0, 0, 0, 10],
+        },
+
+        // ── Footer ────────────────────────────────────────────────────
+        {
+          text: 'This is a computer-generated document. No signature required.',
+          fontSize: 7, color: '#94a3b8', alignment: 'center',
         },
       ],
       styles: {
-        companyName: { fontSize: 16, bold: true },
-        companyMeta: { fontSize: 9, color: '#555', margin: [0, 2, 0, 0] },
-        docTitle:    { fontSize: 18, bold: true, color: '#1e3a8a' },
-        docMeta:     { fontSize: 9, color: '#444', margin: [0, 1, 0, 0] },
-        blockLabel:  { fontSize: 8, bold: true, color: '#888', margin: [0, 0, 0, 3], letterSpacing: 1 },
-        th:          { bold: true, fontSize: 9, fillColor: '#f1f5f9' },
-        total:       { fontSize: 14, bold: true, alignment: 'right' },
+        coName:   { fontSize: 14, bold: true, color: NAVY },
+        coMeta:   { fontSize: 8,  color: SLATE, margin: [0, 2, 0, 0] },
+        docTitle: { fontSize: 13, bold: true,  color: NAVY, letterSpacing: 1 },
+        th:       { bold: true, fontSize: 8,  color: '#fff', fillColor: NAVY },
+        gstTh:    { bold: true, fontSize: 7.5, color: SLATE, fillColor: LIGHT },
       },
-      defaultStyle: { fontSize: 9 },
+      defaultStyle: { fontSize: 8.5, font: 'Roboto' },
     };
   }
 

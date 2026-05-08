@@ -21,6 +21,7 @@ export class MailService {
     }
   }
 
+  /** Plain-text email with attachment. */
   async sendDocument(to: string, subject: string, pdfPath: string) {
     return this.sendDocumentWithBody(
       to,
@@ -30,23 +31,43 @@ export class MailService {
     );
   }
 
+  /** Plain-text body + attachment. */
   async sendDocumentWithBody(to: string, subject: string, body: string, pdfPath: string) {
     if (!this.transporter) {
       throw new Error('SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS in .env');
     }
-
     const fullPath = path.join(process.cwd(), pdfPath.replace(/^\//, ''));
     await this.transporter.sendMail({
       from: `"${appConfig.companyName}" <${appConfig.smtpUser}>`,
       to,
       subject,
       text: body,
-      attachments: [
-        {
-          filename: path.basename(fullPath),
-          path: fullPath,
-        },
-      ],
+      attachments: [{ filename: path.basename(fullPath), path: fullPath }],
     });
+  }
+
+  /** HTML email with optional attachment. */
+  async sendHtml(opts: {
+    to: string;
+    subject: string;
+    html: string;
+    text?: string;
+    pdfPath?: string;
+  }) {
+    if (!this.transporter) {
+      throw new Error('SMTP not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASS in .env');
+    }
+    const mail: nodemailer.SendMailOptions = {
+      from: `"${appConfig.companyName}" <${appConfig.smtpUser}>`,
+      to:      opts.to,
+      subject: opts.subject,
+      html:    opts.html,
+      text:    opts.text,
+    };
+    if (opts.pdfPath) {
+      const fullPath = path.join(process.cwd(), opts.pdfPath.replace(/^\//, ''));
+      mail.attachments = [{ filename: path.basename(fullPath), path: fullPath }];
+    }
+    await this.transporter.sendMail(mail);
   }
 }
