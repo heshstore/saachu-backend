@@ -24,6 +24,12 @@ export class ProductionController {
     return this.service.getStageSummary();
   }
 
+  @Get('delayed')
+  @RequirePermission(PP.VIEW)
+  getDelayed(@Query('limit') limit?: string) {
+    return this.service.getDelayed(limit ? Math.min(Number(limit), 50) : 20);
+  }
+
   @Get('stale-orders')
   @RequirePermission(PP.VIEW)
   getStaleOrders() {

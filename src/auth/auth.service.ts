@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { User } from '../users/entities/user.entity';
 import { RbacService } from '../rbac/rbac.service';
 import { normalizeUserMobile, normalizeUserRole } from '../users/user-normalization.util';
@@ -23,6 +24,7 @@ export class AuthService {
     private userRepo: Repository<User>,
     private jwtService: JwtService,
     private rbacService: RbacService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   async login(loginId: string, password: string) {
@@ -109,6 +111,7 @@ export class AuthService {
     };
 
     console.log(`[Auth:Service] Login SUCCESS | uid=${user.id} name="${user.name}" role=${normalizedRole}`);
+    this.eventEmitter.emit('auth.login', { user_id: user.id, name: user.name, role: normalizedRole, ip: null });
     return {
       access_token: this.jwtService.sign(payload),
       user: {

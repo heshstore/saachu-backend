@@ -17,6 +17,7 @@ import { User } from '../users/entities/user.entity';
 import { ProductionService } from './production.service';
 import { ProductionController } from './production.controller';
 import { PaymentsController } from './payments.controller';
+import { AccountsController } from './accounts.controller';
 import { CrmWhatsappService } from './crm-whatsapp.service';
 import { ProductionCommandService } from './production-command.service';
 
@@ -25,7 +26,7 @@ import { ProductionCommandService } from './production-command.service';
     TypeOrmModule.forFeature([Order, OrderItem, Payment, ProductionJob, ProductionAlert, ProductionEfficiency, Customer, User]),
     WhatsappModule,
   ],
-  controllers: [OrdersController, ProductionController, PaymentsController],
+  controllers: [OrdersController, ProductionController, PaymentsController, AccountsController],
   providers: [OrdersService, PaymentService, ProductionService, CrmWhatsappService, ProductionCommandService],
   exports: [OrdersService, PaymentService, ProductionService, CrmWhatsappService],
 })

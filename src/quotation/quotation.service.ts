@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThanOrEqual } from 'typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Quotation, QuotationStatus, QuotationDiscountType } from './quotation.entity';
 import { QuotationItem } from './quotation-item.entity';
 import { appConfig } from '../config/config';
@@ -24,6 +25,7 @@ export class QuotationService {
     @Inject(forwardRef(() => OrdersService))
     private ordersService: OrdersService,
     private itemsService: ItemsService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   // ── Quotation number generator — QUO0001 format ──────────────────────────────
@@ -282,7 +284,13 @@ export class QuotationService {
       items,
     });
 
-    return this.quotationRepo.save(quotation);
+    const saved = await this.quotationRepo.save(quotation);
+    this.eventEmitter.emit('quotation.created', {
+      id: saved.id, quotation_no: saved.quotation_no,
+      customer_name: saved.customer_name, total_amount: saved.total_amount,
+      user_id: user?.id ?? null, user_name: user?.name ?? null,
+    });
+    return saved;
   }
 
   // ── Read ──────────────────────────────────────────────────────────────────────
@@ -370,7 +378,9 @@ export class QuotationService {
     const quotation = await this.findOne(id);
     this.assertEditable(quotation);
     quotation.status = QuotationStatus.SENT;
-    return this.quotationRepo.save(quotation);
+    const saved = await this.quotationRepo.save(quotation);
+    this.eventEmitter.emit('quotation.sent', { id, quotation_no: saved.quotation_no });
+    return saved;
   }
 
   async approve(id: number): Promise<Quotation> {
@@ -379,7 +389,9 @@ export class QuotationService {
       throw new ForbiddenException('Only SENT quotations can be approved');
     }
     quotation.status = QuotationStatus.APPROVED;
-    return this.quotationRepo.save(quotation);
+    const saved = await this.quotationRepo.save(quotation);
+    this.eventEmitter.emit('quotation.approved', { id, quotation_no: saved.quotation_no, user_id: null, user_name: null });
+    return saved;
   }
 
   async reject(id: number, user?: any): Promise<Quotation> {
@@ -388,7 +400,9 @@ export class QuotationService {
       throw new ForbiddenException('Only DRAFT or SENT quotations can be rejected');
     }
     quotation.status = QuotationStatus.REJECTED;
-    return this.quotationRepo.save(quotation);
+    const saved = await this.quotationRepo.save(quotation);
+    this.eventEmitter.emit('quotation.rejected', { id, quotation_no: saved.quotation_no, user_id: user?.id ?? null, user_name: user?.name ?? null });
+    return saved;
   }
 
   async cancel(id: number, user?: any): Promise<Quotation> {

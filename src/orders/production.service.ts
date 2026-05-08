@@ -640,6 +640,19 @@ export class ProductionService {
     }
   }
 
+  async getDelayed(limit: number): Promise<(ProductionJob & { is_delayed: boolean })[]> {
+    const jobs: ProductionJob[] = await this.repo.manager.query(
+      `SELECT * FROM production_jobs
+       WHERE status IN ('PENDING', 'IN_PROGRESS')
+         AND due_date IS NOT NULL
+         AND due_date < NOW()
+       ORDER BY due_date ASC
+       LIMIT $1`,
+      [limit],
+    );
+    return jobs.map(job => ({ ...job, is_delayed: true }));
+  }
+
   async findQueue(filters: {
     stage?: ProductionStage;
     status?: ProductionJobStatus;

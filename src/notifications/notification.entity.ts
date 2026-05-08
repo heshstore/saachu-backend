@@ -14,23 +14,31 @@ export enum NotificationType {
 }
 
 export enum NotificationPriority {
-  HIGH   = 'HIGH',
-  MEDIUM = 'MEDIUM',
-  LOW    = 'LOW',
+  CRITICAL = 'CRITICAL',
+  HIGH     = 'HIGH',
+  MEDIUM   = 'MEDIUM',
+  LOW      = 'LOW',
+}
+
+export enum NotificationCategory {
+  CRM        = 'CRM',
+  PRODUCTION = 'PRODUCTION',
+  ACCOUNTS   = 'ACCOUNTS',
+  DISPATCH   = 'DISPATCH',
+  SYSTEM     = 'SYSTEM',
 }
 
 export const PRIORITY_RANK: Record<NotificationPriority, number> = {
-  [NotificationPriority.HIGH]:   3,
-  [NotificationPriority.MEDIUM]: 2,
-  [NotificationPriority.LOW]:    1,
+  [NotificationPriority.CRITICAL]: 4,
+  [NotificationPriority.HIGH]:     3,
+  [NotificationPriority.MEDIUM]:   2,
+  [NotificationPriority.LOW]:      1,
 };
 
 @Entity('notifications')
 @Index('idx_notif_user_read',   ['user_id', 'is_read'])
 @Index('idx_notif_user_active', ['user_id', 'is_active'])
 @Index('idx_notif_created',     ['created_at'])
-// Covers the dedup query in createNotification exactly:
-// WHERE user_id=$1 AND is_active=true AND entity_type=$2 AND entity_id=$3 AND type=$4 AND created_at > $5
 @Index('idx_notif_dedup', ['user_id', 'is_active', 'entity_type', 'entity_id', 'type'])
 export class Notification {
   @PrimaryGeneratedColumn('uuid')
@@ -42,8 +50,12 @@ export class Notification {
   @Column({ type: 'varchar', length: 12, default: NotificationType.INFO })
   type: NotificationType;
 
+  // varchar(8) fits 'CRITICAL' exactly (8 chars)
   @Column({ type: 'varchar', length: 8, default: NotificationPriority.MEDIUM })
   priority: NotificationPriority;
+
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  category: NotificationCategory | null;
 
   @Column()
   title: string;
@@ -52,10 +64,21 @@ export class Notification {
   message: string;
 
   @Column({ type: 'varchar', length: 30, nullable: true })
-  entity_type: string;
+  entity_type: string | null;
 
   @Column({ nullable: true })
-  entity_id: number;
+  entity_id: number | null;
+
+  // Direct navigation URL — used by NotificationCenter "Go To" button
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  action_url: string | null;
+
+  // Comma-separated list of role names this notification was broadcast to
+  @Column({ type: 'simple-array', nullable: true })
+  role_targets: string[] | null;
+
+  @Column({ type: 'jsonb', nullable: true })
+  metadata: Record<string, any> | null;
 
   @Column({ default: false })
   is_read: boolean;
@@ -70,5 +93,9 @@ export class Notification {
   created_at: Date;
 
   @Column({ type: 'timestamptz', nullable: true })
-  expires_at: Date;
+  expires_at: Date | null;
+
+  // Soft-hide: set by user from center; hides permanently without DB deletion
+  @Column({ type: 'timestamptz', nullable: true })
+  hidden_at: Date | null;
 }

@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository }       from 'typeorm';
+import { EventEmitter2 }    from '@nestjs/event-emitter';
 
 import { Dispatch, DispatchStatus } from './entities/dispatch.entity';
 import { CreateDispatchDto }         from './dto/create-dispatch.dto';
@@ -23,6 +24,7 @@ export class DispatchService {
     private readonly orderRepo: Repository<Order>,
 
     private readonly audit: AuditService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   /** Orders that production has finished and are waiting to be shipped. */
@@ -113,6 +115,7 @@ export class DispatchService {
         meta:      { order_id: dto.order_id, transport_type: dto.transport_type },
       });
 
+      this.eventEmitter.emit('dispatch.created', { id: dispatch.id, order_id: dto.order_id, user_id: userId ?? null });
       return dispatch;
     });
   }
@@ -158,6 +161,7 @@ export class DispatchService {
         meta:      { order_id: d.order_id, order_updated: orderUpdated },
       });
 
+      this.eventEmitter.emit('dispatch.delivered', { id: d.id, order_id: d.order_id, user_id: userId ?? null });
       return d;
     });
 

@@ -154,6 +154,19 @@ export class PaymentService {
     });
   }
 
+  /** Aggregate of all outstanding payment balances across all orders — used by dashboard/sidebar. */
+  async getPendingSummary(): Promise<{ total_amount: number }> {
+    const rows = await this.orderRepo.manager.query(`
+      SELECT COALESCE(SUM(GREATEST(o.total_amount - COALESCE(p_sum.paid, 0), 0)), 0)::numeric AS total_amount
+      FROM   orders o
+      LEFT   JOIN (
+        SELECT order_id, SUM(amount) AS paid FROM payments GROUP BY order_id
+      ) p_sum ON p_sum.order_id = o.id
+      WHERE  o.total_amount > 0
+    `);
+    return { total_amount: Number(rows[0]?.total_amount ?? 0) };
+  }
+
   /**
    * Orders that still have an outstanding balance, computed live from the
    * payments table so it's accurate even if cached columns drift.

@@ -475,7 +475,15 @@ export class OrdersService {
 
     order.paid_amount    = Number(order.paid_amount) + amount;
     order.pending_amount = Math.max(0, Number(order.total_amount) - Number(order.paid_amount));
-    return this.orderRepo.save(order);
+    const saved = await this.orderRepo.save(order);
+    this.eventEmitter.emit('payment.received', {
+      order_id:  id,
+      order_no:  order.order_no,
+      amount,
+      user_id:   body.user_id   ?? null,
+      user_name: body.user_name ?? null,
+    });
+    return saved;
   }
 
   // ── Split invoice (reporting helper) ─────────────────────────────────────────

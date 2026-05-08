@@ -113,6 +113,126 @@ async function ensureWhatsappSessionColumns(): Promise<void> {
   }
 }
 
+async function ensureDispatchTable(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dispatches (
+        id               SERIAL PRIMARY KEY,
+        order_id         INT NOT NULL,
+        dispatch_status  VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+        dispatch_date    TIMESTAMPTZ,
+        delivery_date    TIMESTAMPTZ,
+        transport_type   VARCHAR(20),
+        tracking_number  VARCHAR,
+        notes            TEXT,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at       TIMESTAMPTZ
+      )
+    `);
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_dispatches_order_id
+        ON dispatches(order_id)
+    `);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureNotificationColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    const cols = [
+      `ALTER TABLE notifications ADD COLUMN IF NOT EXISTS category     VARCHAR(20)`,
+      `ALTER TABLE notifications ADD COLUMN IF NOT EXISTS action_url   VARCHAR(500)`,
+      `ALTER TABLE notifications ADD COLUMN IF NOT EXISTS role_targets TEXT`,
+      `ALTER TABLE notifications ADD COLUMN IF NOT EXISTS metadata     JSONB`,
+      `ALTER TABLE notifications ADD COLUMN IF NOT EXISTS hidden_at    TIMESTAMPTZ`,
+    ];
+    for (const sql of cols) {
+      await client.query(sql).catch(() => {});
+    }
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureActivityTable(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS activity_logs (
+        id                   UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        module               VARCHAR(20)  NOT NULL,
+        entity_type          VARCHAR(30),
+        entity_id            INT,
+        action               VARCHAR(50)  NOT NULL,
+        title                VARCHAR(200) NOT NULL,
+        description          TEXT,
+        performed_by_user_id INT,
+        performed_by_name    VARCHAR(100),
+        performed_by_role    VARCHAR(50),
+        source               VARCHAR(15)  NOT NULL DEFAULT 'SYSTEM',
+        old_value            JSONB,
+        new_value            JSONB,
+        metadata             JSONB,
+        ip_address           VARCHAR(50),
+        user_agent           VARCHAR(300),
+        severity             VARCHAR(8)   NOT NULL DEFAULT 'INFO',
+        created_at           TIMESTAMPTZ  NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_act_module   ON activity_logs(module)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_act_entity   ON activity_logs(entity_type, entity_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_act_actor    ON activity_logs(performed_by_user_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_act_severity ON activity_logs(severity)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_act_created  ON activity_logs(created_at DESC)`);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureSlaTable(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS sla_events (
+        id                   UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+        module               VARCHAR(20)  NOT NULL,
+        entity_type          VARCHAR(30)  NOT NULL,
+        entity_id            INT          NOT NULL,
+        entity_label         VARCHAR(200) NOT NULL,
+        assigned_user_id     INT,
+        assigned_role        VARCHAR(50),
+        status               VARCHAR(10)  NOT NULL DEFAULT 'ACTIVE',
+        priority             VARCHAR(8)   NOT NULL DEFAULT 'MEDIUM',
+        sla_deadline         TIMESTAMPTZ  NOT NULL,
+        warning_at           TIMESTAMPTZ,
+        escalation_level     INT          NOT NULL DEFAULT 0,
+        escalated_at         TIMESTAMPTZ,
+        resolved_at          TIMESTAMPTZ,
+        last_notification_at TIMESTAMPTZ,
+        metadata             JSONB,
+        created_at           TIMESTAMPTZ  NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sla_status   ON sla_events(status)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sla_entity   ON sla_events(entity_type, entity_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sla_user     ON sla_events(assigned_user_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_sla_deadline ON sla_events(sla_deadline)`);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 async function ensureLogsTable(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
   let client: Client | null = null;
@@ -174,6 +294,27 @@ async function validateSchema(): Promise<void> {
 }
 
 async function bootstrap() {
+  // ── Startup banner ─────────────────────────────────────────────────────────
+  const appVersion = process.env.APP_VERSION ?? 'dev';
+  const deployedAt = process.env.DEPLOYED_AT ?? new Date().toISOString();
+  logger.log('═══════════════════════════════════════════════════');
+  logger.log(`  Saachu App Backend   ${appVersion}`);
+  logger.log(`  Env: ${process.env.NODE_ENV ?? 'development'}   PID: ${process.pid}`);
+  logger.log(`  Deployed: ${deployedAt}`);
+  logger.log('═══════════════════════════════════════════════════');
+
+  // ── Required env var validation ────────────────────────────────────────────
+  // Fail loudly before any connection is attempted so the Render log shows
+  // exactly which secret is missing rather than an obscure downstream error.
+  const REQUIRED_ENV: string[] = ['DATABASE_URL', 'JWT_SECRET'];
+  const missingEnv = REQUIRED_ENV.filter((k) => !process.env[k]);
+  if (missingEnv.length > 0) {
+    logger.error(`❌ STARTUP BLOCKED — missing required env vars: ${missingEnv.join(', ')}`);
+    logger.error('   Set these in the Render dashboard → Environment → Add Env Var');
+    process.exit(1);
+  }
+  logger.log('✅ Required env vars present');
+
   const rawDbUrl = process.env.DATABASE_URL ?? '';
   const dbUrl    = sanitizeDatabaseUrl(rawDbUrl);
 
@@ -207,10 +348,38 @@ async function bootstrap() {
   }
 
   try {
+    await ensureDispatchTable();
+    logger.log('✅ Dispatch table ready');
+  } catch (err: any) {
+    logger.error('Dispatch migration failed (non-fatal):', err?.message);
+  }
+
+  try {
     await ensureWhatsappSessionColumns();
     logger.log('✅ WhatsApp session columns ready');
   } catch (err: any) {
     logger.error('WhatsApp session migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureNotificationColumns();
+    logger.log('✅ Notification columns ready');
+  } catch (err: any) {
+    logger.error('Notification column migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureSlaTable();
+    logger.log('✅ SLA table ready');
+  } catch (err: any) {
+    logger.error('SLA table migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureActivityTable();
+    logger.log('✅ Activity table ready');
+  } catch (err: any) {
+    logger.error('Activity table migration failed (non-fatal):', err?.message);
   }
 
   try {

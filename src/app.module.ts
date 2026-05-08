@@ -37,6 +37,9 @@ import { AnalyticsModule } from './analytics/analytics.module';
 import { LogsModule } from './logs/logs.module';
 import { DispatchModule }   from './dispatch/dispatch.module';
 import { DashboardModule }  from './dashboard/dashboard.module';
+import { HealthModule }     from './health/health.module';
+import { SlaModule }        from './sla/sla.module';
+import { ActivityModule }   from './activity/activity.module';
 
 const _rawDbUrl      = process.env.DATABASE_URL || '';
 const databaseUrl    = sanitizeDatabaseUrl(_rawDbUrl);
@@ -94,6 +97,9 @@ new Logger('AppModule').log(
     LogsModule,
     DispatchModule,
     DashboardModule,
+    HealthModule,
+    SlaModule,
+    ActivityModule,
   ],
   providers: [
     AppService,

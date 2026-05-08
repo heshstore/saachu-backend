@@ -603,6 +603,7 @@ export class LeadService implements OnModuleInit {
     lead.assigned_to = userId;
     const saved = await this.leadRepo.save(lead);
     void this.auditService.log(id, user.id, 'ASSIGNED', `→ ${target.name} (id=${userId})`, ip);
+    this.eventEmitter.emit('crm.lead.assigned', { id, name: lead.name, assigned_to: userId, assigned_to_name: target.name, assigned_by_id: user.id, assigned_by_name: user.name });
     return saved;
   }
 
@@ -619,6 +620,7 @@ export class LeadService implements OnModuleInit {
     });
     const saved = await this.noteRepo.save(note);
     await this.tryKeywordAdvance(lead, body.note, user);
+    this.eventEmitter.emit('crm.lead.note_added', { lead_id: leadId, lead_name: lead.name, by_user_id: user.id, by_user_name: user.name });
     return saved;
   }
 
@@ -661,6 +663,8 @@ export class LeadService implements OnModuleInit {
     fu.completed_by = user.id;
     const saved = await this.followUpRepo.save(fu);
     void this.auditService.log(fu.lead_id, user.id, 'FOLLOWUP_COMPLETED', `followup_id=${followUpId}`, ip);
+    this.eventEmitter.emit('crm.lead.followup.completed', { lead_id: fu.lead_id, followup_id: followUpId, by_user_id: user.id, by_user_name: user.name });
+    this.eventEmitter.emit('lead.followup.completed', { followup_id: followUpId });
     return saved;
   }
 

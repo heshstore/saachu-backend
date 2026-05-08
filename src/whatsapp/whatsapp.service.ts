@@ -52,6 +52,12 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   private _disconnectedAt: Date | null = null;
   // Prevents concurrent post-reconnect recovery scans if ready fires multiple times rapidly.
   private _recovering = false;
+  // Admin monitoring state — read-only from outside; mutated only by event handlers below.
+  private _lastDisconnectReason: string | null = null;
+  private _lastReadyAt: Date | null = null;
+  private _qrDataUrl: string | null = null;
+  private _qrGeneratedAt: Date | null = null;
+  private _adminEventSubject = new ReplaySubject<string>(1);
 
   constructor(
     @InjectRepository(WhatsAppSession)
@@ -230,6 +236,9 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`[WhatsApp] QR failure streak: ${this.qrCount} QRs shown without connection`);
       }
 
+      this._qrDataUrl = dataUrl;
+      this._qrGeneratedAt = new Date();
+      this._adminEventSubject.next(JSON.stringify({ type: 'qr', qrIndex: this.qrCount, timestamp: new Date().toISOString() }));
       this.qrSubject.next(JSON.stringify(payload));
       await this.updateSession({ status: 'CONNECTING', qr_code: dataUrl });
     });
@@ -248,6 +257,10 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       await this.updateSession({ status: 'CONNECTED', qr_code: null, phone_number: phone, connected_at: new Date(), disconnected_at: null });
       this.qrSubject.next(JSON.stringify({ type: 'ready', phone }));
       this.logger.log(`[WhatsApp] Connected as +${phone}`);
+      this._lastReadyAt = new Date();
+      this._qrDataUrl = null;
+      this._qrGeneratedAt = null;
+      this._adminEventSubject.next(JSON.stringify({ type: 'ready', phone, timestamp: new Date().toISOString() }));
       this.startHealthMonitor();
       this.eventEmitter.emit('whatsapp.up');
       setTimeout(() => this.recoverMissedMessages().catch((e) => this.logger.warn(`[WhatsApp] Recovery scan failed: ${e?.message}`)), 3_000);
@@ -280,11 +293,13 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       }
 
       this._ready = false;
+      this._lastDisconnectReason = reason;
       this.stopHealthMonitor();
       if (!this._disconnectedAt) {
         this._disconnectedAt = new Date();
         this.logger.log('[WhatsApp] Session downtime started');
       }
+      this._adminEventSubject.next(JSON.stringify({ type: 'disconnected', reason, timestamp: new Date().toISOString() }));
       await this.updateSession({ status: 'DISCONNECTED', disconnected_at: this._disconnectedAt });
       this.qrSubject.next(JSON.stringify({ type: 'disconnected', reason }));
 
@@ -322,6 +337,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
     this.client.on('auth_failure', async (msg: string) => {
       this._ready = false;
+      this._adminEventSubject.next(JSON.stringify({ type: 'auth_failure', message: msg, timestamp: new Date().toISOString() }));
       this.logger.error(`[WhatsApp] Auth failure: ${msg} — clearing session and restarting`);
       if (!this._disconnectedAt) {
         this._disconnectedAt = new Date();
@@ -355,6 +371,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
     this.client.on('loading_screen', (percent: number, message: string) => {
       this.logger.log(`[WhatsApp] Loading ${percent}% — ${message}`);
+      this._adminEventSubject.next(JSON.stringify({ type: 'loading', percent, message, timestamp: new Date().toISOString() }));
     });
 
     this.client.on('message', onMsg);
@@ -845,6 +862,55 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       context: 'WHATSAPP – Inbound',
       raw_payload: { chatId, body, timestamp: msg.timestamp },
     });
+  }
+
+  // ── Admin monitoring API ──────────────────────────────────────────────────────
+
+  getAdminStatus() {
+    const connected = this._ready && this.isConnected();
+    const state = this._initializing ? 'INITIALIZING'
+      : connected       ? 'CONNECTED'
+      : this.qrGenerated ? 'QR_ACTIVE'
+      : 'DISCONNECTED';
+    return {
+      connected,
+      state,
+      lastDisconnectReason: this._lastDisconnectReason,
+      disconnectedAt:       this._disconnectedAt?.toISOString() ?? null,
+      downtimeMinutes:      this._disconnectedAt
+        ? Math.round((Date.now() - this._disconnectedAt.getTime()) / 60_000)
+        : null,
+      lastReadyAt:        this._lastReadyAt?.toISOString() ?? null,
+      qrActive:           this.qrGenerated,
+      qrCount:            this.qrCount,
+      recoveringMessages: this._recovering,
+      appVersion:         process.env.APP_VERSION ?? 'unknown',
+    };
+  }
+
+  getQrData() {
+    return {
+      active:      this.qrGenerated,
+      qr:          this.qrGenerated ? this._qrDataUrl : null,
+      generatedAt: this._qrGeneratedAt?.toISOString() ?? null,
+    };
+  }
+
+  getAdminEventObservable(): Observable<any> {
+    return merge(
+      this._adminEventSubject.asObservable().pipe(map((json) => ({ data: JSON.parse(json) }))),
+      interval(30_000).pipe(map(() => ({ data: { type: 'ping' } }))),
+    );
+  }
+
+  async safeRestart(): Promise<void> {
+    if (this._initializing) {
+      this.logger.warn('[WhatsApp Admin] safeRestart() skipped — already initializing');
+      return;
+    }
+    this.logger.log('[WhatsApp Admin] Controlled restart — preserving auth session');
+    this._adminEventSubject.next(JSON.stringify({ type: 'restart_initiated', timestamp: new Date().toISOString() }));
+    await this.reinitClient();
   }
 
   private async recoverMissedMessages(): Promise<void> {
