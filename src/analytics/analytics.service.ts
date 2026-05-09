@@ -125,4 +125,206 @@ export class AnalyticsService {
 
     return rows.map(r => ({ source: r.source, count: Number(r.count) }));
   }
+
+  // ── Phase 4: Operational KPIs ─────────────────────────────────────────────
+
+  async getOperationalKpis() {
+    const safe = async (sql: string, params: any[] = []) => {
+      try { return await this.dataSource.query(sql, params); } catch { return []; }
+    };
+
+    const [quotRows, orderRows, approvalRows, dispatchRows, collectionRows,
+           overdueRows, prodRows, waRows, leadRows, syncRows] = await Promise.all([
+      safe(`SELECT COUNT(*)::int AS count FROM quotation WHERE created_at::date = CURRENT_DATE`),
+      safe(`SELECT COUNT(*)::int AS count FROM orders WHERE created_at::date = CURRENT_DATE AND status <> 'CANCELLED'`),
+      safe(`SELECT COUNT(*)::int AS count FROM orders WHERE status = 'PENDING_APPROVAL'`),
+      safe(`SELECT COUNT(*)::int AS count FROM orders WHERE status = 'READY'`),
+      safe(`SELECT COALESCE(SUM(amount),0)::numeric AS total FROM payments WHERE created_at::date = CURRENT_DATE`),
+      safe(`SELECT COUNT(*)::int AS count FROM orders WHERE status = 'DISPATCHED' AND pending_amount > 0`),
+      safe(`SELECT COUNT(*)::int AS count FROM production_jobs WHERE status IN ('PENDING','IN_PROGRESS')`),
+      safe(`SELECT status FROM whatsapp_sessions ORDER BY last_active_at DESC LIMIT 1`),
+      safe(`SELECT COUNT(*)::int AS count FROM leads WHERE status NOT IN ('WON','LOST','CANCELLED','REJECTED')`),
+      safe(`SELECT MAX(updated_at) AS last_sync FROM shopify_catalog_items`),
+    ]);
+
+    const waStatus: string = waRows[0]?.status ?? 'NO_SESSION';
+    let shopifySyncMinutes: number | null = null;
+    if (syncRows[0]?.last_sync) {
+      shopifySyncMinutes = Math.round((Date.now() - new Date(syncRows[0].last_sync).getTime()) / 60_000);
+    }
+
+    return {
+      quotations_today:      Number(quotRows[0]?.count     ?? 0),
+      orders_today:          Number(orderRows[0]?.count    ?? 0),
+      pending_approvals:     Number(approvalRows[0]?.count ?? 0),
+      pending_dispatch:      Number(dispatchRows[0]?.count ?? 0),
+      collections_today:     Number(collectionRows[0]?.total ?? 0),
+      overdue_payments:      Number(overdueRows[0]?.count  ?? 0),
+      production_pending:    Number(prodRows[0]?.count     ?? 0),
+      whatsapp_status:       waStatus,
+      shopify_sync_minutes:  shopifySyncMinutes,
+      active_leads:          Number(leadRows[0]?.count     ?? 0),
+    };
+  }
+
+  async getSalesAnalytics(days = 30) {
+    const safe = async (sql: string, params: any[] = []) => {
+      try { return await this.dataSource.query(sql, params); } catch { return []; }
+    };
+    const from = new Date(Date.now() - days * 86_400_000).toISOString();
+
+    const [quotRows, convRows, leadRows, followupRows] = await Promise.all([
+      safe(`SELECT COUNT(*)::int AS sent FROM quotation WHERE created_at >= $1`, [from]),
+      safe(`SELECT COUNT(*)::int AS converted FROM quotation WHERE status = 'CONVERTED' AND updated_at >= $1`, [from]),
+      safe(`SELECT COUNT(*)::int AS total FROM leads WHERE created_at >= $1`, [from]),
+      safe(`
+        SELECT
+          COUNT(*) FILTER (WHERE completed = true)::int  AS done,
+          COUNT(*)::int                                   AS total
+        FROM lead_followups WHERE scheduled_at >= $1
+      `, [from]),
+    ]);
+
+    const sent      = Number(quotRows[0]?.sent      ?? 0);
+    const converted = Number(convRows[0]?.converted ?? 0);
+    const leads     = Number(leadRows[0]?.total     ?? 0);
+    const fuDone    = Number(followupRows[0]?.done  ?? 0);
+    const fuTotal   = Number(followupRows[0]?.total ?? 0);
+
+    return {
+      period_days:              days,
+      quotations_sent:          sent,
+      quotations_converted:     converted,
+      conversion_rate:          sent > 0 ? Math.round((converted / sent) * 100) : 0,
+      leads_total:              leads,
+      followup_completion_rate: fuTotal > 0 ? Math.round((fuDone / fuTotal) * 100) : null,
+    };
+  }
+
+  async getProductionAnalytics(days = 30) {
+    const safe = async (sql: string, params: any[] = []) => {
+      try { return await this.dataSource.query(sql, params); } catch { return []; }
+    };
+    const from = new Date(Date.now() - days * 86_400_000).toISOString();
+
+    const [summaryRows, activeRows] = await Promise.all([
+      safe(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'DONE')::int           AS completed,
+          COUNT(*) FILTER (WHERE status = 'DONE' AND due_date IS NOT NULL AND completed_at > due_date)::int AS delayed,
+          AVG(EXTRACT(EPOCH FROM (completed_at - created_at))/3600)::numeric AS avg_hours
+        FROM production_jobs WHERE created_at >= $1
+      `, [from]),
+      safe(`SELECT COUNT(*)::int AS count FROM production_jobs WHERE status IN ('PENDING','IN_PROGRESS')`),
+    ]);
+
+    const s = summaryRows[0] ?? {};
+    const completed = Number(s.completed ?? 0);
+    const delayed   = Number(s.delayed   ?? 0);
+
+    return {
+      period_days:      days,
+      jobs_completed:   completed,
+      jobs_delayed:     delayed,
+      delayed_rate:     completed > 0 ? Math.round((delayed / completed) * 100) : 0,
+      avg_hours:        s.avg_hours != null ? Number(Number(s.avg_hours).toFixed(1)) : null,
+      active_jobs:      Number(activeRows[0]?.count ?? 0),
+    };
+  }
+
+  async getNotificationsSummary(userId?: number) {
+    const safe = async (sql: string, params: any[] = []) => {
+      try { return await this.dataSource.query(sql, params); } catch { return []; }
+    };
+
+    if (userId) {
+      const rows = await safe(`
+        SELECT
+          COUNT(*) FILTER (WHERE is_read = false)::int AS unread,
+          COUNT(*) FILTER (WHERE priority IN ('CRITICAL','HIGH') AND is_read = false)::int AS urgent,
+          COUNT(*)::int AS total_active
+        FROM notifications WHERE user_id = $1 AND is_active = true
+      `, [userId]);
+      return {
+        unread:   Number(rows[0]?.unread  ?? 0),
+        urgent:   Number(rows[0]?.urgent  ?? 0),
+        total:    Number(rows[0]?.total_active ?? 0),
+      };
+    }
+
+    const rows = await safe(`
+      SELECT
+        COUNT(*) FILTER (WHERE is_read = false)::int AS unread,
+        COUNT(*) FILTER (WHERE priority IN ('CRITICAL','HIGH'))::int AS urgent
+      FROM notifications WHERE is_active = true AND created_at >= NOW() - INTERVAL '24 hours'
+    `);
+    return {
+      unread_24h: Number(rows[0]?.unread ?? 0),
+      urgent_24h: Number(rows[0]?.urgent ?? 0),
+    };
+  }
+
+  async getSystemHealth() {
+    const safe = async (sql: string) => {
+      try { return await this.dataSource.query(sql); } catch { return []; }
+    };
+
+    const [dbRows, waRows, syncRows, jobRows, schedulerRows] = await Promise.all([
+      safe(`SELECT 1 AS ok`),
+      safe(`SELECT status, last_active_at FROM whatsapp_sessions ORDER BY last_active_at DESC LIMIT 1`),
+      safe(`SELECT MAX(updated_at) AS last_sync, COUNT(*)::int AS total FROM shopify_catalog_items`),
+      safe(`SELECT COUNT(*) FILTER (WHERE status = 'DONE' AND completed_at::date = CURRENT_DATE)::int AS jobs_today FROM production_jobs`),
+      safe(`SELECT COUNT(*)::int AS count FROM kpi_snapshots WHERE created_at >= NOW() - INTERVAL '2 hours'`),
+    ]);
+
+    const waRow   = waRows[0];
+    const syncRow = syncRows[0];
+
+    let shopifySyncMinutes: number | null = null;
+    if (syncRow?.last_sync) {
+      shopifySyncMinutes = Math.round((Date.now() - new Date(syncRow.last_sync).getTime()) / 60_000);
+    }
+
+    const waConnected = waRow?.status === 'AUTHENTICATED' || waRow?.status === 'CONNECTED';
+
+    return {
+      database:            dbRows.length > 0 ? 'connected' : 'error',
+      whatsapp_status:     waRow?.status ?? 'NO_SESSION',
+      whatsapp_connected:  waConnected,
+      whatsapp_last_seen:  waRow?.last_active_at ?? null,
+      shopify_sync_minutes: shopifySyncMinutes,
+      shopify_catalog_size: Number(syncRow?.total ?? 0),
+      scheduler_active:    Number(schedulerRows[0]?.count ?? 0) > 0,
+      jobs_completed_today: Number(jobRows[0]?.jobs_today ?? 0),
+      server_uptime_seconds: Math.floor(process.uptime()),
+    };
+  }
+
+  async getActivityFeed(limit = 20): Promise<Record<string, any>[]> {
+    try {
+      const rows = await this.dataSource.query(`
+        SELECT
+          id, module, entity_type, entity_id, action, title, description,
+          performed_by_name, performed_by_role, severity, source, created_at
+        FROM activity_logs
+        ORDER BY created_at DESC
+        LIMIT $1
+      `, [Math.min(limit, 50)]);
+
+      return rows.map((r: any) => ({
+        id:          r.id,
+        module:      r.module,
+        entity_type: r.entity_type,
+        entity_id:   r.entity_id,
+        action:      r.action,
+        title:       r.title,
+        description: r.description,
+        actor:       r.performed_by_name,
+        role:        r.performed_by_role,
+        severity:    r.severity,
+        source:      r.source,
+        timestamp:   r.created_at,
+      }));
+    } catch { return []; }
+  }
 }

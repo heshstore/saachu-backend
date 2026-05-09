@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Post, Query, Req } from '@nestjs/common';
 import { AnalyticsService } from './analytics.service';
 import { TrackEventDto } from './dto/track-event.dto';
 import { Public } from '../auth/public.decorator';
@@ -37,5 +37,44 @@ export class AnalyticsController {
   @RequirePermission('crm.analytics.team')
   getSourceBreakdown() {
     return this.analyticsService.getSourceBreakdown();
+  }
+
+  // ── Phase 4: Operational KPI endpoints ─────────────────────────────────────
+
+  @Get('kpis')
+  @RequirePermission('order.view')
+  getOperationalKpis() {
+    return this.analyticsService.getOperationalKpis();
+  }
+
+  @Get('sales')
+  @RequirePermission('quotation.view')
+  getSalesAnalytics(@Query('days') days?: string) {
+    return this.analyticsService.getSalesAnalytics(Number(days ?? 30));
+  }
+
+  @Get('production')
+  @RequirePermission('production.view')
+  getProductionAnalytics(@Query('days') days?: string) {
+    return this.analyticsService.getProductionAnalytics(Number(days ?? 30));
+  }
+
+  @Get('notifications')
+  @RequirePermission('order.view')
+  getNotificationsSummary(@Req() req: any) {
+    const userId: number | undefined = req.user?.userId ?? req.user?.sub ?? req.user?.id;
+    return this.analyticsService.getNotificationsSummary(userId);
+  }
+
+  @Get('system-health')
+  @RequirePermission('order.view')
+  getSystemHealth() {
+    return this.analyticsService.getSystemHealth();
+  }
+
+  @Get('activity-feed')
+  @RequirePermission('order.view')
+  getActivityFeed(@Query('limit') limit?: string) {
+    return this.analyticsService.getActivityFeed(Number(limit ?? 20));
   }
 }
