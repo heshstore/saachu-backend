@@ -299,7 +299,7 @@ export class ActivityService {
       source:               'USER',
       performed_by_user_id: e.user_id ?? null,
       performed_by_name:    e.user_name ?? null,
-      old_value:            { status: 'SENT' },
+      old_value:            { status: 'GENERATED' },
       new_value:            { status: 'APPROVED' },
       severity:             'INFO',
     });
@@ -316,23 +316,23 @@ export class ActivityService {
       source:               'USER',
       performed_by_user_id: e.user_id ?? null,
       performed_by_name:    e.user_name ?? null,
-      old_value:            { status: 'SENT' },
+      old_value:            { status: 'GENERATED' },
       new_value:            { status: 'REJECTED' },
       severity:             'WARNING',
     });
   }
 
-  @OnEvent('quotation.sent')
-  onQuotationSent(e: { id: number; quotation_no: string }): void {
+  @OnEvent('quotation.generated')
+  onQuotationGenerated(e: { id: number; quotation_no: string }): void {
     void this.logActivity({
       module:      'ACCOUNTS',
       entity_type: 'quotation',
       entity_id:   e.id,
-      action:      'QUOTATION_SENT',
-      title:       `Quotation ${e.quotation_no} sent to customer`,
+      action:      'QUOTATION_GENERATED',
+      title:       `Quotation ${e.quotation_no} generated`,
       source:      'USER',
       old_value:   { status: 'DRAFT' },
-      new_value:   { status: 'SENT' },
+      new_value:   { status: 'GENERATED' },
       severity:    'INFO',
     });
   }

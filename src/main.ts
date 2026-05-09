@@ -294,6 +294,13 @@ async function ensureQuotationColumns(): Promise<void> {
     await client.query(
       `ALTER TABLE quotation ADD COLUMN IF NOT EXISTS converted_order_id INTEGER`,
     ).catch(() => {});
+
+    // Rename SENT → GENERATED in existing rows.
+    // 'SENT' was the old status value; 'GENERATED' is the new canonical name.
+    // Safe to run multiple times (WHERE clause is idempotent).
+    await client.query(
+      `UPDATE quotation SET status = 'GENERATED' WHERE status = 'SENT'`,
+    ).catch(() => {});
   } finally {
     await client?.end().catch(() => {});
   }

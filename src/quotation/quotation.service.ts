@@ -223,9 +223,9 @@ export class QuotationService {
     delete data.total_amount;
 
     // Determine target status.
-    // DRAFT = save without items; SENT = confirm (requires ≥1 item).
+    // DRAFT = save without items; GENERATED = confirm (requires ≥1 item).
     const targetStatus: QuotationStatus =
-      data.status === QuotationStatus.DRAFT ? QuotationStatus.DRAFT : QuotationStatus.SENT;
+      data.status === QuotationStatus.DRAFT ? QuotationStatus.DRAFT : QuotationStatus.GENERATED;
 
     const validityDays  = data.validity_days || 15;
     const valid_till    = new Date();
@@ -383,16 +383,16 @@ export class QuotationService {
   async send(id: number): Promise<Quotation> {
     const quotation = await this.findOne(id);
     this.assertEditable(quotation);
-    quotation.status = QuotationStatus.SENT;
+    quotation.status = QuotationStatus.GENERATED;
     const saved = await this.quotationRepo.save(quotation);
-    this.eventEmitter.emit('quotation.sent', { id, quotation_no: saved.quotation_no });
+    this.eventEmitter.emit('quotation.generated', { id, quotation_no: saved.quotation_no });
     return saved;
   }
 
   async approve(id: number): Promise<Quotation> {
     const quotation = await this.findOne(id);
-    if (quotation.status !== QuotationStatus.SENT) {
-      throw new ForbiddenException('Only SENT quotations can be approved');
+    if (quotation.status !== QuotationStatus.GENERATED) {
+      throw new ForbiddenException('Only GENERATED quotations can be approved');
     }
     quotation.status = QuotationStatus.APPROVED;
     const saved = await this.quotationRepo.save(quotation);
@@ -402,8 +402,8 @@ export class QuotationService {
 
   async reject(id: number, user?: any): Promise<Quotation> {
     const quotation = await this.findOne(id);
-    if (![QuotationStatus.SENT, QuotationStatus.DRAFT].includes(quotation.status)) {
-      throw new ForbiddenException('Only DRAFT or SENT quotations can be rejected');
+    if (![QuotationStatus.GENERATED, QuotationStatus.DRAFT].includes(quotation.status)) {
+      throw new ForbiddenException('Only DRAFT or GENERATED quotations can be rejected');
     }
     quotation.status = QuotationStatus.REJECTED;
     const saved = await this.quotationRepo.save(quotation);
@@ -446,7 +446,7 @@ export class QuotationService {
       throw new ForbiddenException('Quotation already converted to an order');
     }
 
-    if (![QuotationStatus.APPROVED, QuotationStatus.SENT, QuotationStatus.DRAFT].includes(quotation.status)) {
+    if (![QuotationStatus.APPROVED, QuotationStatus.GENERATED, QuotationStatus.DRAFT].includes(quotation.status)) {
       throw new ForbiddenException(`Cannot convert a ${quotation.status} quotation to an order`);
     }
 

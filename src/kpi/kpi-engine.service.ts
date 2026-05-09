@@ -178,9 +178,9 @@ export class KpiEngineService {
         this.q(`
           SELECT
             COUNT(*)::int                                                                          AS total,
-            COUNT(*) FILTER (WHERE status IN ('SENT','APPROVED','CONVERTED'))::int                AS sent,
+            COUNT(*) FILTER (WHERE status IN ('GENERATED','SENT','APPROVED','CONVERTED'))::int                AS sent,
             COUNT(*) FILTER (WHERE status IN ('APPROVED','CONVERTED'))::float /
-              NULLIF(COUNT(*) FILTER (WHERE status IN ('SENT','APPROVED','CONVERTED')), 0) * 100  AS conversion_rate
+              NULLIF(COUNT(*) FILTER (WHERE status IN ('GENERATED','SENT','APPROVED','CONVERTED')), 0) * 100  AS conversion_rate
           FROM quotations
           WHERE created_at BETWEEN $1 AND $2
           ${userId ? `AND created_by = ${userId}` : ''}
@@ -478,7 +478,7 @@ export class KpiEngineService {
         SELECT u.id AS user_id, u.name AS user_name,
                COALESCE(
                  COUNT(*) FILTER (WHERE q.status IN ('APPROVED','CONVERTED'))::float /
-                 NULLIF(COUNT(*) FILTER (WHERE q.status IN ('SENT','APPROVED','CONVERTED')), 0) * 100,
+                 NULLIF(COUNT(*) FILTER (WHERE q.status IN ('GENERATED','SENT','APPROVED','CONVERTED')), 0) * 100,
                  0
                )::numeric AS value
         FROM users u
