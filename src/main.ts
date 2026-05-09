@@ -253,8 +253,25 @@ async function ensureOrderColumns(): Promise<void> {
   let client: Client | null = null;
   try {
     client = await createMigrationClient();
+    const cols = [
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at    TIMESTAMPTZ NOT NULL DEFAULT now()`,
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS quotation_id  INTEGER`,
+    ];
+    for (const sql of cols) {
+      await client.query(sql).catch(() => {});
+    }
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureQuotationColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
     await client.query(
-      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now()`,
+      `ALTER TABLE quotation ADD COLUMN IF NOT EXISTS converted_order_id INTEGER`,
     ).catch(() => {});
   } finally {
     await client?.end().catch(() => {});
@@ -494,9 +511,16 @@ async function bootstrap() {
 
   try {
     await ensureOrderColumns();
-    logger.log('✅ Order columns ready (created_at)');
+    logger.log('✅ Order columns ready (created_at, quotation_id)');
   } catch (err: any) {
     logger.error('Order column migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureQuotationColumns();
+    logger.log('✅ Quotation columns ready (converted_order_id)');
+  } catch (err: any) {
+    logger.error('Quotation column migration failed (non-fatal):', err?.message);
   }
 
   try {

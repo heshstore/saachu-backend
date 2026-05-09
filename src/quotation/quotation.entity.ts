@@ -118,6 +118,10 @@ export class Quotation {
   total_amount: number;
 
   // ── Audit ────────────────────────────────────────────────────────────────────
+  // Set after successful convert-to-order — links back to the created order
+  @Column({ nullable: true })
+  converted_order_id: number;
+
   @Column({ nullable: true })
   cancelled_by: number;
 

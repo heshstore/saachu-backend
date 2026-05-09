@@ -437,11 +437,38 @@ export class QuotationService {
 
   // ── Convert to order ──────────────────────────────────────────────────────────
 
-  async convertToOrder(id: number, user?: any): Promise<{ order_id: number; quotation_id: number }> {
+  async convertToOrder(id: number, user?: any): Promise<{ order_id: number; quotation_id: number; order_no: string }> {
     const quotation = await this.findOne(id);
+
+    // Already converted — return the existing order idempotently
+    if (quotation.status === QuotationStatus.CONVERTED) {
+      if (quotation.converted_order_id) {
+        return { order_id: quotation.converted_order_id, quotation_id: id, order_no: '' };
+      }
+      throw new ForbiddenException('Quotation already converted to an order');
+    }
+
     if (![QuotationStatus.APPROVED, QuotationStatus.SENT, QuotationStatus.DRAFT].includes(quotation.status)) {
       throw new ForbiddenException(`Cannot convert a ${quotation.status} quotation to an order`);
     }
+
+    // Item mapping:
+    // base_rate = i.rate (the agreed selling price from the quotation, not the floor price).
+    // This preserves the exact rate the customer was quoted.
+    // The quotation guarantees rate >= base_rate (floor), so using i.rate as the new
+    // base_rate still satisfies the order normalizer's floor-price invariant.
+    // discount_type/value are passed through so per-item discounts remain visible.
+    const orderItems = (quotation.items || []).map((i) => ({
+      item_name:      i.item_name,
+      sku:            i.sku,
+      hsn_code:       i.hsn_code,
+      qty:            i.qty,
+      base_rate:      Number(i.rate),      // use actual selling rate, not floor price
+      discount_type:  i.discount_type,
+      discount_value: i.discount_value,
+      gst_percent:    i.gst_percent,
+      instruction:    i.instruction,
+    }));
 
     const order = await this.ordersService.create({
       customer_id:          quotation.customer_id,
@@ -459,25 +486,19 @@ export class QuotationService {
       installation_charges: quotation.charges_installation,
       loading_charges:      quotation.charges_loading,
       quotation_id:         quotation.id,
-      items: (quotation.items || []).map((i) => ({
-        item_name:      i.item_name,
-        sku:            i.sku,
-        hsn_code:       i.hsn_code,
-        qty:            i.qty,
-        base_rate:      i.base_rate,
-        rate:           i.rate,
-        discount_type:  i.discount_type,
-        discount_value: i.discount_value,
-        gst_percent:    i.gst_percent,
-        amount:         i.amount,
-        gst_amount:     Number(i.amount || 0) * Number(i.gst_percent || 0) / 100,
-        instruction:    i.instruction,
-      })),
+      items:                orderItems,
     }, user);
 
-    quotation.status = QuotationStatus.CONVERTED;
+    quotation.status             = QuotationStatus.CONVERTED;
+    quotation.converted_order_id = order.id;
     await this.quotationRepo.save(quotation);
 
-    return { order_id: order.id, quotation_id: id };
+    this.eventEmitter.emit('quotation.converted', {
+      quotation_id: id, quotation_no: quotation.quotation_no,
+      order_id: order.id, order_no: (order as any).order_no,
+      user_id: user?.id ?? null, user_name: user?.name ?? null,
+    });
+
+    return { order_id: order.id, quotation_id: id, order_no: (order as any).order_no ?? '' };
   }
 }
