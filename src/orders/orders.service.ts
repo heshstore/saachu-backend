@@ -306,14 +306,25 @@ export class OrdersService {
     const saved = await this.orderRepo.save(order);
 
     // Sync legacy NOT-NULL columns that the TypeORM entity doesn't map.
-    // mobile      → customer_phone (the app's canonical phone field)
-    // order_number → order_no      (the app's canonical order number field)
-    // The migration sets DEFAULT '' so the INSERT above succeeds; this UPDATE
-    // populates them with real data for any tooling that reads the legacy columns.
+    // The migration sets DEFAULT '' / 0 so the INSERT succeeds; these UPDATEs
+    // populate them with real data for tooling that reads the legacy columns.
     await this.orderRepo.manager
       .query(
         `UPDATE orders SET mobile = $1, order_number = $2 WHERE id = $3`,
         [saved.customer_phone || '', saved.order_no || '', saved.id],
+      )
+      .catch(() => {});
+
+    // order_item legacy columns: itemName, quantity, msp_price are NOT NULL with
+    // no DEFAULT and not in the TypeORM entity. Populate from modern equivalents.
+    await this.orderRepo.manager
+      .query(
+        `UPDATE order_item
+         SET "itemName" = COALESCE(NULLIF(item_name, ''), 'Item'),
+             quantity   = qty::integer,
+             msp_price  = COALESCE(rate, 0)
+         WHERE "orderId" = $1`,
+        [saved.id],
       )
       .catch(() => {});
 

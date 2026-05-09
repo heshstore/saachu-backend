@@ -265,6 +265,18 @@ async function ensureOrderColumns(): Promise<void> {
       `ALTER TABLE orders ALTER COLUMN order_number SET DEFAULT ''`,
       // Backfill: sync mobile from customer_phone for rows that have phone data
       `UPDATE orders SET mobile = customer_phone WHERE mobile = '' AND customer_phone IS NOT NULL AND customer_phone <> ''`,
+
+      // order_item legacy columns: NOT NULL with no DEFAULT, not in TypeORM entity.
+      // TypeORM INSERT only writes entity-mapped columns; these legacy columns get no value
+      // and PostgreSQL rejects the INSERT. Set safe defaults so inserts succeed; a raw UPDATE
+      // after save populates them with real data for any tooling that reads legacy columns.
+      `ALTER TABLE order_item ALTER COLUMN "itemName"  SET DEFAULT ''`,
+      `ALTER TABLE order_item ALTER COLUMN quantity    SET DEFAULT 0`,
+      `ALTER TABLE order_item ALTER COLUMN msp_price   SET DEFAULT 0`,
+      // Backfill existing rows: populate legacy columns from modern equivalents
+      `UPDATE order_item SET "itemName" = COALESCE(NULLIF(item_name, ''), 'Item') WHERE "itemName" = ''`,
+      `UPDATE order_item SET quantity   = qty::integer WHERE quantity = 0 AND qty IS NOT NULL`,
+      `UPDATE order_item SET msp_price  = COALESCE(rate, 0)              WHERE msp_price = 0`,
     ];
     for (const sql of cols) {
       await client.query(sql).catch(() => {});

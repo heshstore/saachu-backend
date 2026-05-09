@@ -7,11 +7,10 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThanOrEqual, In } from 'typeorm';
+import { Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Quotation, QuotationStatus, QuotationDiscountType } from './quotation.entity';
 import { QuotationItem } from './quotation-item.entity';
-import { appConfig } from '../config/config';
 import { OrdersService } from '../orders/orders.service';
 import { ItemsService } from '../items/items.service';
 
@@ -219,42 +218,34 @@ export class QuotationService {
       );
     }
 
-    // Lead-based idempotency — one active quotation per lead
-    if (data.lead_id) {
-      const existing = await this.quotationRepo.findOne({
-        where: { lead_id: data.lead_id, status: In([QuotationStatus.DRAFT, QuotationStatus.SENT]) },
-        relations: ['items'],
-        order: { id: 'DESC' },
-      });
-      if (existing) return existing;
-    }
-
-    // Customer idempotency within configured window
-    const windowStart = new Date(Date.now() - appConfig.idempotencyWindowSeconds * 1000);
-    const recent = await this.quotationRepo.findOne({
-      where: [
-        { customer_id: data.customer_id, created_at: MoreThanOrEqual(windowStart), status: QuotationStatus.DRAFT },
-        { customer_id: data.customer_id, created_at: MoreThanOrEqual(windowStart), status: QuotationStatus.SENT },
-      ],
-    });
-    if (recent) return recent;
-
     // Totals are always derived — strip any user-supplied values immediately.
     delete data.sub_total;
     delete data.total_amount;
 
-    const quotation_no  = await this.generateQuotationNo();
+    // Determine target status.
+    // DRAFT = save without items; SENT = confirm (requires ≥1 item).
+    const targetStatus: QuotationStatus =
+      data.status === QuotationStatus.DRAFT ? QuotationStatus.DRAFT : QuotationStatus.SENT;
+
     const validityDays  = data.validity_days || 15;
     const valid_till    = new Date();
     valid_till.setDate(valid_till.getDate() + validityDays);
 
     // Fetch isWholesaler from the customer record — payload value is a fallback only.
     const isWholesaler = await this.resolveIsWholesaler(data.customer_id, !!data.is_wholesaler);
-    const items = await this.mapItems(data.items, isWholesaler);
+    const items = await this.mapItems(data.items || [], isWholesaler);
+
+    // Only enforce item presence for confirmed (non-draft) submissions.
+    if (targetStatus !== QuotationStatus.DRAFT && items.length === 0) {
+      throw new BadRequestException('Please add at least one item before submitting the quotation');
+    }
+
     const { sub_total, total_amount } = this.calcTotals(items, data);
 
     // Snapshot customer at creation — immutable historical record.
     const snap = await this.snapshotCustomer(data.customer_id);
+
+    const quotation_no  = await this.generateQuotationNo();
 
     const quotation = this.quotationRepo.create({
       quotation_no,
@@ -268,7 +259,7 @@ export class QuotationService {
       bill_to_id:            data.bill_to_id,
       ship_to_id:            data.ship_to_id,
       salesman_id:           data.salesman_id || user?.id,
-      status:                QuotationStatus.SENT,
+      status:                targetStatus,
       validity_days:         validityDays,
       valid_till,
       delivery_by:           data.delivery_by,
@@ -348,13 +339,20 @@ export class QuotationService {
 
     let effectiveItems = quotation.items;
 
-    if (data.items) {
+    if (data.items !== undefined) {
       await this.quotationItemRepo.delete({ quotation: { id } as any });
       const isWholesaler = await this.resolveIsWholesaler(
         data.customer_id ?? quotation.customer_id,
         data.is_wholesaler ?? quotation.is_wholesaler,
       );
-      effectiveItems = await this.mapItems(data.items, isWholesaler);
+      effectiveItems = await this.mapItems(data.items || [], isWholesaler);
+
+      // Determine target status — respect explicit status in update payload.
+      const targetStatus = data.status ?? quotation.status;
+      if (targetStatus !== QuotationStatus.DRAFT && effectiveItems.length === 0) {
+        throw new BadRequestException('Please add at least one item before submitting the quotation');
+      }
+
       data.items = effectiveItems;
     }
 
