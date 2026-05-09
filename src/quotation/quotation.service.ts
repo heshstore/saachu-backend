@@ -452,18 +452,49 @@ export class QuotationService {
       throw new ForbiddenException(`Cannot convert a ${quotation.status} quotation to an order`);
     }
 
+    // ── Resolve customer phone (priority chain) ────────────────────────────────
+    // 1. Quotation snapshot field (set at quotation creation time)
+    // 2. Live customer record mobile1 / mobile2
+    // 3. Lead phone if quotation originated from a lead
+    let resolvedPhone: string | null = quotation.customer_phone || null;
+
+    if (!resolvedPhone && quotation.customer_id) {
+      const [cust] = await this.quotationRepo.manager.query<
+        Array<{ mobile1: string | null; mobile2: string | null }>
+      >(
+        `SELECT mobile1, mobile2 FROM customer WHERE id = $1 LIMIT 1`,
+        [quotation.customer_id],
+      );
+      resolvedPhone = cust?.mobile1 || cust?.mobile2 || null;
+    }
+
+    if (!resolvedPhone && quotation.lead_id) {
+      const [lead] = await this.quotationRepo.manager.query<
+        Array<{ phone: string | null }>
+      >(
+        `SELECT phone FROM leads WHERE id = $1 LIMIT 1`,
+        [quotation.lead_id],
+      );
+      resolvedPhone = lead?.phone || null;
+    }
+
+    if (!resolvedPhone) {
+      throw new BadRequestException(
+        'Customer mobile number is required to create an order. ' +
+        'Please update the customer record with a phone number before converting.',
+      );
+    }
+
     // Item mapping:
     // base_rate = i.rate (the agreed selling price from the quotation, not the floor price).
-    // This preserves the exact rate the customer was quoted.
     // The quotation guarantees rate >= base_rate (floor), so using i.rate as the new
     // base_rate still satisfies the order normalizer's floor-price invariant.
-    // discount_type/value are passed through so per-item discounts remain visible.
     const orderItems = (quotation.items || []).map((i) => ({
       item_name:      i.item_name,
       sku:            i.sku,
       hsn_code:       i.hsn_code,
       qty:            i.qty,
-      base_rate:      Number(i.rate),      // use actual selling rate, not floor price
+      base_rate:      Number(i.rate),
       discount_type:  i.discount_type,
       discount_value: i.discount_value,
       gst_percent:    i.gst_percent,
@@ -473,7 +504,7 @@ export class QuotationService {
     const order = await this.ordersService.create({
       customer_id:          quotation.customer_id,
       customer_name:        quotation.customer_name,
-      customer_phone:       quotation.customer_phone,
+      customer_phone:       resolvedPhone,
       billing_address:      quotation.billing_address,
       shipping_address:     quotation.shipping_address,
       gst_number:           quotation.gst_number,

@@ -254,8 +254,17 @@ async function ensureOrderColumns(): Promise<void> {
   try {
     client = await createMigrationClient();
     const cols = [
+      // New columns
       `ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at    TIMESTAMPTZ NOT NULL DEFAULT now()`,
       `ALTER TABLE orders ADD COLUMN IF NOT EXISTS quotation_id  INTEGER`,
+      // Legacy columns: mobile and order_number are NOT NULL in the original schema but are
+      // not mapped by the TypeORM entity (app uses customer_phone / order_no instead).
+      // TypeORM INSERTs don't include them, causing constraint violations.
+      // Give them safe defaults so INSERTs succeed; the real phone goes into customer_phone.
+      `ALTER TABLE orders ALTER COLUMN mobile       SET DEFAULT ''`,
+      `ALTER TABLE orders ALTER COLUMN order_number SET DEFAULT ''`,
+      // Backfill: sync mobile from customer_phone for rows that have phone data
+      `UPDATE orders SET mobile = customer_phone WHERE mobile = '' AND customer_phone IS NOT NULL AND customer_phone <> ''`,
     ];
     for (const sql of cols) {
       await client.query(sql).catch(() => {});
