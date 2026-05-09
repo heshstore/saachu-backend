@@ -129,6 +129,56 @@ export class NotificationEngineService {
     }
   }
 
+  // ── CRM: lead assigned ───────────────────────────────────────────────────────
+
+  @OnEvent('crm.lead.assigned')
+  async onLeadAssigned(payload: {
+    id: number; name: string;
+    assigned_to: number; assigned_to_name?: string;
+    assigned_by_id?: number; assigned_by_name?: string;
+  }): Promise<void> {
+    if (!payload.assigned_to) return;
+    try {
+      await this.notifService.createNotification({
+        user_id:         payload.assigned_to,
+        type:            NotificationType.ACTION,
+        priority:        NotificationPriority.HIGH,
+        category:        NotificationCategory.CRM,
+        title:           `Lead assigned: ${payload.name}`,
+        message:         payload.assigned_by_name
+          ? `Assigned to you by ${payload.assigned_by_name}. Follow up promptly.`
+          : `A new lead has been assigned to you. Follow up promptly.`,
+        entity_type:     'lead',
+        entity_id:       payload.id,
+        action_url:      `/crm/leads/${payload.id}`,
+        cooldownMinutes: 10,
+        is_automated:    true,
+      });
+    } catch (err: any) {
+      this.logger.warn(`onLeadAssigned notification failed: ${err?.message}`);
+    }
+  }
+
+  // ── System: Shopify sync failure ─────────────────────────────────────────────
+
+  @OnEvent('shopify.sync_failed')
+  async onShopifySyncFailed(payload: { error: string }): Promise<void> {
+    try {
+      await this.notifService.createRoleNotification(['Admin'], {
+        type:            NotificationType.ACTION,
+        priority:        NotificationPriority.HIGH,
+        category:        NotificationCategory.SYSTEM,
+        title:           'Shopify sync failed',
+        message:         `Catalog sync encountered an error: ${payload.error?.slice(0, 120) ?? 'Unknown error'}. Check the Shopify integration.`,
+        action_url:      '/admin/shopify',
+        cooldownMinutes: 60,
+        is_automated:    true,
+      });
+    } catch (err: any) {
+      this.logger.warn(`onShopifySyncFailed notification failed: ${err?.message}`);
+    }
+  }
+
   // ── Orders ───────────────────────────────────────────────────────────────────
 
   @OnEvent('order.created')
