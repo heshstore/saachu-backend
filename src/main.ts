@@ -295,11 +295,15 @@ async function ensureQuotationColumns(): Promise<void> {
       `ALTER TABLE quotation ADD COLUMN IF NOT EXISTS converted_order_id INTEGER`,
     ).catch(() => {});
 
-    // Rename SENT → GENERATED in existing rows.
-    // 'SENT' was the old status value; 'GENERATED' is the new canonical name.
-    // Safe to run multiple times (WHERE clause is idempotent).
+    // Rename legacy status values — idempotent, safe to run on every boot.
+    // SENT → GENERATED (old name before rename)
+    // APPROVED → GENERATED (approval step removed; generated is the terminal pre-order state)
+    // REJECTED → CANCELLED (rejection maps to cancellation)
     await client.query(
-      `UPDATE quotation SET status = 'GENERATED' WHERE status = 'SENT'`,
+      `UPDATE quotation SET status = 'GENERATED' WHERE status IN ('SENT', 'APPROVED')`,
+    ).catch(() => {});
+    await client.query(
+      `UPDATE quotation SET status = 'CANCELLED' WHERE status = 'REJECTED'`,
     ).catch(() => {});
   } finally {
     await client?.end().catch(() => {});

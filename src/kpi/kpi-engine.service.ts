@@ -178,9 +178,9 @@ export class KpiEngineService {
         this.q(`
           SELECT
             COUNT(*)::int                                                                          AS total,
-            COUNT(*) FILTER (WHERE status IN ('GENERATED','SENT','APPROVED','CONVERTED'))::int                AS sent,
-            COUNT(*) FILTER (WHERE status IN ('APPROVED','CONVERTED'))::float /
-              NULLIF(COUNT(*) FILTER (WHERE status IN ('GENERATED','SENT','APPROVED','CONVERTED')), 0) * 100  AS conversion_rate
+            COUNT(*) FILTER (WHERE status IN ('GENERATED','CONVERTED'))::int              AS sent,
+            COUNT(*) FILTER (WHERE status = 'CONVERTED')::float /
+              NULLIF(COUNT(*) FILTER (WHERE status IN ('GENERATED','CONVERTED')), 0) * 100  AS conversion_rate
           FROM quotations
           WHERE created_at BETWEEN $1 AND $2
           ${userId ? `AND created_by = ${userId}` : ''}
@@ -213,7 +213,7 @@ export class KpiEngineService {
             COUNT(DISTINCT l.id)::int                                   AS leads,
             COUNT(DISTINCT lf.id) FILTER (WHERE lf.is_completed)::int  AS followups,
             COUNT(DISTINCT q.id)::int                                   AS quotations,
-            COUNT(DISTINCT q.id) FILTER (WHERE q.status IN ('APPROVED','CONVERTED'))::int AS conversions
+            COUNT(DISTINCT q.id) FILTER (WHERE q.status = 'CONVERTED')::int AS conversions
           FROM users u
           LEFT JOIN leads l       ON l.assigned_to = u.id AND l.created_at BETWEEN $1 AND $2 AND l.is_active = true
           LEFT JOIN lead_followups lf ON lf.created_by = u.id AND lf.due_date BETWEEN $1 AND $2
@@ -477,8 +477,8 @@ export class KpiEngineService {
       quotation_conversion: `
         SELECT u.id AS user_id, u.name AS user_name,
                COALESCE(
-                 COUNT(*) FILTER (WHERE q.status IN ('APPROVED','CONVERTED'))::float /
-                 NULLIF(COUNT(*) FILTER (WHERE q.status IN ('GENERATED','SENT','APPROVED','CONVERTED')), 0) * 100,
+                 COUNT(*) FILTER (WHERE q.status = 'CONVERTED')::float /
+                 NULLIF(COUNT(*) FILTER (WHERE q.status IN ('GENERATED','CONVERTED')), 0) * 100,
                  0
                )::numeric AS value
         FROM users u

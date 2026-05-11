@@ -288,40 +288,6 @@ export class ActivityService {
     });
   }
 
-  @OnEvent('quotation.approved')
-  onQuotationApproved(e: { id: number; quotation_no: string; user_id: number | null; user_name: string | null }): void {
-    void this.logActivity({
-      module:               'ACCOUNTS',
-      entity_type:          'quotation',
-      entity_id:            e.id,
-      action:               'QUOTATION_APPROVED',
-      title:                `Quotation ${e.quotation_no} approved`,
-      source:               'USER',
-      performed_by_user_id: e.user_id ?? null,
-      performed_by_name:    e.user_name ?? null,
-      old_value:            { status: 'GENERATED' },
-      new_value:            { status: 'APPROVED' },
-      severity:             'INFO',
-    });
-  }
-
-  @OnEvent('quotation.rejected')
-  onQuotationRejected(e: { id: number; quotation_no: string; user_id: number | null; user_name: string | null }): void {
-    void this.logActivity({
-      module:               'ACCOUNTS',
-      entity_type:          'quotation',
-      entity_id:            e.id,
-      action:               'QUOTATION_REJECTED',
-      title:                `Quotation ${e.quotation_no} rejected`,
-      source:               'USER',
-      performed_by_user_id: e.user_id ?? null,
-      performed_by_name:    e.user_name ?? null,
-      old_value:            { status: 'GENERATED' },
-      new_value:            { status: 'REJECTED' },
-      severity:             'WARNING',
-    });
-  }
-
   @OnEvent('quotation.generated')
   onQuotationGenerated(e: { id: number; quotation_no: string }): void {
     void this.logActivity({

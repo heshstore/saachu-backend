@@ -12,9 +12,7 @@ import { QuotationItem } from './quotation-item.entity';
 
 export enum QuotationStatus {
   DRAFT     = 'DRAFT',
-  GENERATED = 'GENERATED', // finalized, shareable — replaces legacy 'SENT'
-  APPROVED  = 'APPROVED',
-  REJECTED  = 'REJECTED',
+  GENERATED = 'GENERATED', // finalized, shareable
   CANCELLED = 'CANCELLED',
   CONVERTED = 'CONVERTED', // quotation → order
 }

@@ -389,28 +389,6 @@ export class QuotationService {
     return saved;
   }
 
-  async approve(id: number): Promise<Quotation> {
-    const quotation = await this.findOne(id);
-    if (quotation.status !== QuotationStatus.GENERATED) {
-      throw new ForbiddenException('Only GENERATED quotations can be approved');
-    }
-    quotation.status = QuotationStatus.APPROVED;
-    const saved = await this.quotationRepo.save(quotation);
-    this.eventEmitter.emit('quotation.approved', { id, quotation_no: saved.quotation_no, user_id: null, user_name: null });
-    return saved;
-  }
-
-  async reject(id: number, user?: any): Promise<Quotation> {
-    const quotation = await this.findOne(id);
-    if (![QuotationStatus.GENERATED, QuotationStatus.DRAFT].includes(quotation.status)) {
-      throw new ForbiddenException('Only DRAFT or GENERATED quotations can be rejected');
-    }
-    quotation.status = QuotationStatus.REJECTED;
-    const saved = await this.quotationRepo.save(quotation);
-    this.eventEmitter.emit('quotation.rejected', { id, quotation_no: saved.quotation_no, user_id: user?.id ?? null, user_name: user?.name ?? null });
-    return saved;
-  }
-
   async cancel(id: number, user?: any): Promise<Quotation> {
     const quotation = await this.findOne(id);
     if ([QuotationStatus.CONVERTED, QuotationStatus.CANCELLED].includes(quotation.status)) {
@@ -446,7 +424,7 @@ export class QuotationService {
       throw new ForbiddenException('Quotation already converted to an order');
     }
 
-    if (![QuotationStatus.APPROVED, QuotationStatus.GENERATED, QuotationStatus.DRAFT].includes(quotation.status)) {
+    if (![QuotationStatus.GENERATED, QuotationStatus.DRAFT].includes(quotation.status)) {
       throw new ForbiddenException(`Cannot convert a ${quotation.status} quotation to an order`);
     }
 

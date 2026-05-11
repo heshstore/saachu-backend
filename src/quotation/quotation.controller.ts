@@ -10,6 +10,8 @@ import {
   Query,
   Request,
   Res,
+  Logger,
+  BadRequestException,
 } from '@nestjs/common';
 import { Response } from 'express';
 import { QuotationService } from './quotation.service';
@@ -22,6 +24,8 @@ import { appConfig } from '../config/config';
 
 @Controller('quotations')
 export class QuotationController {
+  private readonly logger = new Logger(QuotationController.name);
+
   constructor(
     private readonly quotationService: QuotationService,
     private readonly pdfService: PdfService,
@@ -58,18 +62,6 @@ export class QuotationController {
     return this.quotationService.send(Number(id));
   }
 
-  @Patch(':id/approve')
-  @RequirePermission('quotation.edit')
-  approve(@Param('id') id: string) {
-    return this.quotationService.approve(Number(id));
-  }
-
-  @Patch(':id/reject')
-  @RequirePermission('quotation.edit')
-  reject(@Param('id') id: string, @Request() req: any) {
-    return this.quotationService.reject(Number(id), req.user);
-  }
-
   @Patch(':id/cancel')
   @RequirePermission('quotation.cancel')
   cancel(@Param('id') id: string, @Request() req: any) {
@@ -91,13 +83,28 @@ export class QuotationController {
   @Get(':id/pdf')
   @RequirePermission('quotation.view')
   async getPdf(@Param('id') id: string, @Res() res: Response) {
-    const data = await this.quotationService.findOne(Number(id));
+    const numId = Number(id);
+    const data  = await this.quotationService.findOne(numId);
+
+    if (!data) {
+      res.status(404).json({ message: 'Quotation not found' });
+      return;
+    }
+
+    const items = (data as any).items;
+    if (!Array.isArray(items) || items.length === 0) {
+      this.logger.warn(`[PDF] Quotation ${numId} has no items`);
+      throw new BadRequestException('Quotation has no items — add items before generating a PDF');
+    }
+
+    this.logger.log(`[PDF] Generating PDF for quotation ${numId} (${(data as any).quotation_no})`);
+
     const buffer = await this.pdfService.generateBuffer(
       this.pdfService.quotationTemplate(data),
     );
     const filename = ((data as any).quotation_no || `QUO-${id}`).replace(/\//g, '-') + '.pdf';
     res.set({
-      'Content-Type': 'application/pdf',
+      'Content-Type':        'application/pdf',
       'Content-Disposition': `attachment; filename="${filename}"`,
     });
     res.send(buffer);
@@ -107,14 +114,22 @@ export class QuotationController {
   @Public()
   async getPublicPdf(@Param('quotation_no') quotation_no: string, @Res() res: Response) {
     const data = await this.quotationService.findByNo(quotation_no);
+
+    if (!data) {
+      res.status(404).json({ message: 'Quotation not found' });
+      return;
+    }
+
+    this.logger.log(`[PDF] Generating public PDF for ${quotation_no}`);
+
     const buffer = await this.pdfService.generateBuffer(
       this.pdfService.quotationTemplate(data),
     );
     const filename = quotation_no.replace(/\//g, '-') + '.pdf';
     res.set({
-      'Content-Type': 'application/pdf',
+      'Content-Type':        'application/pdf',
       'Content-Disposition': `inline; filename="${filename}"`,
-      'Cache-Control': 'public, max-age=300',
+      'Cache-Control':       'public, max-age=300',
     });
     res.send(buffer);
   }

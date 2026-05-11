@@ -9,6 +9,18 @@ export const IDEMPOTENCY = {
 export interface AppConfig {
   companyName: string;
   companyState: string;
+  companyAddress: string;
+  companyPhone: string;
+  companyEmail: string;
+  companyWebsite: string;
+  companyGstin: string;
+  paymentTerms: string;
+  bankAccountName: string;
+  bankName: string;
+  bankBranch: string;
+  bankAccount: string;
+  bankIfsc: string;
+  bankUpiId: string;
   smtpHost: string;
   smtpPort: number;
   smtpUser: string;
@@ -31,8 +43,20 @@ export interface AppConfig {
 }
 
 export const appConfig: AppConfig = {
-  companyName: process.env.COMPANY_NAME || 'Saachu',
-  companyState: process.env.COMPANY_STATE || 'Maharashtra',
+  companyName:    process.env.COMPANY_NAME    || 'Saachu',
+  companyState:   process.env.COMPANY_STATE   || 'Tamil Nadu',
+  companyAddress: process.env.COMPANY_ADDRESS || '',
+  companyPhone:   process.env.COMPANY_PHONE   || '',
+  companyEmail:   process.env.COMPANY_EMAIL   || '',
+  companyWebsite: process.env.COMPANY_WEBSITE || '',
+  companyGstin:   process.env.COMPANY_GSTIN   || '',
+  paymentTerms:   process.env.PAYMENT_TERMS   || '70% Advance & 30% Before Delivery',
+  bankAccountName: process.env.BANK_ACCOUNT_NAME || '',
+  bankName:        process.env.BANK_NAME         || '',
+  bankBranch:      process.env.BANK_BRANCH       || '',
+  bankAccount:     process.env.BANK_ACCOUNT      || '',
+  bankIfsc:        process.env.BANK_IFSC         || '',
+  bankUpiId:       process.env.BANK_UPI          || '',
   smtpHost: process.env.SMTP_HOST || '',
   smtpPort: Number(process.env.SMTP_PORT) || 587,
   smtpUser: process.env.SMTP_USER || '',
