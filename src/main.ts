@@ -32,15 +32,15 @@ function isPortFree(port: number): Promise<boolean> {
   });
 }
 
-/** Scans from `preferred` upward until a free port is found (max 5 attempts). */
+/** Scans from `preferred` upward until a free port is found (max 16 attempts). */
 async function findFreePort(preferred: number): Promise<number> {
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 16; i++) {
     const candidate = preferred + i;
     if (await isPortFree(candidate)) return candidate;
     logger.warn(`Port ${candidate} is occupied — trying ${candidate + 1}…`);
   }
   throw new Error(
-    `No free port found in range ${preferred}–${preferred + 4}. ` +
+    `No free port found in range ${preferred}–${preferred + 15}. ` +
     `Run: lsof -ti :${preferred} | xargs kill -9`,
   );
 }
