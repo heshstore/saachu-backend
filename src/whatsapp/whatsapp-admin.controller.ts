@@ -32,4 +32,22 @@ export class WhatsAppAdminController {
     await this.waService.safeRestart();
     return { success: true };
   }
+
+  /** Full session wipe + fresh QR — use when pairing handshake keeps stalling. */
+  @Post('reset')
+  @HttpCode(200)
+  @RequirePermission('whatsapp.manage')
+  async reset() {
+    await this.waService.resetWhatsAppSession();
+    return { success: true };
+  }
+
+  /** Manual reconnect after QR retry limit — resets pause state without wiping auth. */
+  @Post('reconnect')
+  @HttpCode(200)
+  @RequirePermission('whatsapp.manage')
+  async reconnect() {
+    await this.waService.manualReconnect();
+    return { success: true };
+  }
 }

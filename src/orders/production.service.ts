@@ -149,7 +149,7 @@ export class ProductionService {
            CASE
              WHEN COUNT(*) FILTER (WHERE status NOT IN ('DONE', 'CANCELLED')) = 0
                   AND COUNT(*) FILTER (WHERE status = 'DONE') > 0
-             THEN 'READY_FOR_DISPATCH'
+             THEN 'READY'
              ELSE 'IN_PRODUCTION'
            END AS target
          FROM production_jobs
@@ -159,7 +159,7 @@ export class ProductionService {
           SET status = computed.target
          FROM computed
         WHERE orders.id = $1
-          AND orders.status IN ('APPROVED', 'IN_PRODUCTION', 'READY_FOR_DISPATCH')
+          AND orders.status IN ('APPROVED', 'IN_PRODUCTION', 'READY', 'READY_FOR_DISPATCH')
           AND orders.status IS DISTINCT FROM computed.target
         RETURNING orders.status AS new_status`,
       [orderId],
@@ -169,7 +169,7 @@ export class ProductionService {
 
     const newStatus = rows[0].new_status;
 
-    if (newStatus === OrderStatus.READY_FOR_DISPATCH) {
+    if (newStatus === OrderStatus.READY) {
       const salesmanRows: any[] = await manager.query(
         `SELECT salesman_id FROM orders WHERE id = $1`,
         [orderId],
@@ -186,7 +186,7 @@ export class ProductionService {
   ): void {
     if (!result) return;
     const { newStatus, salesmanId } = result;
-    if (newStatus === OrderStatus.READY_FOR_DISPATCH) {
+    if (newStatus === OrderStatus.READY) {
       this.eventEmitter.emit('order.ready_for_dispatch', { orderId, salesmanId });
       if (salesmanId) {
         this.crmWa.sendOrderReady(orderId, salesmanId).catch(() => {});
@@ -388,7 +388,7 @@ export class ProductionService {
     const role = STAGE_ROLE_MAP[stage];
     if (!role) return 0;
     const rows: { count: string }[] = await this.userRepo.manager.query(
-      `SELECT COUNT(*)::int AS count FROM users WHERE LOWER(role) = LOWER($1) AND is_active = true`,
+      `SELECT COUNT(*)::int AS count FROM "user" WHERE LOWER(role) = LOWER($1) AND is_active = true`,
       [role],
     );
     return Number(rows[0]?.count ?? 0);
@@ -425,7 +425,7 @@ export class ProductionService {
     if (!role) return [];
     // Case-insensitive match so that 'Designer', 'DESIGNER', 'designer' all resolve correctly.
     return this.userRepo.manager.query(
-      `SELECT id FROM users WHERE LOWER(role) = LOWER($1) AND is_active = true`,
+      `SELECT id FROM "user" WHERE LOWER(role) = LOWER($1) AND is_active = true`,
       [role],
     );
   }
@@ -499,12 +499,12 @@ export class ProductionService {
     const role = STAGE_ROLE_MAP[stage];
     if (!role) return null;
 
-    // Single query: join users → active jobs for this stage → efficiency record.
+    // Single query: join user → active jobs for this stage → efficiency record.
     // Sorts by effective load (load / efficiency for URGENT, raw load otherwise)
     // so the least-loaded worker is always first. Replaces the previous N+1 loop.
     const rows: { id: number }[] = await this.repo.manager.query(
       `SELECT u.id
-       FROM users u
+       FROM "user" u
        LEFT JOIN production_jobs j
          ON j.assigned_to = u.id
         AND j.status IN ('PENDING', 'IN_PROGRESS')
@@ -659,7 +659,7 @@ export class ProductionService {
     assigned_to?: number;
     unassigned?: boolean;
     limit?: number;
-  }): Promise<(ProductionJob & { is_delayed: boolean })[]> {
+  }): Promise<(ProductionJob & { is_delayed: boolean; order_no: string | null })[]> {
     const qb = this.repo.createQueryBuilder('job');
 
     if (filters.stage)       qb.andWhere('job.current_stage = :stage',    { stage: filters.stage });
@@ -677,7 +677,23 @@ export class ProductionService {
       .addOrderBy('job.created_at', 'ASC');
 
     const jobs = await qb.getMany();
-    return jobs.map(job => ({ ...job, is_delayed: this.isDelayed(job) }));
+
+    // Enrich with order_no — production team works on ORD0001, not numeric IDs.
+    const orderIds = [...new Set(jobs.filter(j => j.order_id).map(j => j.order_id))];
+    const orderNoMap = new Map<number, string>();
+    if (orderIds.length > 0) {
+      const rows: { id: number; order_no: string }[] = await this.repo.manager.query(
+        `SELECT id, order_no FROM orders WHERE id = ANY($1)`,
+        [orderIds],
+      );
+      rows.forEach(r => orderNoMap.set(Number(r.id), r.order_no));
+    }
+
+    return jobs.map(job => ({
+      ...job,
+      is_delayed: this.isDelayed(job),
+      order_no:   job.order_id ? (orderNoMap.get(job.order_id) ?? null) : null,
+    }));
   }
 
   async startJob(jobId: number): Promise<ProductionJob> {

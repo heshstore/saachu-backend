@@ -15,11 +15,23 @@ import { appConfig } from '../config/config';
 import { LeadSource } from '../crm/entities/lead.entity';
 import { normalizePhone } from '../crm/normalizers/lead-normalizer';
 
-// Fallback: a known-good recent WA Web version.
-// Updated whenever the dynamic fetch below succeeds — change this string only if the
-// GitHub API is consistently unreachable AND the current fallback starts causing failures.
+// Fallback: a known-good stable (non-alpha) WA Web version used when the dynamic
+// fetch is unreachable. Alpha builds can fail pairing mid-handshake.
 const WA_VERSION_FALLBACK =
-  'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.3000.1021303286-alpha.html';
+  'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html';
+
+// All Chromium profile lock files that block a second browser instance from starting.
+// These are transient runtime artefacts — safe to delete before every init attempt.
+//   SingletonLock     — primary filesystem mutex Chrome uses to enforce single instance
+//   SingletonSocket   — Unix domain socket companion written alongside SingletonLock
+//   SingletonCookie   — secondary lock companion (created on some platforms / Chrome builds)
+//   DevToolsActivePort — DevTools port file; stale copy blocks Puppeteer's CDP attachment
+const CHROMIUM_LOCK_FILES = [
+  'SingletonLock',
+  'SingletonSocket',
+  'SingletonCookie',
+  'DevToolsActivePort',
+] as const;
 
 function isValidWhatsAppPhone(raw: string): boolean {
   if (!/^\d{8,15}$/.test(raw)) return false;
@@ -50,6 +62,9 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   private qrGenerated = false;
   // Timestamp of the most recent unplanned disconnect — used to log recovery duration.
   private _disconnectedAt: Date | null = null;
+  // Tracks a pending reinit timer so we can cancel it before scheduling a new one,
+  // preventing multiple concurrent timers from stacking up after rapid disconnect/reconnect.
+  private _retryTimer: NodeJS.Timeout | null = null;
   // Prevents concurrent post-reconnect recovery scans if ready fires multiple times rapidly.
   private _recovering = false;
   // Admin monitoring state — read-only from outside; mutated only by event handlers below.
@@ -58,6 +73,10 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   private _qrDataUrl: string | null = null;
   private _qrGeneratedAt: Date | null = null;
   private _adminEventSubject = new ReplaySubject<string>(1);
+  // QR retry limit — after this many QR codes without a scan, enter PAUSED state
+  // and stop the infinite regeneration loop. Manual reconnect required after this.
+  private readonly MAX_QR_RETRIES = 5;
+  private _qrPaused = false;
 
   constructor(
     @InjectRepository(WhatsAppSession)
@@ -135,19 +154,24 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
           }
 
           if (attempt < MAX_ATTEMPTS) {
-            this.logger.log(`[WhatsApp] Retrying in 5 s... (next: attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+            this.logger.log(`[WhatsApp] Retrying in 15 s... (next: attempt ${attempt + 1}/${MAX_ATTEMPTS}) — waiting for Chrome to fully exit`);
             this.qrSubject.next(JSON.stringify({
               type: 'retrying',
               attempt: attempt + 1,
               maxAttempts: MAX_ATTEMPTS,
               message: `Init failed — retrying (${attempt + 1}/${MAX_ATTEMPTS})`,
             }));
-            await new Promise<void>((r) => setTimeout(r, 5_000));
+            await new Promise<void>((r) => setTimeout(r, 15_000));
           } else {
-            // Final attempt failed — nuke the entire session folder so the next
-            // initClient() starts completely fresh (forces QR re-login but guarantees recovery).
-            this.logger.warn('[WhatsApp] All attempts exhausted — wiping session folder for clean recovery');
-            this.clearAuthFiles();
+            // Final attempt failed — remove only lock files so the next initClient()
+            // can reuse the saved auth session (avoids forced QR re-login on transient failures).
+            this.logger.warn('[WhatsApp] All attempts exhausted — removing lock files only (preserving auth session)');
+            const sessionDir = path.join(process.cwd(), `.wwebjs_auth/session-${this.sessionName}`);
+            const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
+            for (const f of lockFiles) {
+              const p = path.join(sessionDir, f);
+              try { fs.unlinkSync(p); } catch { /* file absent — safe to ignore */ }
+            }
           }
         }
       }
@@ -218,6 +242,36 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
     this.client.on('qr', async (qr: string) => {
       this.qrCount++;
+
+      // Hard stop after MAX_QR_RETRIES without a scan — breaks the infinite loop.
+      // The library auto-regenerates QRs every ~60 s; this guard prevents runaway CPU/memory growth.
+      if (this.qrCount > this.MAX_QR_RETRIES) {
+        this.logger.warn(`[WhatsApp] QR retry limit reached — waiting for manual reconnect (shown ${this.qrCount - 1} QRs without pairing)`);
+        this._qrPaused = true;
+        this._qrDataUrl = null;
+        this._qrGeneratedAt = null;
+        this.qrSubject.next(JSON.stringify({
+          type: 'paused',
+          message: 'WhatsApp disconnected — QR retry limit reached. Click "Reconnect" to try again.',
+        }));
+        this._adminEventSubject.next(JSON.stringify({ type: 'paused', qrCount: this.qrCount, timestamp: new Date().toISOString() }));
+        await this.updateSession({ status: 'DISCONNECTED' });
+        // Defer destroy so we exit the event handler cleanly before tearing down the client
+        setImmediate(async () => {
+          this._manualDisconnect = true;
+          if (this.client) {
+            try { await this.client.destroy(); } catch { /* ignore */ }
+            this.client = null;
+          }
+          this._manualDisconnect = false;
+        });
+        return;
+      }
+
+      // A second (or later) QR means the previous one expired before the user scanned it
+      if (this.qrCount > 1) {
+        this.logger.warn(`[WhatsApp] QR expired before scan — regenerating (was #${this.qrCount - 1})`);
+      }
       this.qrGenerated = true;
       this.logger.log(`[WhatsApp] QR #${this.qrCount} generated — awaiting scan`);
 
@@ -225,28 +279,54 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       try { QRCode = (await import('qrcode')).default; } catch { return; }
       const dataUrl = await QRCode.toDataURL(qr, { width: 300 });
 
-      const payload: Record<string, any> = { type: 'qr', dataUrl, qrIndex: this.qrCount };
+      const payload: Record<string, any> = {
+        type:     'qr',
+        dataUrl,
+        qrIndex:  this.qrCount,
+        expired:  this.qrCount > 1,
+      };
 
-      // After 3 consecutive QRs without a successful scan, the session files are likely
-      // corrupt or there's a version mismatch — prompt the user to force-reconnect.
+      // After 3 consecutive QRs without a scan suggest reset — but still show the QR
       if (this.qrCount >= 3) {
         payload.warning =
-          'QR scanned multiple times without connecting. ' +
-          'Click "Force Reconnect" to clear the session and try again.';
-        this.logger.warn(`[WhatsApp] QR failure streak: ${this.qrCount} QRs shown without connection`);
+          'QR has expired multiple times without a successful scan. ' +
+          'Click "Reset Session" to start fresh, or wait for auto-pause after ' +
+          `${this.MAX_QR_RETRIES} attempts.`;
+        this.logger.warn(`[WhatsApp] QR failure streak: ${this.qrCount} codes shown without pairing`);
       }
 
       this._qrDataUrl = dataUrl;
       this._qrGeneratedAt = new Date();
-      this._adminEventSubject.next(JSON.stringify({ type: 'qr', qrIndex: this.qrCount, timestamp: new Date().toISOString() }));
+      this._adminEventSubject.next(JSON.stringify({ type: 'qr', qrIndex: this.qrCount, expired: this.qrCount > 1, timestamp: new Date().toISOString() }));
       this.qrSubject.next(JSON.stringify(payload));
       await this.updateSession({ status: 'CONNECTING', qr_code: dataUrl });
+    });
+
+    // Fires after the QR is scanned and the cryptographic handshake succeeds,
+    // but before the WA Web session is fully loaded. Logs WHERE in the pairing
+    // flow we are — if we see 'authenticated' but never 'ready', the issue is
+    // in session loading (likely a WA version mismatch or network timeout).
+    this.client.on('authenticated', () => {
+      this.logger.log('[WhatsApp] QR scanned — device pairing approved');
+      this.logger.log('[WhatsApp] Authentication successful — waiting for session to load');
+      this.qrSubject.next(JSON.stringify({ type: 'authenticated' }));
+      this._adminEventSubject.next(JSON.stringify({ type: 'authenticated', timestamp: new Date().toISOString() }));
+    });
+
+    // Fires on internal WA Web state machine transitions:
+    // UNPAIRED → OPENING → PAIRING → PAIRED → (ready event)
+    // Logging these lets us see exactly where a stalled pairing is stuck.
+    this.client.on('change_state', (state: string) => {
+      this.logger.log(`[WhatsApp] State → ${state}`);
+      this.qrSubject.next(JSON.stringify({ type: 'change_state', state }));
+      this._adminEventSubject.next(JSON.stringify({ type: 'change_state', state, timestamp: new Date().toISOString() }));
     });
 
     this.client.on('ready', async () => {
       this._ready = true;
       this.qrCount = 0;
       this.qrGenerated = false;
+      this._qrPaused = false;
       const info = this.client.info;
       const phone = info?.wid?.user ?? null;
       if (this._disconnectedAt) {
@@ -329,10 +409,10 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       const terminalReasons = ['LOGOUT', 'UNPAIRED', 'UNPAIRED_IDLE'];
       if (terminalReasons.includes(reason)) {
         this.logger.log(`[WhatsApp] Terminal disconnect (${reason}) — clearing auth files`);
-        this.clearAuthFiles();
+        await this.clearAuthFiles();
       }
 
-      setTimeout(() => this.reinitClient().catch((e) => this.logger.error('[WhatsApp] Reconnect failed', e?.message)), 10_000);
+      this.scheduleReinit(10_000);
     });
 
     this.client.on('auth_failure', async (msg: string) => {
@@ -350,7 +430,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       }));
       this.eventEmitter.emit('whatsapp.down', { reason: 'AUTH_FAILURE' });
       await this.clearSessionFiles();
-      setTimeout(() => this.reinitClient().catch((e) => this.logger.error('[WhatsApp] Reinit after auth_failure failed', e?.message)), 3_000);
+      this.scheduleReinit(10_000);
     });
 
     // ── Inbound message handler ─────────────────────────────────────────────────
@@ -376,6 +456,28 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
     this.client.on('message', onMsg);
     this.client.on('message_create', onMsg);
+
+    // ── Pre-init diagnostics ────────────────────────────────────────────────────
+    // Log session directory state and lock file presence so startup failures
+    // leave an auditable trail without requiring a second run to diagnose.
+    const _diagSessionDir = path.join(process.cwd(), `.wwebjs_auth/session-${this.sessionName}`);
+    const _diagDirExists  = fs.existsSync(_diagSessionDir);
+    this.logger.log(`[WhatsApp] Pre-init: sessionDir=${_diagSessionDir} exists=${_diagDirExists}`);
+    if (_diagDirExists) {
+      const presentLocks = CHROMIUM_LOCK_FILES.filter((f) => fs.existsSync(path.join(_diagSessionDir, f)));
+      if (presentLocks.length > 0) {
+        this.logger.warn(`[WhatsApp] Pre-init: lock files still present — ${presentLocks.join(', ')}`);
+      } else {
+        this.logger.log('[WhatsApp] Pre-init: no lock files found — session directory is clean');
+      }
+    }
+    try {
+      const chromeCount = execSync("pgrep -c -f 'Google Chrome' 2>/dev/null || echo 0", { encoding: 'utf8' }).trim();
+      this.logger.log(`[WhatsApp] Pre-init: Google Chrome helper processes running = ${chromeCount}`);
+    } catch {
+      this.logger.debug('[WhatsApp] Pre-init: could not count Chrome processes (non-critical)');
+    }
+    // ───────────────────────────────────────────────────────────────────────────
 
     this.logger.log('[WhatsApp] Calling client.initialize()...');
     await this.client.initialize();
@@ -405,9 +507,9 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         msg.includes('Target closed');
       if (isContextError) {
         this._ready = false;
-        // Use setTimeout (not setImmediate) so the guard check in reinitClient() sees
-        // any in-flight _initializing = true that was set by a concurrent reinit path
-        setTimeout(() => this.reinitClient().catch((e) => this.logger.warn('[WhatsApp] Reconnect failed:', e?.message)), 1_000);
+        // Use scheduleReinit (not setImmediate) so any pending timer is cancelled first
+        // and the guard check in reinitClient() sees any in-flight _initializing = true.
+        this.scheduleReinit(5_000);
         throw new Error('WhatsApp session expired. Reconnecting — please try again in a moment.');
       }
       throw err;
@@ -474,6 +576,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     this._ready = false;
     this.qrCount = 0;
     this.qrGenerated = false;
+    this._qrPaused = false;
 
     // Suppress the 'disconnected' event handler's auto-reinit: logout() will fire it,
     // but we're already managing the reinit below via setTimeout.
@@ -488,15 +591,31 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     this._manualDisconnect = false;
 
     // Only clear auth credentials — keep the version cache to avoid re-fetching WA Web
-    this.clearAuthFiles();
+    await this.clearAuthFiles();
     await this.updateSession({ status: 'DISCONNECTED', phone_number: null, connected_at: null });
     this.qrSubject.next(JSON.stringify({ type: 'disconnected' }));
 
     // Single reinit — not racing with the disconnected event handler
-    setTimeout(() => this.reinitClient().catch((e) => this.logger.error('[WhatsApp] Reinit failed', e?.message)), 2_000);
+    this.scheduleReinit(5_000);
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────────
+
+  /**
+   * Schedule a single reinit attempt after delayMs. Cancels any pending timer
+   * first so rapid disconnect/reconnect cycles never stack multiple reinits.
+   */
+  private scheduleReinit(delayMs: number): void {
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer);
+      this._retryTimer = null;
+      this.logger.debug('[WhatsApp] Cancelled pending retry timer — scheduling fresh one');
+    }
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null;
+      this.reinitClient().catch((e) => this.logger.error('[WhatsApp] Reinit failed', e?.message));
+    }, delayMs);
+  }
 
   /**
    * Fetches the latest WhatsApp Web version HTML URL from the wppconnect-team repo.
@@ -525,14 +644,19 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
                 .filter((f: any) => typeof f.name === 'string' && f.name.endsWith('.html'))
                 .map((f: any) => f.name as string)
                 .sort();
-              const latest = names[names.length - 1];
+              // Prefer stable (non-alpha) versions — alpha builds can fail the
+              // post-QR authentication handshake unpredictably.
+              const stableNames = names.filter((n) => !n.includes('alpha'));
+              const candidates  = stableNames.length > 0 ? stableNames : names;
+              const latest      = candidates[candidates.length - 1];
               if (latest) {
                 const url = `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${latest}`;
-                this.logger.log(`Auto-detected latest WA Web version: ${latest}`);
+                const tag = stableNames.length > 0 ? 'stable' : 'alpha (no stable found)';
+                this.logger.log(`[WhatsApp] WA Web version selected: ${latest} (${tag})`);
                 return resolve(url);
               }
             } catch { /* fall through */ }
-            this.logger.warn('Could not parse version list — using fallback');
+            this.logger.warn('[WhatsApp] Could not parse version list — using stable fallback');
             resolve(WA_VERSION_FALLBACK);
           });
         },
@@ -550,51 +674,109 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Kills any lingering Chrome/Chromium process and removes all Chromium session
-   * lock files. Safe to call on every init attempt — none of these are auth data.
+   * Kills any lingering Chrome/Chromium process and surgically removes all
+   * Chromium profile lock files. Safe on every init attempt — these files are
+   * transient runtime artefacts, never user auth data.
    *
-   * Files removed:
-   *   SingletonLock       — Chrome's filesystem mutex; blocks a second instance
-   *   SingletonCookie     — companion lock created alongside SingletonLock
-   *   DevToolsActivePort  — written while DevTools is open; stale copy blocks init
+   * Lock files removed (all live at the Chrome user-data-dir root):
+   *   SingletonLock       — filesystem mutex; Chrome refuses to start if present
+   *   SingletonSocket     — Unix domain socket companion to SingletonLock
+   *   SingletonCookie     — written alongside SingletonLock on some platforms
+   *   DevToolsActivePort  — stale DevTools port file left after unclean shutdown
+   *
+   * Order matters: processes must be dead BEFORE we touch the files, otherwise
+   * the running process will immediately recreate them.
    */
   private async cleanSessionLocks(): Promise<void> {
     const sessionDir = path.join(process.cwd(), `.wwebjs_auth/session-${this.sessionName}`);
 
-    // Destroy the existing client gracefully first — this is the safest way to
-    // release Puppeteer's browser handle without touching the user's own Chrome.
+    // 1. Gracefully destroy the NestJS client object — releases Puppeteer's handle.
     if (this.client) {
       try { await this.client.destroy(); } catch { /* already gone */ }
       this.client = null;
-      this.logger.log('[WhatsApp] cleanSessionLocks: destroyed existing client');
+      this.logger.log('[WhatsApp] Destroyed existing client');
     }
 
-    // Kill orphaned Puppeteer/Chromium processes that survived client.destroy().
-    // Chromium must be dead before its SingletonLock can be safely removed.
-    const killCmds = [
-      "pkill -f 'puppeteer' || true",
-      "pkill -f 'whatsapp-web.js' || true",
-      // Kill Chromium instances launched by Puppeteer (identified by --remote-debugging-port
-      // flag that Puppeteer always passes — avoids hitting the user's own browser).
-      "pkill -f 'remote-debugging-port' || true",
-    ];
-    for (const cmd of killCmds) {
-      try { execSync(cmd, { stdio: 'ignore' }); } catch { /* no match — safe */ }
-    }
-    this.logger.log('[WhatsApp] cleanSessionLocks: cleaned up orphan processes');
+    // 2. Kill any orphaned Chromium process that survived client.destroy().
+    //    A live process will immediately re-create Singleton files after we remove them.
+    await this.killChromeProcesses();
 
-    // Give the OS 2 s to fully release file handles before Puppeteer touches them
+    // 3. Wait for the OS to fully release file handles after SIGTERM.
     await new Promise<void>((r) => setTimeout(r, 2_000));
 
-    const LOCK_FILES = ['SingletonLock', 'SingletonCookie', 'DevToolsActivePort'];
-    for (const file of LOCK_FILES) {
+    // 4. First removal pass.
+    await this.removeSingletonFiles(sessionDir);
+
+    // 5. Retry once if any lock files survived the first pass.
+    //    Edge case: on some macOS versions a SIGTERM'd Chromium briefly re-opens
+    //    its profile directory before fully exiting.
+    if (this.hasSingletonFiles(sessionDir)) {
+      this.logger.warn('[WhatsApp] Singleton files still present — retrying cleanup in 1 s');
+      await new Promise<void>((r) => setTimeout(r, 1_000));
+      await this.removeSingletonFiles(sessionDir);
+    }
+  }
+
+  /** Returns true if any Chromium lock file still exists in sessionDir. */
+  private hasSingletonFiles(sessionDir: string): boolean {
+    return CHROMIUM_LOCK_FILES.some((f) => fs.existsSync(path.join(sessionDir, f)));
+  }
+
+  /**
+   * Surgically unlinks each Chromium lock file if present.
+   * Uses fs.unlinkSync (correct for individual files, not directories).
+   * Logs every removal so the startup sequence is auditable.
+   */
+  private async removeSingletonFiles(sessionDir: string): Promise<void> {
+    for (const file of CHROMIUM_LOCK_FILES) {
       const filePath = path.join(sessionDir, file);
-      if (fs.existsSync(filePath)) {
-        try {
-          fs.rmSync(filePath, { force: true });
-          this.logger.log(`[WhatsApp] cleanSessionLocks: removed ${file}`);
-        } catch (e: any) {
-          this.logger.warn(`[WhatsApp] cleanSessionLocks: could not remove ${file}: ${e?.message}`);
+      if (!fs.existsSync(filePath)) continue;
+      try {
+        fs.unlinkSync(filePath);
+        this.logger.log(`[WhatsApp] Removed stale ${file}`);
+      } catch (e: any) {
+        this.logger.warn(`[WhatsApp] Could not remove ${file}: ${e?.message}`);
+      }
+    }
+  }
+
+  /**
+   * Kills only Chromium processes launched by Puppeteer, identified by the
+   * --remote-debugging-port flag that Puppeteer always passes. Does NOT kill
+   * the user's own Chrome browser (which never runs with that flag).
+   */
+  private async killChromeProcesses(): Promise<void> {
+    this.logger.log('[WhatsApp] Killing orphan browser processes...');
+    const cmds = [
+      // Primary target: any Chrome/Chromium with Puppeteer's debugging flag
+      "pkill -f 'remote-debugging-port' 2>/dev/null || true",
+      // Secondary: Chromium app bundle on macOS (safe — user's Chrome is "Google Chrome", not "Chromium")
+      "pkill -f 'Chromium.app' 2>/dev/null || true",
+    ];
+    for (const cmd of cmds) {
+      try { execSync(cmd, { stdio: 'ignore', timeout: 3_000 }); } catch { /* no match — safe */ }
+    }
+    // Give OS time to release file handles after processes die
+    await new Promise<void>((r) => setTimeout(r, 1_500));
+  }
+
+  /**
+   * Async recursive directory removal with retry. Retries up to `maxAttempts`
+   * times with 1 s delay — necessary because Chromium may still hold file
+   * handles for a short window after the process is killed (ENOTEMPTY / EBUSY).
+   */
+  private async rmWithRetry(dirPath: string, maxAttempts = 5): Promise<void> {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await fs.promises.rm(dirPath, { recursive: true, force: true });
+        this.logger.log(`[WhatsApp] Removed: ${path.basename(dirPath)}`);
+        return;
+      } catch (e: any) {
+        if (attempt < maxAttempts) {
+          this.logger.warn(`[WhatsApp] Retry cleanup attempt ${attempt}/${maxAttempts}: ${e?.message}`);
+          await new Promise<void>((r) => setTimeout(r, 1_000));
+        } else {
+          this.logger.error(`[WhatsApp] Failed to remove ${dirPath} after ${maxAttempts} attempts: ${e?.message}`);
         }
       }
     }
@@ -605,11 +787,11 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
    * Used by disconnectAndReset() and terminal disconnect reasons.
    * Preserves the version cache so the next init doesn't need to re-fetch WA Web.
    */
-  private clearAuthFiles(): void {
+  private async clearAuthFiles(): Promise<void> {
     const sessionDir = path.join(process.cwd(), `.wwebjs_auth/session-${this.sessionName}`);
     if (fs.existsSync(sessionDir)) {
-      fs.rmSync(sessionDir, { recursive: true, force: true });
-      this.logger.log(`[WhatsApp] Auth files cleared: ${sessionDir}`);
+      this.logger.log('[WhatsApp] Cleaning auth directory...');
+      await this.rmWithRetry(sessionDir);
     }
   }
 
@@ -619,10 +801,10 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
    * could both be causing the problem.
    */
   private async clearSessionFiles(): Promise<void> {
-    this.clearAuthFiles();
+    await this.clearAuthFiles();
     const versionCacheDir = path.join(process.cwd(), '.wwebjs_cache');
     if (fs.existsSync(versionCacheDir)) {
-      fs.rmSync(versionCacheDir, { recursive: true, force: true });
+      await this.rmWithRetry(versionCacheDir);
       this.logger.log('[WhatsApp] Version cache cleared');
     }
   }
@@ -869,8 +1051,9 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   getAdminStatus() {
     const connected = this._ready && this.isConnected();
     const state = this._initializing ? 'INITIALIZING'
-      : connected       ? 'CONNECTED'
-      : this.qrGenerated ? 'QR_ACTIVE'
+      : connected          ? 'CONNECTED'
+      : this._qrPaused     ? 'PAUSED'
+      : this.qrGenerated   ? 'QR_ACTIVE'
       : 'DISCONNECTED';
     return {
       connected,
@@ -883,6 +1066,8 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       lastReadyAt:        this._lastReadyAt?.toISOString() ?? null,
       qrActive:           this.qrGenerated,
       qrCount:            this.qrCount,
+      qrPaused:           this._qrPaused,
+      maxQrRetries:       this.MAX_QR_RETRIES,
       recoveringMessages: this._recovering,
       appVersion:         process.env.APP_VERSION ?? 'unknown',
     };
@@ -911,6 +1096,81 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     this.logger.log('[WhatsApp Admin] Controlled restart — preserving auth session');
     this._adminEventSubject.next(JSON.stringify({ type: 'restart_initiated', timestamp: new Date().toISOString() }));
     await this.reinitClient();
+  }
+
+  /**
+   * Manual reconnect after QR retry limit is hit.
+   * Resets all pause/QR counters and starts a fresh client init cycle.
+   * This is the recovery path when the system enters PAUSED state.
+   */
+  async manualReconnect(): Promise<void> {
+    if (this._initializing) {
+      this.logger.warn('[WhatsApp] manualReconnect() skipped — already initializing');
+      return;
+    }
+    this.logger.log('[WhatsApp] Manual reconnect initiated — resetting QR retry counters');
+    this._qrPaused   = false;
+    this.qrCount     = 0;
+    this.qrGenerated = false;
+    this.stopHealthMonitor();
+    this._adminEventSubject.next(JSON.stringify({ type: 'reconnect_initiated', timestamp: new Date().toISOString() }));
+    this.qrSubject.next(JSON.stringify({ type: 'initializing' }));
+
+    // Ensure any lingering client is gone (the setImmediate in the qr handler may not have fired yet)
+    if (this.client) {
+      this._manualDisconnect = true;
+      try { await this.client.destroy(); } catch { /* ignore */ }
+      this.client = null;
+      this._manualDisconnect = false;
+    }
+
+    await this.initClient();
+  }
+
+  /**
+   * Full session reset — the official recovery path when the authentication
+   * handshake never completes despite a QR being shown.
+   *
+   * Flow: logout → destroy → kill Chrome → clear auth → fresh init → new QR.
+   * Unlike safeRestart() this wipes credentials, forcing a fresh QR login.
+   */
+  async resetWhatsAppSession(): Promise<void> {
+    if (this._initializing) {
+      this.logger.warn('[WhatsApp] resetWhatsAppSession() skipped — already initializing');
+      return;
+    }
+    this.logger.log('[WhatsApp] Full session reset initiated');
+    this._adminEventSubject.next(JSON.stringify({ type: 'reset_initiated', timestamp: new Date().toISOString() }));
+
+    this._ready        = false;
+    this.qrCount       = 0;
+    this.qrGenerated   = false;
+    this._qrPaused     = false;
+    this.stopHealthMonitor();
+
+    // Suppress the disconnected event's auto-reinit — we manage it below.
+    this._manualDisconnect = true;
+    if (this.client) {
+      try { await this.client.logout(); } catch { /* already gone */ }
+      try { await this.client.destroy(); } catch { /* ignore */ }
+      this.client = null;
+    }
+    this._manualDisconnect = false;
+
+    this.logger.log('[WhatsApp] Killing browser processes...');
+    await this.killChromeProcesses();
+
+    this.logger.log('[WhatsApp] Clearing auth files...');
+    await this.clearAuthFiles();
+
+    await this.updateSession({ status: 'DISCONNECTED', phone_number: null, connected_at: null });
+    this.qrSubject.next(JSON.stringify({ type: 'initializing' }));
+    this._adminEventSubject.next(JSON.stringify({ type: 'reset_complete', timestamp: new Date().toISOString() }));
+
+    this.logger.log('[WhatsApp] Session reset complete — reinitializing for fresh QR');
+    setTimeout(() => this.initClient().catch((e) =>
+      this.logger.error('[WhatsApp] Post-reset reinit failed', e?.message),
+    ), 1_000);
   }
 
   private async recoverMissedMessages(): Promise<void> {

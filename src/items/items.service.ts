@@ -18,39 +18,43 @@ export interface UnifiedItem {
   unit: string;
   image: string | null;
   source: string;
+  /** Null for Shopify items until manually assigned in the catalog screen */
+  mainCategoryType: string | null;
 }
 
 function fromShopify(s: ShopifyCatalogItem): UnifiedItem {
   return {
-    id:            s.id,
-    itemName:      s.itemName,
-    sku:           s.sku,
-    hsnCode:       s.hsnCode,
-    gst:           s.gst,
-    costPrice:     s.costPrice,
-    sellingPrice:  s.sellingPrice,
-    retail_price:  s.retailPrice,
-    wholesale_price: s.wholesalePrice,
-    unit:          s.unit,
-    image:         s.image ?? null,
-    source:        'SHOPIFY',
+    id:               s.id,
+    itemName:         s.itemName,
+    sku:              s.sku,
+    hsnCode:          s.hsnCode,
+    gst:              s.gst,
+    costPrice:        s.costPrice,
+    sellingPrice:     s.sellingPrice,
+    retail_price:     s.retailPrice,
+    wholesale_price:  s.wholesalePrice,
+    unit:             s.unit,
+    image:            s.image ?? null,
+    source:           'SHOPIFY',
+    mainCategoryType: s.mainCategoryType ?? null,
   };
 }
 
 function fromService(s: ServiceItem): UnifiedItem {
   return {
-    id:            s.id,
-    itemName:      s.itemName,
-    sku:           s.sku,
-    hsnCode:       s.hsnCode,
-    gst:           s.gst,
-    costPrice:     s.costPrice,
-    sellingPrice:  s.sellingPrice,
-    retail_price:  s.sellingPrice,
-    wholesale_price: 0,
-    unit:          s.unit,
-    image:         null,
-    source:        'MANUAL',
+    id:               s.id,
+    itemName:         s.itemName,
+    sku:              s.sku,
+    hsnCode:          s.hsnCode,
+    gst:              s.gst,
+    costPrice:        s.costPrice,
+    sellingPrice:     s.sellingPrice,
+    retail_price:     s.sellingPrice,
+    wholesale_price:  0,
+    unit:             s.unit,
+    image:            null,
+    source:           'MANUAL',
+    mainCategoryType: s.mainCategoryType || 'TRADING',
   };
 }
 

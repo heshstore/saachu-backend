@@ -44,6 +44,17 @@ import { SlaModule }        from './sla/sla.module';
 import { ActivityModule }   from './activity/activity.module';
 import { KpiModule }        from './kpi/kpi.module';
 import { EventsModule }     from './events/events.module';
+import { DepartmentsModule } from './departments/departments.module';
+import { BoqModule }         from './boq/boq.module';
+import { InventoryModule }             from './inventory/inventory.module';
+import { PurchaseRequirementsModule }   from './purchase-requirements/purchase-requirements.module';
+import { ProductionExecutionModule }    from './production-execution/production-execution.module';
+import { VendorsModule }                 from './vendors/vendors.module';
+import { PurchaseOrdersModule }          from './purchase-orders/purchase-orders.module';
+import { ManufacturingAnalyticsModule } from './manufacturing-analytics/manufacturing-analytics.module';
+import { AfterSalesModule } from './after-sales/after-sales.module';
+import { FinanceOpsModule } from './finance-ops/finance-ops.module';
+import { WorkforceOpsModule } from './workforce-ops/workforce-ops.module';
 
 const _rawDbUrl      = process.env.DATABASE_URL || '';
 const databaseUrl    = sanitizeDatabaseUrl(_rawDbUrl);
@@ -108,6 +119,17 @@ new Logger('AppModule').log(
     ActivityModule,
     KpiModule,
     EventsModule,
+    DepartmentsModule,
+    BoqModule,
+    InventoryModule,
+    PurchaseRequirementsModule,
+    ProductionExecutionModule,
+    VendorsModule,
+    PurchaseOrdersModule,
+    ManufacturingAnalyticsModule,
+    AfterSalesModule,
+    FinanceOpsModule,
+    WorkforceOpsModule,
   ],
   providers: [
     AppService,

@@ -117,7 +117,16 @@ export class PaymentService {
       } as any);
     });
 
-    this.eventEmitter.emit('payment.received', { orderId, amount: dto.amount, createdBy: userId ?? null });
+    const latest = await this.paymentRepo.findOne({
+      where: { order_id: orderId },
+      order: { id: 'DESC' },
+    });
+    this.eventEmitter.emit('payment.received', {
+      orderId,
+      amount: dto.amount,
+      createdBy: userId ?? null,
+      paymentId: latest?.id ?? null,
+    });
 
     return this.getSummary(orderId);
   }

@@ -54,6 +54,16 @@ export class ShopifyCatalogItem {
   @Column({ default: 'SHOPIFY' })
   source: string;
 
+  // ── ERP classification — set manually after sync, never during sync ──────────
+
+  /** TRADING | MANUFACTURING | SERVICE — null until manually assigned */
+  @Column({ name: 'main_category_type', nullable: true, default: null })
+  mainCategoryType: string | null;
+
+  /** Applies when mainCategoryType = SERVICE: AMC | REPAIR | COMPLAINT | SPARE_PART */
+  @Column({ name: 'service_subtype', nullable: true, default: null })
+  serviceSubtype: string | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

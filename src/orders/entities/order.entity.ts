@@ -10,12 +10,18 @@ import {
 import { OrderItem } from './order-item.entity';
 
 export enum OrderStatus {
+  DRAFT               = 'DRAFT',
+  GENERATED           = 'GENERATED',
   PENDING_APPROVAL    = 'PENDING_APPROVAL',
   APPROVED            = 'APPROVED',
   REJECTED            = 'REJECTED',
   IN_PRODUCTION       = 'IN_PRODUCTION',
+  READY               = 'READY',
+  // Keep for backward compatibility with existing DB rows written before the rename
   READY_FOR_DISPATCH  = 'READY_FOR_DISPATCH',
+  PARTIAL_DISPATCHED  = 'PARTIAL_DISPATCHED',
   DISPATCHED          = 'DISPATCHED',
+  PARTIAL_DELIVERED   = 'PARTIAL_DELIVERED',
   COMPLETED           = 'COMPLETED',
   CANCELLED           = 'CANCELLED',
 }
@@ -86,18 +92,28 @@ export class Order {
   total_amount: number;
 
   // ── Status ──────────────────────────────────────────────────────────────────
-  @Column({ type: 'varchar', length: 25, default: OrderStatus.PENDING_APPROVAL })
+  @Column({ type: 'varchar', length: 30, default: OrderStatus.DRAFT })
   status: OrderStatus;
 
-  // ── Approval ────────────────────────────────────────────────────────────────
-  @Column({ type: 'text', nullable: true })
-  approval_remarks: string;
+  // ── Approval — salesperson data (set when sending for approval) ─────────────
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  advance_amount: number;
 
+  @Column({ default: false, nullable: true })
+  process_without_advance: boolean;
+
+  @Column({ type: 'text', nullable: true })
+  approval_remarks: string;   // salesperson's text notes — NOT overwritten on reject/approve
+
+  // ── Approval — manager data ────────────────────────────────────────────────
   @Column({ name: 'approved_by_id', nullable: true })
   approved_by: number;
 
   @Column({ type: 'timestamp', nullable: true })
   approved_at: Date;
+
+  @Column({ type: 'text', nullable: true })
+  rejection_reason: string;   // manager's rejection feedback — separate from approval_remarks
 
   // ── Payment tracking — kept for PaymentService sync ─────────────────────────
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })

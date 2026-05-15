@@ -37,6 +37,33 @@ export class ServiceItem {
   @Column({ name: 'is_active', default: true })
   isActive: boolean;
 
+  // ── Item Classification Fields ──────────────────────────────────────────────
+
+  /** TRADING | MANUFACTURING | SERVICE */
+  @Column({ name: 'main_category_type', default: 'TRADING' })
+  mainCategoryType: string;
+
+  /** Applies when mainCategoryType = SERVICE: AMC | REPAIR | COMPLAINT | SPARE_PART */
+  @Column({ name: 'service_subtype', nullable: true })
+  serviceSubtype: string | null;
+
+  /** NOT_CREATED | PARTIAL | COMPLETE */
+  @Column({ name: 'boq_status', default: 'NOT_CREATED' })
+  boqStatus: string;
+
+  @Column({ name: 'requires_production', default: false })
+  requiresProduction: boolean;
+
+  @Column({ name: 'requires_purchase', default: true })
+  requiresPurchase: boolean;
+
+  /** PCS | SQFT | KG | METER | SHEET */
+  @Column({ name: 'stock_tracking_type', default: 'PCS' })
+  stockTrackingType: string;
+
+  @Column({ name: 'is_raw_material', default: false })
+  isRawMaterial: boolean;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

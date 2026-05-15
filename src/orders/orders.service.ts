@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   BadRequestException,
   ConflictException,
   NotFoundException,
@@ -12,19 +13,24 @@ import { ProductionJob } from './entities/production-job.entity';
 import { OrderItem } from './entities/order-item.entity';
 import { Customer } from '../customers/entities/customer.entity';
 import { ProductionService } from './production.service';
+import { OrderExplosionService } from './order-explosion.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 
 // ── State machine ─────────────────────────────────────────────────────────────
 const ALLOWED_TRANSITIONS: Record<string, OrderStatus[]> = {
+  [OrderStatus.DRAFT]:              [OrderStatus.GENERATED, OrderStatus.PENDING_APPROVAL, OrderStatus.CANCELLED],
+  [OrderStatus.GENERATED]:          [OrderStatus.PENDING_APPROVAL, OrderStatus.CANCELLED],
   [OrderStatus.PENDING_APPROVAL]:   [OrderStatus.APPROVED, OrderStatus.REJECTED, OrderStatus.CANCELLED],
   [OrderStatus.APPROVED]:           [OrderStatus.IN_PRODUCTION, OrderStatus.CANCELLED],
-  [OrderStatus.IN_PRODUCTION]:      [OrderStatus.READY_FOR_DISPATCH, OrderStatus.CANCELLED],
-  // syncOrderStatus drives IN_PRODUCTION → READY_FOR_DISPATCH automatically;
-  // manual cancel must still be allowed from both dispatch-pending states.
-  [OrderStatus.READY_FOR_DISPATCH]: [OrderStatus.DISPATCHED, OrderStatus.CANCELLED],
-  [OrderStatus.DISPATCHED]:         [OrderStatus.COMPLETED, OrderStatus.CANCELLED],
+  [OrderStatus.IN_PRODUCTION]:      [OrderStatus.READY, OrderStatus.CANCELLED],
+  [OrderStatus.READY]:              [OrderStatus.DISPATCHED, OrderStatus.PARTIAL_DISPATCHED, OrderStatus.CANCELLED],
+  // Backward compat: existing DB rows written as READY_FOR_DISPATCH before rename.
+  [OrderStatus.READY_FOR_DISPATCH]: [OrderStatus.DISPATCHED, OrderStatus.PARTIAL_DISPATCHED, OrderStatus.CANCELLED],
+  [OrderStatus.PARTIAL_DISPATCHED]: [OrderStatus.DISPATCHED, OrderStatus.PARTIAL_DISPATCHED, OrderStatus.CANCELLED],
+  [OrderStatus.DISPATCHED]:         [OrderStatus.PARTIAL_DELIVERED, OrderStatus.COMPLETED, OrderStatus.CANCELLED],
+  [OrderStatus.PARTIAL_DELIVERED]:  [OrderStatus.COMPLETED, OrderStatus.PARTIAL_DELIVERED, OrderStatus.CANCELLED],
   [OrderStatus.COMPLETED]:          [],
-  [OrderStatus.REJECTED]:           [],
+  [OrderStatus.REJECTED]:           [OrderStatus.PENDING_APPROVAL, OrderStatus.CANCELLED],
   [OrderStatus.CANCELLED]:          [],
 };
 
@@ -42,12 +48,15 @@ const IDEMPOTENCY_WINDOW_MINUTES = 5;
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     @InjectRepository(Order)
     private orderRepo: Repository<Order>,
     @InjectRepository(Customer)
     private customerRepo: Repository<Customer>,
     private productionService: ProductionService,
+    private explosionService: OrderExplosionService,
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
@@ -293,7 +302,7 @@ export class OrdersService {
       installation_charges:Number(data.installation_charges ?? data.charges_installation ?? 0),
       loading_charges:     Number(data.loading_charges      ?? data.charges_loading      ?? 0),
       total_amount,
-      status:              OrderStatus.PENDING_APPROVAL,
+      status:              (data.status as OrderStatus) || OrderStatus.DRAFT,
       paid_amount:         0,
       pending_amount:      total_amount,
       salesman_id:         data.salesman_id ? Number(data.salesman_id) : undefined,
@@ -333,6 +342,12 @@ export class OrdersService {
       salesman_id:   saved.salesman_id,
       customer_name: saved.customer_name,
     });
+
+    // Non-blocking — planning data is best-effort and must not block order save
+    this.explosionService.explode(saved.id).catch(err =>
+      this.logger.warn(`[OrderExplosion] create failed for order ${saved.id}: ${err?.message}`),
+    );
+
     return saved;
   }
 
@@ -363,6 +378,21 @@ export class OrdersService {
     if (filters.to_date)     qb.andWhere('o.created_at <= :to',   { to: filters.to_date });
 
     const [data, total] = await qb.getManyAndCount();
+
+    // Attach quotation_no for orders sourced from quotations (single batch lookup,
+    // avoids N+1 queries). quotation_id is an integer FK — no ORM relation defined.
+    const quotationIds = data.filter(o => o.quotation_id).map(o => o.quotation_id);
+    if (quotationIds.length > 0) {
+      const qRows: { id: number; quotation_no: string }[] = await this.orderRepo.manager.query(
+        `SELECT id, quotation_no FROM quotation WHERE id = ANY($1)`,
+        [quotationIds],
+      );
+      const qnoMap = new Map(qRows.map(r => [Number(r.id), r.quotation_no]));
+      (data as any[]).forEach(o => {
+        o.quotation_no = o.quotation_id ? (qnoMap.get(o.quotation_id) ?? null) : null;
+      });
+    }
+
     return { data, total, page, limit };
   }
 
@@ -385,7 +415,9 @@ export class OrdersService {
     const order = await this.findOne(id);
     assertTransition(order.status, to);
     order.status = to;
-    return this.orderRepo.save(order);
+    const saved = await this.orderRepo.save(order);
+    this.eventEmitter.emit('order.updated', { orderId: saved.id, status: saved.status });
+    return saved;
   }
 
   // ── Status transitions ────────────────────────────────────────────────────────
@@ -395,20 +427,28 @@ export class OrdersService {
     let createdJobs: ProductionJob[] = [];
 
     await this.orderRepo.manager.transaction(async (em) => {
-      // Lock the row for the entire transaction so a concurrent cancel or
-      // second approval cannot race past the transition check.
+      // Lock the order row for the duration of the transaction.
+      // loadEagerRelations: false is required — the Order entity has eager items via
+      // OneToMany, which TypeORM loads with a LEFT JOIN.  PostgreSQL forbids
+      // FOR UPDATE on the nullable side of an outer join, so the lock + eager load
+      // combination throws "FOR UPDATE cannot be applied to the nullable side of an
+      // outer join".  We load items separately below, without the lock constraint.
       const order = await em.findOne(Order, {
-        where:     { id },
-        lock:      { mode: 'pessimistic_write' },
-        relations: ['items'],
+        where:              { id },
+        lock:               { mode: 'pessimistic_write' },
+        loadEagerRelations: false,
       });
       if (!order) throw new NotFoundException('Order not found');
       assertTransition(order.status, OrderStatus.APPROVED);
 
-      order.status           = OrderStatus.APPROVED;
-      order.approved_by      = user?.id ?? null;
-      order.approved_at      = new Date();
-      order.approval_remarks = remarks || null;
+      // Load items in the same transaction — no lock needed on them.
+      order.items = await em.find(OrderItem, { where: { order: { id } } });
+
+      order.status      = OrderStatus.APPROVED;
+      order.approved_by = user?.id ?? null;
+      order.approved_at = new Date();
+      // advance_amount / process_without_advance / approval_remarks (salesperson notes)
+      // are intentionally NOT touched here — they are operational data that must persist.
 
       savedOrder  = await em.save(order);
       createdJobs = await this.productionService.createFromOrder(savedOrder, em);
@@ -420,22 +460,52 @@ export class OrdersService {
       await this.productionService.autoAssignJob(job);
     }
 
+    // Notify ProductionExecutionService to generate BOQ-based execution jobs
+    this.eventEmitter.emit('order.approved', { orderId: savedOrder.id });
+
     return savedOrder;
   }
 
   async rejectOrder(id: number, remarks: string | undefined, user: any): Promise<Order> {
     const order = await this.findOne(id);
     assertTransition(order.status, OrderStatus.REJECTED);
-    order.status           = OrderStatus.REJECTED;
-    order.approved_by      = user?.id ?? null;
-    order.approved_at      = new Date();
-    order.approval_remarks = remarks || null;
-    return this.orderRepo.save(order);
+    order.status            = OrderStatus.REJECTED;
+    order.approved_by       = user?.id ?? null;
+    order.approved_at       = new Date();
+    order.rejection_reason  = remarks || null;
+    // advance_amount / process_without_advance / approval_remarks are NOT touched —
+    // they are the salesperson's operational data and must survive rejection.
+    const saved = await this.orderRepo.save(order);
+    this.eventEmitter.emit('order.updated', { orderId: saved.id, status: saved.status });
+    return saved;
   }
 
-  async sendForApproval(id: number): Promise<Order> {
-    // Orders start at PENDING_APPROVAL — this is a no-op kept for controller compatibility.
-    return this.findOne(id);
+  async sendForApproval(
+    id: number,
+    data?: { advance_amount?: number; process_without_advance?: boolean; remarks?: string },
+  ): Promise<Order> {
+    const order = await this.findOne(id);
+    if (order.status === OrderStatus.PENDING_APPROVAL) return order;
+    assertTransition(order.status, OrderStatus.PENDING_APPROVAL);
+
+    order.status = OrderStatus.PENDING_APPROVAL;
+
+    // Persist structured fields individually so the modal can pre-fill them on re-submission.
+    // Only update a field if the caller explicitly provided it (undefined = keep existing value).
+    if (data?.advance_amount !== undefined) {
+      order.advance_amount = Number(data.advance_amount) || 0;
+    }
+    if (data?.process_without_advance !== undefined) {
+      order.process_without_advance = Boolean(data.process_without_advance);
+    }
+    if (data?.remarks !== undefined) {
+      order.approval_remarks = data.remarks || null;
+    }
+
+    // Clear any previous rejection reason — order is being re-submitted.
+    order.rejection_reason = null;
+
+    return this.orderRepo.save(order);
   }
 
   async sendToProduction(id: number): Promise<Order> {
@@ -456,9 +526,10 @@ export class OrdersService {
 
   async updateOrder(id: number, data: any): Promise<Order> {
     const order = await this.findOne(id);
-    if (order.status !== OrderStatus.PENDING_APPROVAL) {
+    const EDITABLE = [OrderStatus.DRAFT, OrderStatus.GENERATED, OrderStatus.PENDING_APPROVAL, OrderStatus.REJECTED];
+    if (!EDITABLE.includes(order.status)) {
       throw new BadRequestException({
-        message:        'Only PENDING_APPROVAL orders can be edited',
+        message:        `Orders in ${order.status} status cannot be edited`,
         code:           'ORDER_NOT_EDITABLE',
         current_status: order.status,
       });
@@ -481,6 +552,12 @@ export class OrdersService {
     }
 
     await this.orderRepo.save({ ...order, ...data });
+
+    // Non-blocking re-explosion — re-calculates planning if items changed
+    this.explosionService.explode(id).catch(err =>
+      this.logger.warn(`[OrderExplosion] update failed for order ${id}: ${err?.message}`),
+    );
+
     return this.findOne(id);
   }
 

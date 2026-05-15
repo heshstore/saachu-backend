@@ -5,7 +5,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository }       from 'typeorm';
+import { Repository, In } from 'typeorm';
 import { EventEmitter2 }    from '@nestjs/event-emitter';
 
 import { Dispatch, DispatchStatus } from './entities/dispatch.entity';
@@ -27,10 +27,17 @@ export class DispatchService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  /** Orders that production has finished and are waiting to be shipped. */
+  /** Orders that can receive a new dispatch document (including partial fulfillment). */
   getReadyOrders(): Promise<Order[]> {
     return this.orderRepo.find({
-      where:  { status: OrderStatus.READY_FOR_DISPATCH },
+      where: {
+        status: In([
+          OrderStatus.READY,
+          OrderStatus.READY_FOR_DISPATCH,
+          OrderStatus.PARTIAL_DISPATCHED,
+          OrderStatus.PARTIAL_DELIVERED,
+        ]),
+      },
       order:  { created_at: 'ASC' },
     });
   }
@@ -72,9 +79,9 @@ export class DispatchService {
         if (existing) return existing;
       }
 
-      if (order.status !== OrderStatus.READY_FOR_DISPATCH) {
+      if (order.status !== OrderStatus.READY && order.status !== OrderStatus.READY_FOR_DISPATCH) {
         throw new BadRequestException(
-          `Order must be READY_FOR_DISPATCH to create a dispatch (current: ${order.status})`,
+          `Order must be READY to create a dispatch (current: ${order.status})`,
         );
       }
 

@@ -11,6 +11,27 @@ import { sanitizeDatabaseUrl, buildSslOption, redactDatabaseUrl } from './utils/
 
 const logger = new Logger('Bootstrap');
 
+/**
+ * TCP probe — resolves true if something is already listening on the port.
+ * Used in dev mode to detect duplicate startups before heavy initialization.
+ */
+function isPortOccupied(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    socket.setTimeout(500);
+    socket
+      .once('connect', () => { socket.destroy(); resolve(true); })
+      .once('timeout',  () => { socket.destroy(); resolve(false); })
+      .once('error',    () => { socket.destroy(); resolve(false); })
+      .connect(port, '127.0.0.1');
+  });
+}
+
+/** Short pause — lets the previous process fully release the port after nodemon SIGTERM. */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Creates and connects a one-shot pg Client using DATABASE_URL (channel_binding stripped). */
 async function createMigrationClient(): Promise<Client> {
   const raw = process.env.DATABASE_URL ?? '';
@@ -22,26 +43,45 @@ async function createMigrationClient(): Promise<Client> {
   return client;
 }
 
-/** Returns true if nothing is listening on `port`. */
-function isPortFree(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const probe = net.createServer();
-    probe.once('error', () => resolve(false));
-    probe.once('listening', () => { probe.close(); resolve(true); });
-    probe.listen(port, '0.0.0.0');
-  });
-}
+/**
+ * Attempts app.listen() on each candidate port.
+ *
+ * Production: scans up to 16 ports (Render assigns arbitrary ports).
+ * Development: exits immediately if the preferred port is occupied.
+ *   Rationale: multiple dev instances each spawn a WhatsApp/Puppeteer
+ *   initializer against the same session directory, causing SingletonLock
+ *   races and EPERM errors on Chrome process cleanup.
+ */
+async function listenWithFallback(app: any, preferred: number): Promise<number> {
+  const isDev    = (process.env.NODE_ENV ?? 'development') !== 'production';
+  const maxTries = isDev ? 1 : 16;
 
-/** Scans from `preferred` upward until a free port is found (max 16 attempts). */
-async function findFreePort(preferred: number): Promise<number> {
-  for (let i = 0; i < 16; i++) {
+  for (let i = 0; i < maxTries; i++) {
     const candidate = preferred + i;
-    if (await isPortFree(candidate)) return candidate;
-    logger.warn(`Port ${candidate} is occupied — trying ${candidate + 1}…`);
+    try {
+      await app.listen(candidate);
+      return candidate;
+    } catch (err: any) {
+      if (err?.code === 'EADDRINUSE') {
+        if (isDev) {
+          logger.warn(
+            `[Bootstrap] Duplicate backend instance detected — port ${preferred} already in use.\n` +
+            `  Backend already running on port ${preferred}. Skipping duplicate startup.\n` +
+            `  (Multiple dev instances each launch a WhatsApp/Chromium process against the same\n` +
+            `  session directory, causing SingletonLock races and EPERM errors.)\n` +
+            `  To restart cleanly: lsof -ti :${preferred} | xargs kill -9`,
+          );
+          process.exit(0);  // exit(0) — not a crash, just a duplicate startup
+        }
+        logger.warn(`[Bootstrap] Port ${candidate} occupied — trying ${candidate + 1}…`);
+        continue;
+      }
+      throw err;
+    }
   }
   throw new Error(
-    `No free port found in range ${preferred}–${preferred + 15}. ` +
-    `Run: lsof -ti :${preferred} | xargs kill -9`,
+    `[Bootstrap] No free port found in range ${preferred}–${preferred + 15}. ` +
+    `Kill stale processes: lsof -ti :${preferred} | xargs kill -9`,
   );
 }
 
@@ -257,6 +297,10 @@ async function ensureOrderColumns(): Promise<void> {
       // New columns
       `ALTER TABLE orders ADD COLUMN IF NOT EXISTS created_at    TIMESTAMPTZ NOT NULL DEFAULT now()`,
       `ALTER TABLE orders ADD COLUMN IF NOT EXISTS quotation_id  INTEGER`,
+      // Approval data persistence — structured fields (not mixed into approval_remarks string)
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS advance_amount           NUMERIC(10,2)`,
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS process_without_advance  BOOLEAN NOT NULL DEFAULT FALSE`,
+      `ALTER TABLE orders ADD COLUMN IF NOT EXISTS rejection_reason         TEXT`,
       // Legacy columns: mobile and order_number are NOT NULL in the original schema but are
       // not mapped by the TypeORM entity (app uses customer_phone / order_no instead).
       // TypeORM INSERTs don't include them, causing constraint violations.
@@ -305,6 +349,56 @@ async function ensureQuotationColumns(): Promise<void> {
     await client.query(
       `UPDATE quotation SET status = 'CANCELLED' WHERE status = 'REJECTED'`,
     ).catch(() => {});
+    // READY_FOR_DISPATCH → READY (renamed for consistency with frontend filter keys)
+    await client.query(
+      `UPDATE orders SET status = 'READY' WHERE status = 'READY_FOR_DISPATCH'`,
+    ).catch(() => {});
+    // Quotation-derived orders were incorrectly defaulted to PENDING_APPROVAL before
+    // the fix that passes status='GENERATED' at conversion time. Migrate them back.
+    // Safe: sendForApproval() was a no-op before the fix, so none could have legitimately
+    // progressed from GENERATED → PENDING_APPROVAL via the state machine.
+    await client.query(
+      `UPDATE orders SET status = 'GENERATED' WHERE quotation_id IS NOT NULL AND status = 'PENDING_APPROVAL'`,
+    ).catch(() => {});
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureShopifyCatalogClassificationColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    // Nullable, no default — category must be assigned manually after sync
+    await client.query(
+      `ALTER TABLE shopify_catalog_items ADD COLUMN IF NOT EXISTS main_category_type VARCHAR(20)`,
+    ).catch(() => {});
+    await client.query(
+      `ALTER TABLE shopify_catalog_items ADD COLUMN IF NOT EXISTS service_subtype VARCHAR(30)`,
+    ).catch(() => {});
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureServiceItemClassificationColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    const cols = [
+      `ALTER TABLE service_items ADD COLUMN IF NOT EXISTS main_category_type  VARCHAR(20) NOT NULL DEFAULT 'TRADING'`,
+      `ALTER TABLE service_items ADD COLUMN IF NOT EXISTS service_subtype     VARCHAR(30)`,
+      `ALTER TABLE service_items ADD COLUMN IF NOT EXISTS boq_status          VARCHAR(20) NOT NULL DEFAULT 'NOT_CREATED'`,
+      `ALTER TABLE service_items ADD COLUMN IF NOT EXISTS requires_production BOOLEAN NOT NULL DEFAULT FALSE`,
+      `ALTER TABLE service_items ADD COLUMN IF NOT EXISTS requires_purchase   BOOLEAN NOT NULL DEFAULT TRUE`,
+      `ALTER TABLE service_items ADD COLUMN IF NOT EXISTS stock_tracking_type VARCHAR(20) NOT NULL DEFAULT 'PCS'`,
+      `ALTER TABLE service_items ADD COLUMN IF NOT EXISTS is_raw_material     BOOLEAN NOT NULL DEFAULT FALSE`,
+    ];
+    for (const sql of cols) {
+      await client.query(sql).catch(() => {});
+    }
   } finally {
     await client?.end().catch(() => {});
   }
@@ -429,6 +523,289 @@ async function ensureLogsTable(): Promise<void> {
   }
 }
 
+async function ensureDepartmentTable(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS departments (
+        id                SERIAL PRIMARY KEY,
+        name              VARCHAR NOT NULL,
+        code              VARCHAR UNIQUE NOT NULL,
+        daily_capacity    DOUBLE PRECISION,
+        capacity_unit     VARCHAR,
+        manpower_capacity INT,
+        active            BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_departments_active ON departments(active)`);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureBoqTables(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS manufacturing_boqs (
+        id         SERIAL PRIMARY KEY,
+        item_id    INT NOT NULL,
+        version    INT NOT NULL DEFAULT 1,
+        status     VARCHAR(20) NOT NULL DEFAULT 'DRAFT',
+        notes      TEXT,
+        created_by INT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_mboq_item_id ON manufacturing_boqs(item_id)`);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS manufacturing_boq_items (
+        id                   SERIAL PRIMARY KEY,
+        boq_id               INT NOT NULL REFERENCES manufacturing_boqs(id) ON DELETE CASCADE,
+        raw_material_item_id INT NOT NULL,
+        department_id        INT NOT NULL,
+        consumption_type     VARCHAR(20) NOT NULL,
+        qty_per_unit         DOUBLE PRECISION NOT NULL,
+        wastage_percent      DOUBLE PRECISION NOT NULL DEFAULT 0,
+        width                DOUBLE PRECISION,
+        height               DOUBLE PRECISION,
+        sheet_size           VARCHAR(50),
+        formula_type         VARCHAR(30),
+        preferred_vendor     VARCHAR,
+        notes                TEXT,
+        image                TEXT,
+        created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_mboqi_boq_id ON manufacturing_boq_items(boq_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_mboqi_raw_mat ON manufacturing_boq_items(raw_material_item_id)`);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureProductionExecutionTables(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS production_execution_jobs (
+        id             SERIAL PRIMARY KEY,
+        order_id       INT NOT NULL,
+        order_item_id  INT NOT NULL,
+        item_id        INT NOT NULL,
+        boq_id         INT NOT NULL,
+        qty            DOUBLE PRECISION NOT NULL,
+        completed_qty  DOUBLE PRECISION NOT NULL DEFAULT 0,
+        rejected_qty   DOUBLE PRECISION NOT NULL DEFAULT 0,
+        status         VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+        priority       VARCHAR(10) NOT NULL DEFAULT 'MEDIUM',
+        started_at     TIMESTAMPTZ,
+        completed_at   TIMESTAMPTZ,
+        notes          TEXT,
+        created_by     INT,
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pej_order_id  ON production_execution_jobs(order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pej_status    ON production_execution_jobs(status)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pej_item_id   ON production_execution_jobs(item_id)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS production_job_stages (
+        id                 SERIAL PRIMARY KEY,
+        production_job_id  INT NOT NULL REFERENCES production_execution_jobs(id) ON DELETE CASCADE,
+        department_id      INT NOT NULL,
+        sequence_no        INT NOT NULL,
+        status             VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+        assigned_user_id   INT,
+        planned_qty        DOUBLE PRECISION NOT NULL,
+        completed_qty      DOUBLE PRECISION NOT NULL DEFAULT 0,
+        rejected_qty       DOUBLE PRECISION NOT NULL DEFAULT 0,
+        started_at         TIMESTAMPTZ,
+        completed_at       TIMESTAMPTZ,
+        remarks            TEXT,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pjs_job_id     ON production_job_stages(production_job_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pjs_dept_id    ON production_job_stages(department_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pjs_user_id    ON production_job_stages(assigned_user_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pjs_status     ON production_job_stages(status)`);
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_pjs_job_seq ON production_job_stages(production_job_id, sequence_no)`);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureProductionStageRefinements(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    // New timer-tracking columns
+    const cols = [
+      `ALTER TABLE production_job_stages ADD COLUMN IF NOT EXISTS hold_started_at        TIMESTAMPTZ`,
+      `ALTER TABLE production_job_stages ADD COLUMN IF NOT EXISTS total_hold_minutes     FLOAT NOT NULL DEFAULT 0`,
+      `ALTER TABLE production_job_stages ADD COLUMN IF NOT EXISTS stopped_at             TIMESTAMPTZ`,
+      `ALTER TABLE production_job_stages ADD COLUMN IF NOT EXISTS actual_working_minutes FLOAT NOT NULL DEFAULT 0`,
+      `ALTER TABLE production_job_stages ADD COLUMN IF NOT EXISTS hold_reason            TEXT`,
+      `ALTER TABLE production_job_stages ADD COLUMN IF NOT EXISTS moved_by               INT`,
+      `ALTER TABLE production_job_stages ADD COLUMN IF NOT EXISTS moved_at               TIMESTAMPTZ`,
+    ];
+    for (const sql of cols) {
+      await client.query(sql).catch(() => {});
+    }
+    // Migrate legacy status values → new canonical values
+    await client.query(
+      `UPDATE production_job_stages SET status = 'WORKING'  WHERE status = 'IN_PROGRESS'`,
+    ).catch(() => {});
+    await client.query(
+      `UPDATE production_job_stages SET status = 'ON_HOLD' WHERE status = 'HOLD'`,
+    ).catch(() => {});
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensurePurchaseRequirementsTable(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS purchase_requirements (
+        id            SERIAL PRIMARY KEY,
+        item_id       INT NOT NULL,
+        warehouse_id  INT,
+        source_type   VARCHAR(20) NOT NULL DEFAULT 'ORDER',
+        source_id     INT,
+        required_qty  DOUBLE PRECISION NOT NULL,
+        available_qty DOUBLE PRECISION NOT NULL DEFAULT 0,
+        shortage_qty  DOUBLE PRECISION NOT NULL,
+        unit          VARCHAR(20) NOT NULL DEFAULT 'PCS',
+        status        VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+        priority      VARCHAR(10) NOT NULL DEFAULT 'MEDIUM',
+        notes         TEXT,
+        created_by    INT,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pr_item_id    ON purchase_requirements(item_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pr_source     ON purchase_requirements(source_type, source_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pr_status     ON purchase_requirements(status)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pr_priority   ON purchase_requirements(priority)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_pr_created_at ON purchase_requirements(created_at DESC)`);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureInventoryTables(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS warehouses (
+        id         SERIAL PRIMARY KEY,
+        name       VARCHAR NOT NULL,
+        code       VARCHAR UNIQUE NOT NULL,
+        type       VARCHAR NOT NULL DEFAULT 'GENERAL',
+        active     BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_warehouses_active ON warehouses(active)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_warehouses_type   ON warehouses(type)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS inventory_transactions (
+        id               SERIAL PRIMARY KEY,
+        item_id          INT NOT NULL,
+        warehouse_id     INT NOT NULL REFERENCES warehouses(id),
+        transaction_type VARCHAR(30) NOT NULL,
+        direction        VARCHAR(10) NOT NULL,
+        qty              DOUBLE PRECISION NOT NULL,
+        unit             VARCHAR(20) NOT NULL DEFAULT 'PCS',
+        rate             DOUBLE PRECISION,
+        reference_type   VARCHAR(30),
+        reference_id     INT,
+        notes            TEXT,
+        created_by       INT,
+        created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_inv_tx_item_id      ON inventory_transactions(item_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_inv_tx_warehouse_id ON inventory_transactions(warehouse_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_inv_tx_type         ON inventory_transactions(transaction_type)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_inv_tx_direction    ON inventory_transactions(direction)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_inv_tx_created_at   ON inventory_transactions(created_at DESC)`);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureExplosionTables(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS order_material_requirements (
+        id                    SERIAL PRIMARY KEY,
+        order_id              INT NOT NULL,
+        order_item_id         INT NOT NULL,
+        item_id               INT NOT NULL,
+        raw_material_item_id  INT NOT NULL,
+        boq_item_id           INT,
+        required_qty          DOUBLE PRECISION NOT NULL,
+        consumption_type      VARCHAR(20) NOT NULL,
+        wastage_percent       DOUBLE PRECISION NOT NULL DEFAULT 0,
+        calculated_qty        DOUBLE PRECISION NOT NULL,
+        status                VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+        notes                 TEXT,
+        created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_omr_order_id        ON order_material_requirements(order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_omr_raw_material_id ON order_material_requirements(raw_material_item_id)`);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS department_workloads (
+        id             SERIAL PRIMARY KEY,
+        order_id       INT NOT NULL,
+        order_item_id  INT NOT NULL,
+        department_id  INT NOT NULL,
+        boq_item_id    INT,
+        workload_qty   DOUBLE PRECISION NOT NULL,
+        workload_unit  VARCHAR(20) NOT NULL,
+        estimated_hours DOUBLE PRECISION,
+        status         VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+        created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dw_order_id      ON department_workloads(order_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dw_department_id ON department_workloads(department_id)`);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 /**
  * Validates that required columns exist before accepting traffic.
  * Exits with a clear error only if the schema is provably out of date.
@@ -475,6 +852,26 @@ async function bootstrap() {
   logger.log(`  Env: ${process.env.NODE_ENV ?? 'development'}   PID: ${process.pid}`);
   logger.log(`  Deployed: ${deployedAt}`);
   logger.log('═══════════════════════════════════════════════════');
+
+  // ── Dev-only: early duplicate-startup detection ────────────────────────────
+  // Probe the port before any heavy initialization (migrations, NestJS module
+  // graph, WhatsApp client). If something is already listening we exit cleanly
+  // with code 0 so nodemon doesn't treat it as a crash and spin-retry.
+  // Production intentionally skips this — it must fail hard if the port is taken.
+  const isDev = (process.env.NODE_ENV ?? 'development') !== 'production';
+  if (isDev) {
+    const preferred = parseInt(String(process.env.PORT || 4000), 10);
+    // Stabilization delay: nodemon sends SIGTERM then immediately spawns the
+    // new process. Without a short wait the old process may still hold the
+    // socket in TIME_WAIT, giving a false-positive "port occupied" reading.
+    await delay(600);
+    if (await isPortOccupied(preferred)) {
+      logger.warn(
+        `[Bootstrap] Backend already running on port ${preferred} — duplicate startup detected. Skipping.`,
+      );
+      process.exit(0);
+    }
+  }
 
   // ── Required env var validation ────────────────────────────────────────────
   // Fail loudly before any connection is attempted so the Render log shows
@@ -564,6 +961,20 @@ async function bootstrap() {
   }
 
   try {
+    await ensureServiceItemClassificationColumns();
+    logger.log('✅ Service item classification columns ready');
+  } catch (err: any) {
+    logger.error('Service item classification migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureShopifyCatalogClassificationColumns();
+    logger.log('✅ Shopify catalog classification columns ready');
+  } catch (err: any) {
+    logger.error('Shopify catalog classification migration failed (non-fatal):', err?.message);
+  }
+
+  try {
     await ensureKpiTable();
     logger.log('✅ KPI table ready');
   } catch (err: any) {
@@ -582,6 +993,55 @@ async function bootstrap() {
     logger.log('✅ Activity table ready');
   } catch (err: any) {
     logger.error('Activity table migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureDepartmentTable();
+    logger.log('✅ Departments table ready');
+  } catch (err: any) {
+    logger.error('Departments migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureBoqTables();
+    logger.log('✅ BOQ tables ready');
+  } catch (err: any) {
+    logger.error('BOQ migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureExplosionTables();
+    logger.log('✅ Order explosion tables ready');
+  } catch (err: any) {
+    logger.error('Explosion table migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureInventoryTables();
+    logger.log('✅ Inventory tables ready (warehouses, inventory_transactions)');
+  } catch (err: any) {
+    logger.error('Inventory migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureProductionExecutionTables();
+    logger.log('✅ Production execution tables ready (production_execution_jobs, production_job_stages)');
+  } catch (err: any) {
+    logger.error('Production execution migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureProductionStageRefinements();
+    logger.log('✅ Production stage refinements ready (timer columns, status migration)');
+  } catch (err: any) {
+    logger.error('Production stage refinements migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensurePurchaseRequirementsTable();
+    logger.log('✅ Purchase requirements table ready');
+  } catch (err: any) {
+    logger.error('Purchase requirements migration failed (non-fatal):', err?.message);
   }
 
   try {
@@ -640,14 +1100,13 @@ async function bootstrap() {
   });
 
   const preferred = parseInt(String(process.env.PORT || 4000), 10);
-  const port = await findFreePort(preferred);
+  const port      = await listenWithFallback(app, preferred);
 
-  await app.listen(port);
-  logger.log(`Server running  →  http://localhost:${port}  (PID ${process.pid})`);
+  logger.log(`[Bootstrap] Application running at http://localhost:${port}  (PID ${process.pid})`);
 
   if (port !== preferred) {
     logger.warn(
-      `Started on port ${port} instead of ${preferred}. ` +
+      `[Bootstrap] Using port ${port} (${preferred} was occupied). ` +
       `To reclaim ${preferred}: lsof -ti :${preferred} | xargs kill -9`,
     );
   }

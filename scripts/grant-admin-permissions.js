@@ -45,6 +45,8 @@ const ALL_PERMISSIONS = [
   { key: 'dispatch.create',      label: 'Create Dispatch',            module: 'Dispatch' },
   { key: 'production.view',      label: 'View Production',            module: 'Production' },
   { key: 'production.update',    label: 'Update Production',          module: 'Production' },
+  { key: 'inventory.view',       label: 'View Inventory',             module: 'Inventory' },
+  { key: 'inventory.manage',     label: 'Manage Inventory',           module: 'Inventory' },
   // Staff / Settings
   { key: 'staff.view',           label: 'View Staff',                 module: 'Staff' },
   { key: 'staff.create',         label: 'Create Staff',               module: 'Staff' },

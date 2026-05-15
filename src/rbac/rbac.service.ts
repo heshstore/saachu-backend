@@ -36,6 +36,8 @@ export const PERMISSION_DEPS: Record<string, string[]> = {
   'staff.edit':        ['staff.view'],
   'staff.deactivate':  ['staff.view'],
   'rbac.manage':       ['staff.view', 'settings.view'],
+  // Inventory
+  'inventory.manage':    ['inventory.view'],
   // CRM
   'lead.create':         ['lead.view'],
   'lead.edit':           ['lead.view'],

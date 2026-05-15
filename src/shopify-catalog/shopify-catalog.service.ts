@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ShopifyCatalogItem } from './entities/shopify-catalog-item.entity';
@@ -11,6 +11,8 @@ export interface SyncVariantData {
   price: number;
   image: string;
 }
+
+const ALLOWED_GST = [5, 18];
 
 @Injectable()
 export class ShopifyCatalogService {
@@ -76,11 +78,22 @@ export class ShopifyCatalogService {
     return this.repo.findOneBy({ sku });
   }
 
-  async configure(id: number, data: { hsnCode?: string; costPrice?: number; gst?: number }) {
+  async configure(id: number, data: {
+    hsnCode?: string; costPrice?: number; gst?: number;
+    mainCategoryType?: string | null; serviceSubtype?: string | null;
+  }) {
+    if (data.gst !== undefined && data.gst !== null) {
+      const n = Number(data.gst);
+      if (n !== 0 && !ALLOWED_GST.includes(n)) {
+        throw new BadRequestException(`Invalid GST rate ${data.gst}. Allowed values: ${ALLOWED_GST.join(', ')}%`);
+      }
+    }
     const update: Partial<ShopifyCatalogItem> = {};
-    if (data.hsnCode !== undefined) update.hsnCode = data.hsnCode;
-    if (data.costPrice !== undefined) update.costPrice = Number(data.costPrice) || 0;
-    if (data.gst !== undefined) update.gst = Number(data.gst) || 0;
+    if (data.hsnCode          !== undefined) update.hsnCode          = data.hsnCode;
+    if (data.costPrice        !== undefined) update.costPrice        = Number(data.costPrice) || 0;
+    if (data.gst              !== undefined) update.gst              = Number(data.gst) || 0;
+    if (data.mainCategoryType !== undefined) update.mainCategoryType = data.mainCategoryType || null;
+    if (data.serviceSubtype   !== undefined) update.serviceSubtype   = data.serviceSubtype   || null;
     await this.repo.update(id, update);
     return this.repo.findOneBy({ id });
   }
@@ -152,18 +165,22 @@ export class ShopifyCatalogService {
   async bulkConfigure(items: Array<{
     sku: string; hsnCode: string; gst: number; costPrice: number;
     wholesalePrice?: number; unit?: string;
+    mainCategoryType?: string | null; serviceSubtype?: string | null;
   }>) {
     const results = [];
     for (const item of items) {
       const existing = await this.repo.findOneBy({ sku: item.sku });
       if (!existing) continue;
-      await this.repo.update({ id: existing.id }, {
-        hsnCode:      item.hsnCode,
-        gst:          item.gst,
-        costPrice:    item.costPrice,
+      const update: Partial<ShopifyCatalogItem> = {
+        hsnCode:        item.hsnCode,
+        gst:            item.gst,
+        costPrice:      item.costPrice,
         wholesalePrice: item.wholesalePrice ?? existing.wholesalePrice,
-        unit:         item.unit ?? existing.unit,
-      });
+        unit:           item.unit ?? existing.unit,
+      };
+      if (item.mainCategoryType !== undefined) update.mainCategoryType = item.mainCategoryType || null;
+      if (item.serviceSubtype   !== undefined) update.serviceSubtype   = item.serviceSubtype   || null;
+      await this.repo.update({ id: existing.id }, update);
       results.push({ ...existing, ...item });
     }
     return results;

@@ -493,6 +493,7 @@ export class QuotationService {
       installation_charges: quotation.charges_installation,
       loading_charges:      quotation.charges_loading,
       quotation_id:         quotation.id,
+      status:               'GENERATED',
       items:                orderItems,
     }, user);
 

@@ -214,7 +214,7 @@ export class KpiEngineService {
             COUNT(DISTINCT lf.id) FILTER (WHERE lf.is_completed)::int  AS followups,
             COUNT(DISTINCT q.id)::int                                   AS quotations,
             COUNT(DISTINCT q.id) FILTER (WHERE q.status = 'CONVERTED')::int AS conversions
-          FROM users u
+          FROM "user" u
           LEFT JOIN leads l       ON l.assigned_to = u.id AND l.created_at BETWEEN $1 AND $2 AND l.is_active = true
           LEFT JOIN lead_followups lf ON lf.created_by = u.id AND lf.due_date BETWEEN $1 AND $2
           LEFT JOIN quotations q   ON q.created_by  = u.id AND q.created_at BETWEEN $1 AND $2
@@ -434,7 +434,7 @@ export class KpiEngineService {
       followup_completion: `
         SELECT u.id AS user_id, u.name AS user_name,
                COUNT(*) FILTER (WHERE lf.is_completed) AS value
-        FROM users u
+        FROM "user" u
         LEFT JOIN lead_followups lf ON lf.created_by = u.id AND lf.due_date BETWEEN $1 AND $2
         WHERE u.is_active = true
         GROUP BY u.id, u.name
@@ -443,7 +443,7 @@ export class KpiEngineService {
       `,
       leads_handled: `
         SELECT u.id AS user_id, u.name AS user_name, COUNT(DISTINCT l.id) AS value
-        FROM users u
+        FROM "user" u
         LEFT JOIN leads l ON l.assigned_to = u.id AND l.created_at BETWEEN $1 AND $2 AND l.is_active = true
         WHERE u.is_active = true
         GROUP BY u.id, u.name
@@ -453,7 +453,7 @@ export class KpiEngineService {
       response_time: `
         SELECT u.id AS user_id, u.name AS user_name,
                AVG(EXTRACT(EPOCH FROM (a.created_at - l.created_at)) / 60)::numeric AS value
-        FROM users u
+        FROM "user" u
         JOIN leads l ON l.assigned_to = u.id AND l.created_at BETWEEN $1 AND $2 AND l.is_active = true
         JOIN (
           SELECT entity_id, MIN(created_at) AS created_at FROM activity_logs
@@ -466,7 +466,7 @@ export class KpiEngineService {
       `,
       jobs_completed: `
         SELECT u.id AS user_id, u.name AS user_name, COUNT(*) AS value
-        FROM users u
+        FROM "user" u
         JOIN production_jobs j ON j.assigned_to = u.id
           AND j.status = 'DONE' AND j.completed_at BETWEEN $1 AND $2
         WHERE u.is_active = true
@@ -481,7 +481,7 @@ export class KpiEngineService {
                  NULLIF(COUNT(*) FILTER (WHERE q.status IN ('GENERATED','CONVERTED')), 0) * 100,
                  0
                )::numeric AS value
-        FROM users u
+        FROM "user" u
         LEFT JOIN quotations q ON q.created_by = u.id AND q.created_at BETWEEN $1 AND $2
         WHERE u.is_active = true
         GROUP BY u.id, u.name
