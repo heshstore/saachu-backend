@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { Order } from '../orders/entities/order.entity';
 import { Invoice } from './entities/invoice.entity';
 import { appConfig } from '../config/config';
+import { ORDER_SALESMAN_JOINS, ORDER_SALESMAN_SELECT } from '../shared/ownership.util';
 
 @Injectable()
 export class InvoiceService {
@@ -94,9 +95,18 @@ export class InvoiceService {
   }
 
   async findOne(id: number) {
-    const invoice = await this.invoiceRepository.findOne({ where: { id } });
-    if (!invoice) throw new NotFoundException('Invoice not found');
-    return invoice;
+    const rows = await this.invoiceRepository.manager.query<any[]>(
+      `SELECT inv.*, o.order_no, o.status AS order_status,
+              ${ORDER_SALESMAN_SELECT}
+       FROM invoice inv
+       JOIN orders o ON o.id = inv.order_id
+       ${ORDER_SALESMAN_JOINS}
+       WHERE inv.id = $1
+       LIMIT 1`,
+      [id],
+    );
+    if (!rows.length) throw new NotFoundException('Invoice not found');
+    return rows[0];
   }
 
   create(body: any) {

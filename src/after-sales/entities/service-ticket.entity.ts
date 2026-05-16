@@ -62,6 +62,12 @@ export class ServiceTicket {
   @Column({ name: 'resolved_at', type: 'timestamptz', nullable: true })
   resolvedAt: Date | null;
 
+  @Column({ name: 'closed_by', type: 'int', nullable: true })
+  closedBy: number | null;
+
+  @Column({ name: 'closed_at', type: 'timestamptz', nullable: true })
+  closedAt: Date | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

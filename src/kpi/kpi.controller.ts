@@ -1,13 +1,13 @@
-import { Controller, Get, Query, Req, UseGuards } from '@nestjs/common';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { Controller, Get, Query, Req } from '@nestjs/common';
 import { KpiEngineService } from './kpi-engine.service';
+import { RequirePermission } from '../auth/require-permission.decorator';
 
-@UseGuards(JwtAuthGuard)
 @Controller('kpi')
 export class KpiController {
   constructor(private readonly kpi: KpiEngineService) {}
 
   @Get('summary')
+  @RequirePermission('staff.view')
   getSummary(@Query('days') days?: string) {
     return this.kpi.getSummary(Number(days ?? 30));
   }
@@ -19,6 +19,7 @@ export class KpiController {
   }
 
   @Get('leaderboard')
+  @RequirePermission('staff.view')
   getLeaderboard(
     @Query('metric') metric = 'leads_handled',
     @Query('days') days?: string,
@@ -27,6 +28,7 @@ export class KpiController {
   }
 
   @Get('snapshots')
+  @RequirePermission('staff.view')
   getSnapshots(
     @Query('module') module = 'SALES',
     @Query('metric') metric = 'leads_total',

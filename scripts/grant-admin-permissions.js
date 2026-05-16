@@ -43,8 +43,13 @@ const ALL_PERMISSIONS = [
   { key: 'payment.create',       label: 'Create Payment',             module: 'Payments' },
   { key: 'dispatch.view',        label: 'View Dispatch',              module: 'Dispatch' },
   { key: 'dispatch.create',      label: 'Create Dispatch',            module: 'Dispatch' },
+  { key: 'dispatch.deliver',     label: 'Mark Dispatch Delivered',    module: 'Dispatch' },
   { key: 'production.view',      label: 'View Production',            module: 'Production' },
   { key: 'production.update',    label: 'Update Production',          module: 'Production' },
+  { key: 'production.assign',          label: 'Assign Production',            module: 'Production' },
+  { key: 'production.update_stage',    label: 'Update Production Stage',      module: 'Production' },
+  { key: 'production.update_priority', label: 'Update Production Priority', module: 'Production' },
+  { key: 'production.analytics',       label: 'Production Analytics',         module: 'Production' },
   { key: 'inventory.view',       label: 'View Inventory',             module: 'Inventory' },
   { key: 'inventory.manage',     label: 'Manage Inventory',           module: 'Inventory' },
   // Staff / Settings

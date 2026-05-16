@@ -1,5 +1,6 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { ItemsService } from './items.service';
+import { RequirePermission } from '../auth/require-permission.decorator';
 
 /**
  * Unified facade used by:
@@ -18,16 +19,19 @@ export class ItemsController {
    * GET /items           → alias for master list
    */
   @Get()
+  @RequirePermission('item.view')
   findMaster(@Query('master') master?: string) {
     return this.itemsService.findMaster();
   }
 
   @Get('search')
+  @RequirePermission('item.view')
   searchItems(@Query('q') q: string) {
     return this.itemsService.searchItems(q);
   }
 
   @Get('stats')
+  @RequirePermission('item.view')
   getStats() {
     return this.itemsService.getStats();
   }

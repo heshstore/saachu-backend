@@ -26,6 +26,7 @@ export const PERMISSION_DEPS: Record<string, string[]> = {
   'invoice.create':    ['invoice.view'],
   'payment.create':    ['payment.view'],
   'dispatch.create':   ['dispatch.view'],
+  'dispatch.deliver':  ['dispatch.view'],
   'production.update':          ['production.view'],
   'production.assign':          ['production.view'],
   'production.update_stage':    ['production.view'],

@@ -95,8 +95,9 @@ export class DispatchController {
     @Param('id') id: string,
     @Param('lineId') lineId: string,
     @Body() body: { packedQty: number; packingRemarks?: string; cartonCount?: number },
+    @Req() req: any,
   ) {
-    return this.dispatchOrders.packLine(+id, +lineId, body);
+    return this.dispatchOrders.packLine(+id, +lineId, body, req.user?.id);
   }
 
   @Post('orders/:id/confirm-dispatch')

@@ -7,6 +7,7 @@ import { OnEvent, EventEmitter2 } from '@nestjs/event-emitter';
 import { ProductionExecutionJob } from './entities/production-execution-job.entity';
 import { ProductionJobStage } from './entities/production-job-stage.entity';
 import { InventoryTransaction } from '../inventory/entities/inventory-transaction.entity';
+import { STAGE_USER_JOINS, STAGE_USER_SELECT } from '../shared/ownership.util';
 
 const EPS = 1e-6;
 
@@ -26,6 +27,15 @@ export class ProductionExecutionService {
     private readonly dataSource: DataSource,
     private readonly eventEmitter: EventEmitter2,
   ) {}
+
+  private async userLabel(userId?: number | null): Promise<{ id: number | null; name: string | null }> {
+    if (!userId) return { id: null, name: null };
+    const [u] = await this.dataSource.query(
+      `SELECT id, name FROM "user" WHERE id = $1`,
+      [userId],
+    );
+    return { id: userId, name: u?.name ?? null };
+  }
 
   // ── Event listener ────────────────────────────────────────────────────────────
 
@@ -472,8 +482,17 @@ export class ProductionExecutionService {
   // ── Stage transitions ─────────────────────────────────────────────────────────
 
   /** READY → WORKING */
+  private async deptNameForStage(stageId: number): Promise<string | null> {
+    const [r] = await this.dataSource.query(
+      `SELECT d.name FROM production_job_stages pjs
+       JOIN departments d ON d.id = pjs.department_id WHERE pjs.id = $1`,
+      [stageId],
+    );
+    return r?.name ?? null;
+  }
+
   async startStage(stageId: number, userId?: number): Promise<ProductionJobStage> {
-    return this.dataSource.transaction(async (m) => {
+    const stage = await this.dataSource.transaction(async (m) => {
       const stage = await m.findOne(ProductionJobStage, {
         where: { id: stageId },
         relations: ['job'],
@@ -517,6 +536,16 @@ export class ProductionExecutionService {
 
       return stage;
     });
+    const u = await this.userLabel(userId);
+    const dept = await this.deptNameForStage(stageId);
+    this.eventEmitter.emit('production.stage.started', {
+      stage_id: stageId,
+      job_id: stage.productionJobId,
+      department_name: dept,
+      user_id: u.id,
+      user_name: u.name,
+    });
+    return stage;
   }
 
   /** WORKING → ON_HOLD. Records hold start time and reason. */
@@ -563,7 +592,7 @@ export class ProductionExecutionService {
     userId?: number,
     wastageRemarks?: string,
   ): Promise<ProductionJobStage> {
-    return this.dataSource.transaction(async (m) => {
+    const stage = await this.dataSource.transaction(async (m) => {
       const stage = await m.findOne(ProductionJobStage, {
         where: { id: stageId },
         relations: ['job'],
@@ -598,6 +627,16 @@ export class ProductionExecutionService {
 
       return m.save(stage);
     });
+    const u = await this.userLabel(userId);
+    const dept = await this.deptNameForStage(stageId);
+    this.eventEmitter.emit('production.stage.stopped', {
+      stage_id: stageId,
+      job_id: stage.productionJobId,
+      department_name: dept,
+      user_id: u.id,
+      user_name: u.name,
+    });
+    return stage;
   }
 
   /**
@@ -651,6 +690,15 @@ export class ProductionExecutionService {
     if (completedJobId != null) {
       this.eventEmitter.emit('production.job.completed', { jobId: completedJobId });
     }
+    const u = await this.userLabel(userId);
+    const dept = await this.deptNameForStage(stageId);
+    this.eventEmitter.emit('production.stage.moved', {
+      stage_id: stageId,
+      job_id: stage.productionJobId,
+      department_name: dept,
+      user_id: u.id,
+      user_name: u.name,
+    });
     return stage;
   }
 
@@ -809,6 +857,10 @@ export class ProductionExecutionService {
          o.order_no        AS "orderNo",
          o.customer_name   AS "customerName",
          o.status          AS "orderStatus",
+         o.salesman_id     AS "salesmanId",
+         sm.name           AS "salesmanName",
+         sm.mobile         AS "salesmanPhone",
+         sm.role           AS "salesmanRole",
          (SELECT COUNT(*) FROM production_job_stages pjs WHERE pjs.production_job_id = ej.id)               AS "totalStages",
          (SELECT COUNT(*) FROM production_job_stages pjs WHERE pjs.production_job_id = ej.id AND pjs.status = 'COMPLETED') AS "completedStages",
          (SELECT d.name FROM production_job_stages pjs JOIN departments d ON d.id = pjs.department_id
@@ -817,6 +869,7 @@ export class ProductionExecutionService {
        FROM production_execution_jobs ej
        LEFT JOIN service_items si ON si.id = ej.item_id
        LEFT JOIN orders o         ON o.id  = ej.order_id
+       LEFT JOIN "user" sm        ON sm.id = o.salesman_id
        ${where}
        ORDER BY
          CASE ej.priority WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'MEDIUM' THEN 3 ELSE 4 END,
@@ -903,10 +956,15 @@ export class ProductionExecutionService {
          si.sku          AS "itemSku",
          o.order_no      AS "orderNo",
          o.customer_name AS "customerName",
-         o.status        AS "orderStatus"
+         o.status        AS "orderStatus",
+         o.salesman_id   AS "salesmanId",
+         sm.name         AS "salesmanName",
+         sm.mobile       AS "salesmanPhone",
+         sm.role         AS "salesmanRole"
        FROM production_execution_jobs ej
        LEFT JOIN service_items si ON si.id = ej.item_id
        LEFT JOIN orders o         ON o.id  = ej.order_id
+       LEFT JOIN "user" sm        ON sm.id = o.salesman_id
        WHERE ej.id = $1`,
       [id],
     );
@@ -918,9 +976,11 @@ export class ProductionExecutionService {
       `SELECT
          pjs.*,
          d.name AS "departmentName",
-         d.code AS "departmentCode"
+         d.code AS "departmentCode",
+         ${STAGE_USER_SELECT}
        FROM production_job_stages pjs
        LEFT JOIN departments d ON d.id = pjs.department_id
+       ${STAGE_USER_JOINS}
        WHERE pjs.production_job_id = $1
        ORDER BY pjs.sequence_no`,
       [id],
@@ -953,6 +1013,7 @@ export class ProductionExecutionService {
          pjs.*,
          d.name            AS "departmentName",
          d.code            AS "departmentCode",
+         ${STAGE_USER_SELECT},
          ej.qty            AS "jobQty",
          ej.boq_id         AS "boqId",
          ej.order_item_id  AS "orderItemId",
@@ -965,6 +1026,7 @@ export class ProductionExecutionService {
        FROM production_job_stages pjs
        JOIN production_execution_jobs ej ON ej.id  = pjs.production_job_id
        LEFT JOIN departments d            ON d.id   = pjs.department_id
+       ${STAGE_USER_JOINS}
        LEFT JOIN orders o                 ON o.id   = ej.order_id
        LEFT JOIN service_items si         ON si.id  = ej.item_id
        WHERE pjs.assigned_user_id = $1

@@ -15,6 +15,12 @@ import { Customer } from '../customers/entities/customer.entity';
 import { ProductionService } from './production.service';
 import { OrderExplosionService } from './order-explosion.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import {
+  enrichRowsWithSalesman,
+  enrichRowsWithApprover,
+  ORDER_SALESMAN_JOINS,
+  ORDER_SALESMAN_SELECT,
+} from '../shared/ownership.util';
 
 // ── State machine ─────────────────────────────────────────────────────────────
 const ALLOWED_TRANSITIONS: Record<string, OrderStatus[]> = {
@@ -369,7 +375,7 @@ export class OrdersService {
 
     const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
     if (user?.role && !fullAccessRoles.includes(user.role) && user.id) {
-      qb.andWhere('o.created_by = :userId', { userId: user.id });
+      qb.andWhere('(o.created_by = :userId OR o.salesman_id = :userId)', { userId: user.id });
     }
 
     if (filters.status)      qb.andWhere('o.status = :status',    { status: filters.status });
@@ -378,6 +384,9 @@ export class OrdersService {
     if (filters.to_date)     qb.andWhere('o.created_at <= :to',   { to: filters.to_date });
 
     const [data, total] = await qb.getManyAndCount();
+    const ds = this.orderRepo.manager.connection;
+    await enrichRowsWithSalesman(ds, data as any[]);
+    await enrichRowsWithApprover(ds, data as any[]);
 
     // Attach quotation_no for orders sourced from quotations (single batch lookup,
     // avoids N+1 queries). quotation_id is an integer FK — no ORM relation defined.
@@ -397,9 +406,18 @@ export class OrdersService {
   }
 
   async findOne(id: number): Promise<Order> {
-    const order = await this.orderRepo.findOne({ where: { id }, relations: ['items'] });
-    if (!order) throw new NotFoundException('Order not found');
-    return order;
+    const rows: any[] = await this.orderRepo.manager.query(
+      `SELECT o.*, ${ORDER_SALESMAN_SELECT}
+       FROM orders o
+       ${ORDER_SALESMAN_JOINS}
+       WHERE o.id = $1`,
+      [id],
+    );
+    if (!rows.length) throw new NotFoundException('Order not found');
+    const items = await this.orderRepo.manager.find(OrderItem, {
+      where: { order_id: id },
+    });
+    return { ...rows[0], items } as Order;
   }
 
   async findPending(): Promise<Order[]> {
@@ -461,9 +479,15 @@ export class OrdersService {
     }
 
     // Notify ProductionExecutionService to generate BOQ-based execution jobs
-    this.eventEmitter.emit('order.approved', { orderId: savedOrder.id });
+    this.eventEmitter.emit('order.approved', {
+      orderId: savedOrder.id,
+      order_no: savedOrder.order_no,
+      user_id: user?.id ?? null,
+      user_name: user?.name ?? null,
+      user_role: user?.role ?? null,
+    });
 
-    return savedOrder;
+    return this.findOne(savedOrder.id);
   }
 
   async rejectOrder(id: number, remarks: string | undefined, user: any): Promise<Order> {
@@ -592,20 +616,40 @@ export class OrdersService {
   async splitInvoice(id: number) {
     const order = await this.findOne(id);
     return {
-      order_no:      order.order_no,
+      order_no: order.order_no,
+      order_number: order.order_no,
       customer_name: order.customer_name,
       customer_phone: order.customer_phone,
+      mobile: order.customer_phone,
+      status: order.status,
+      salesman_name: (order as any).salesman_name,
+      salesman_phone: (order as any).salesman_phone,
+      salesman_role: (order as any).salesman_role,
+      approved_by_name: (order as any).approved_by_name,
+      approved_by_role: (order as any).approved_by_role,
+      approved_at: (order as any).approved_at,
+      created_by_name: (order as any).created_by_name,
+      created_by_role: (order as any).created_by_role,
       items: (order.items || []).map(i => ({
-        item_name:  i.item_name,
-        sku:        i.sku,
-        qty:        i.qty,
-        rate:       i.rate,
+        item_name: i.item_name,
+        sku: i.sku,
+        qty: i.qty,
+        quantity: i.qty,
+        rate: i.rate,
         gst_percent: i.gst_percent,
-        amount:     i.amount,
+        gst: i.gst_percent,
+        amount: i.amount,
         gst_amount: i.gst_amount,
       })),
-      subtotal:    order.subtotal,
-      total:       order.total_amount,
+      subtotal: order.subtotal,
+      total: order.total_amount,
+      charges: {
+        packing: Number(order.packing_charges || 0),
+        cartage: Number(order.cartage_charges || 0),
+        forwarding: Number(order.forwarding_charges || 0),
+        installation: Number((order as any).installation_charges || 0),
+        loading: Number((order as any).loading_charges || 0),
+      },
     };
   }
 }

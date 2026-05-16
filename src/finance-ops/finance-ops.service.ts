@@ -308,9 +308,12 @@ export class FinanceOpsService {
       cond.push(`cr.customer_id = $${params.length}`);
     }
     return this.ds.query(
-      `SELECT cr.*, o.order_no, o.status AS order_status, o.customer_name
+      `SELECT cr.*, o.order_no, o.status AS order_status, o.customer_name,
+              o.salesman_id,
+              sm.name AS salesman_name, sm.mobile AS salesman_phone, sm.role AS salesman_role
        FROM customer_receivables cr
        JOIN orders o ON o.id = cr.order_id
+       LEFT JOIN "user" sm ON sm.id = o.salesman_id
        WHERE ${cond.join(' AND ')}
        ORDER BY cr.outstanding_amount DESC NULLS LAST, cr.id DESC
        LIMIT 500`,
@@ -370,9 +373,11 @@ export class FinanceOpsService {
       cond.push(`pe.payment_date <= $${params.length}::date`);
     }
     return this.ds.query(
-      `SELECT pe.*, o.order_no
+      `SELECT pe.*, o.order_no,
+              u.name AS received_by_name, u.role AS received_by_role
        FROM payment_entries pe
        LEFT JOIN orders o ON o.id = pe.reference_id AND pe.reference_type = 'ORDER'
+       LEFT JOIN "user" u ON u.id = pe.created_by
        WHERE ${cond.join(' AND ')}
        ORDER BY pe.payment_date DESC, pe.id DESC
        LIMIT 500`,
@@ -382,10 +387,12 @@ export class FinanceOpsService {
 
   async getCustomerFinanceSummary(customerId: number) {
     const orders = await this.ds.query(
-      `SELECT id, order_no, status, total_amount, paid_amount, pending_amount, due_date, created_at
-       FROM orders
-       WHERE customer_id = $1
-       ORDER BY id DESC
+      `SELECT o.id, o.order_no, o.status, o.total_amount, o.paid_amount, o.pending_amount, o.due_date, o.created_at,
+              o.salesman_id, sm.name AS salesman_name
+       FROM orders o
+       LEFT JOIN "user" sm ON sm.id = o.salesman_id
+       WHERE o.customer_id = $1
+       ORDER BY o.id DESC
        LIMIT 40`,
       [customerId],
     );

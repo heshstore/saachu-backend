@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Query, Put, Delete, Patch } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, Put, Delete, Patch, ParseIntPipe } from '@nestjs/common';
 import { CustomersService } from './customers.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -62,6 +62,15 @@ export class CustomersController {
   @RequirePermission('customer.delete')
   remove(@Param('id') id: string) {
     return this.customersService.remove(Number(id));
+  }
+
+  @Get(':id/timeline')
+  @RequirePermission('customer.view')
+  getTimeline(
+    @Param('id', ParseIntPipe) id: number,
+    @Query('limit') limit = '50',
+  ) {
+    return this.customersService.getTimeline(id, Number(limit));
   }
 
   @Patch(':id/credit-limit')

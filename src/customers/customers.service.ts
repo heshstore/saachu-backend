@@ -164,8 +164,71 @@ export class CustomersService {
     return this.customerRepo.find();
   }
 
-  findOne(id: number) {
-    return this.customerRepo.findOne({ where: { id } });
+  async findOne(id: number) {
+    const customer = await this.customerRepo.findOne({ where: { id } });
+    if (!customer) return null;
+
+    const em = this.customerRepo.manager;
+
+    const [
+      [origSalesman],
+      [latestOrder],
+      [latestTicket],
+      leadRows,
+    ] = await Promise.all([
+      em.query(
+        `SELECT l.assigned_to, u.name AS salesman_name, u.mobile AS salesman_phone, u.role AS salesman_role
+         FROM leads l
+         LEFT JOIN "user" u ON u.id = l.assigned_to
+         WHERE l.customer_id = $1
+         ORDER BY l.updated_at DESC NULLS LAST, l.id DESC
+         LIMIT 1`,
+        [id],
+      ),
+      em.query(
+        `SELECT o.id, o.order_no, o.salesman_id, sm.name AS order_salesman_name
+         FROM orders o
+         LEFT JOIN "user" sm ON sm.id = o.salesman_id
+         WHERE o.customer_id = $1
+         ORDER BY o.id DESC LIMIT 1`,
+        [id],
+      ),
+      em.query(
+        `SELECT t.id, t.ticket_number, t.assigned_to, tech.name AS service_owner_name
+         FROM service_tickets t
+         LEFT JOIN "user" tech ON tech.id = t.assigned_to
+         WHERE t.customer_id = $1
+         ORDER BY t.id DESC LIMIT 1`,
+        [id],
+      ),
+      em.query(
+        `SELECT id, lead_ref, status, stage, source, created_at
+         FROM leads
+         WHERE customer_id = $1 AND is_active = true
+         ORDER BY created_at DESC LIMIT 20`,
+        [id],
+      ),
+    ]);
+
+    const totalLeads = leadRows.length;
+    const convertedLeads = leadRows.filter((l: any) => l.status === 'CONVERTED').length;
+    const lostLeads = leadRows.filter((l: any) => l.status === 'LOST').length;
+    const conversionRate = totalLeads > 0 ? Math.round((convertedLeads / totalLeads) * 100) : 0;
+
+    return {
+      ...customer,
+      lifecycle: {
+        original_salesman_name: origSalesman?.salesman_name ?? null,
+        original_salesman_phone: origSalesman?.salesman_phone ?? null,
+        original_salesman_role: origSalesman?.salesman_role ?? null,
+        latest_order_no: latestOrder?.order_no ?? null,
+        latest_order_salesman_name: latestOrder?.order_salesman_name ?? null,
+        latest_service_ticket: latestTicket?.ticket_number ?? null,
+        latest_service_owner_name: latestTicket?.service_owner_name ?? null,
+      },
+      leadHistory: leadRows,
+      leadStats: { totalLeads, convertedLeads, lostLeads, conversionRate },
+    };
   }
 
   async update(id: number, data: any): Promise<Customer> {
@@ -201,5 +264,50 @@ export class CustomersService {
 
   remove(id: number) {
     return this.customerRepo.delete(id);
+  }
+
+  async getTimeline(id: number, limit = 50): Promise<any[]> {
+    const em = this.customerRepo.manager;
+    const [leadsRows, quotationsRows, ordersRows, ticketsRows, receivablesRows] = await Promise.all([
+      em.query(
+        `SELECT id, 'lead' AS type, status, stage AS sub_status, source,
+                created_at AS event_date, NULL AS amount, NULL AS ref_no
+         FROM leads WHERE customer_id = $1 AND is_active = true
+         ORDER BY created_at DESC LIMIT 20`,
+        [id],
+      ),
+      em.query(
+        `SELECT id, 'quotation' AS type, status, NULL AS sub_status, NULL AS source,
+                created_at AS event_date, total_amount AS amount, quotation_no AS ref_no
+         FROM quotation WHERE customer_id = $1
+         ORDER BY created_at DESC LIMIT 20`,
+        [id],
+      ),
+      em.query(
+        `SELECT id, 'order' AS type, status, NULL AS sub_status, NULL AS source,
+                created_at AS event_date, total_amount AS amount, order_no AS ref_no
+         FROM orders WHERE customer_id = $1
+         ORDER BY created_at DESC LIMIT 20`,
+        [id],
+      ),
+      em.query(
+        `SELECT id, 'service_ticket' AS type, status, NULL AS sub_status, NULL AS source,
+                created_at AS event_date, NULL AS amount, ticket_number AS ref_no
+         FROM service_tickets WHERE customer_id = $1
+         ORDER BY created_at DESC LIMIT 10`,
+        [id],
+      ),
+      em.query(
+        `SELECT id, 'payment' AS type, status, NULL AS sub_status, NULL AS source,
+                created_at AS event_date, outstanding_amount AS amount, NULL AS ref_no
+         FROM customer_receivables WHERE customer_id = $1
+         ORDER BY created_at DESC LIMIT 10`,
+        [id],
+      ),
+    ]);
+
+    const all = [...leadsRows, ...quotationsRows, ...ordersRows, ...ticketsRows, ...receivablesRows];
+    all.sort((a, b) => new Date(b.event_date).getTime() - new Date(a.event_date).getTime());
+    return all.slice(0, limit);
   }
 }

@@ -8,6 +8,7 @@ import { ServiceTicketUpdate } from './entities/service-ticket-update.entity';
 import { AmcContract } from './entities/amc-contract.entity';
 import { TechnicianProfile } from './entities/technician-profile.entity';
 import { InventoryService } from '../inventory/inventory.service';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 const EPS = 1e-6;
 const DEFAULT_WARRANTY_MONTHS = 12;
@@ -37,6 +38,7 @@ export class AfterSalesService {
     private readonly techRepo: Repository<TechnicianProfile>,
     private readonly dataSource: DataSource,
     private readonly inventoryService: InventoryService,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   private async nextTicketNumber(): Promise<string> {
@@ -192,25 +194,66 @@ export class AfterSalesService {
     customerId?: number;
     assignedTo?: number;
     limit?: number;
-  } = {}): Promise<ServiceTicket[]> {
-    const qb = this.ticketRepo.createQueryBuilder('t').orderBy('t.createdAt', 'DESC');
-    if (filters.status) qb.andWhere('t.status = :s', { s: filters.status });
-    if (filters.customerId) qb.andWhere('t.customerId = :c', { c: filters.customerId });
-    if (filters.assignedTo) qb.andWhere('t.assignedTo = :a', { a: filters.assignedTo });
-    qb.take(Math.min(filters.limit ?? 100, 500));
-    return qb.getMany();
+  } = {}): Promise<any[]> {
+    const params: unknown[] = [];
+    const cond: string[] = ['1=1'];
+    if (filters.status) {
+      params.push(filters.status);
+      cond.push(`t.status = $${params.length}`);
+    }
+    if (filters.customerId) {
+      params.push(filters.customerId);
+      cond.push(`t.customer_id = $${params.length}`);
+    }
+    if (filters.assignedTo) {
+      params.push(filters.assignedTo);
+      cond.push(`t.assigned_to = $${params.length}`);
+    }
+    const limit = Math.min(filters.limit ?? 100, 500);
+    params.push(limit);
+    return this.dataSource.query(
+      `SELECT t.*,
+              tech.name AS technician_name,
+              cb.name AS created_by_name,
+              cl.name AS closed_by_name,
+              o.salesman_id,
+              sm.name AS salesman_name, sm.mobile AS salesman_phone, sm.role AS salesman_role
+       FROM service_tickets t
+       LEFT JOIN "user" tech ON tech.id = t.assigned_to
+       LEFT JOIN "user" cb ON cb.id = t.created_by
+       LEFT JOIN "user" cl ON cl.id = t.closed_by
+       LEFT JOIN orders o ON o.id = t.order_id
+       LEFT JOIN "user" sm ON sm.id = o.salesman_id
+       WHERE ${cond.join(' AND ')}
+       ORDER BY t.created_at DESC
+       LIMIT $${params.length}`,
+      params,
+    );
   }
 
-  async getTicket(id: number): Promise<ServiceTicket> {
-    const t = await this.ticketRepo.findOne({
-      where: { id },
-      relations: ['updates'],
-    });
-    if (!t) throw new NotFoundException(`Ticket ${id} not found`);
-    (t as any).updates = [...(t.updates || [])].sort(
-      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+  async getTicket(id: number): Promise<any> {
+    const rows: any[] = await this.dataSource.query(
+      `SELECT t.*,
+              tech.name AS technician_name,
+              cb.name AS created_by_name,
+              cl.name AS closed_by_name,
+              o.salesman_id, o.order_no,
+              sm.name AS salesman_name, sm.mobile AS salesman_phone, sm.role AS salesman_role
+       FROM service_tickets t
+       LEFT JOIN "user" tech ON tech.id = t.assigned_to
+       LEFT JOIN "user" cb ON cb.id = t.created_by
+       LEFT JOIN "user" cl ON cl.id = t.closed_by
+       LEFT JOIN orders o ON o.id = t.order_id
+       LEFT JOIN "user" sm ON sm.id = o.salesman_id
+       WHERE t.id = $1`,
+      [id],
     );
-    return t;
+    if (!rows.length) throw new NotFoundException(`Ticket ${id} not found`);
+    const updates = await this.updateRepo.find({
+      where: { serviceTicketId: id },
+      order: { createdAt: 'ASC' },
+    });
+    return { ...rows[0], updates };
   }
 
   async patchTicket(
@@ -245,6 +288,10 @@ export class AfterSalesService {
       if (body.status === 'RESOLVED' && !t.resolvedAt) {
         t.resolvedAt = new Date();
       }
+      if (body.status === 'CLOSED') {
+        t.closedBy = userId ?? t.closedBy ?? null;
+        t.closedAt = new Date();
+      }
     }
 
     const hint = await this.computeWarrantyHint({
@@ -256,6 +303,19 @@ export class AfterSalesService {
     t.warrantyStatus = hint.warrantyStatus;
 
     await this.ticketRepo.save(t);
+    if (body.status === 'CLOSED') {
+      let userName: string | null = null;
+      if (userId) {
+        const [u] = await this.dataSource.query(`SELECT name FROM "user" WHERE id = $1`, [userId]);
+        userName = u?.name ?? null;
+      }
+      this.eventEmitter.emit('service.ticket.closed', {
+        ticket_id: id,
+        ticket_number: t.ticketNumber,
+        user_id: userId ?? null,
+        user_name: userName,
+      });
+    }
     return this.getTicket(id);
   }
 

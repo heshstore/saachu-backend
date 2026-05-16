@@ -680,6 +680,25 @@ async function ensureProductionStageRefinements(): Promise<void> {
   }
 }
 
+async function ensureLeadQualityColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_quality  VARCHAR(20)`,
+    ).catch(() => {});
+    await client.query(
+      `ALTER TABLE leads ADD COLUMN IF NOT EXISTS quality_score INT`,
+    ).catch(() => {});
+    await client.query(
+      `CREATE INDEX IF NOT EXISTS idx_leads_quality ON leads(lead_quality)`,
+    ).catch(() => {});
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 async function ensurePurchaseRequirementsTable(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
   let client: Client | null = null;
@@ -1042,6 +1061,13 @@ async function bootstrap() {
     logger.log('✅ Purchase requirements table ready');
   } catch (err: any) {
     logger.error('Purchase requirements migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureLeadQualityColumns();
+    logger.log('✅ Lead quality columns ready (lead_quality, quality_score)');
+  } catch (err: any) {
+    logger.error('Lead quality migration failed (non-fatal):', err?.message);
   }
 
   try {

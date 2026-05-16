@@ -121,12 +121,27 @@ export class PaymentService {
       where: { order_id: orderId },
       order: { id: 'DESC' },
     });
-    this.eventEmitter.emit('payment.received', {
+    const order = await this.orderRepo.findOne({ where: { id: orderId } });
+    let userName: string | null = null;
+    if (userId) {
+      const [u] = await this.orderRepo.manager.query(
+        `SELECT name FROM "user" WHERE id = $1`,
+        [userId],
+      );
+      userName = u?.name ?? null;
+    }
+    const payload = {
       orderId,
+      order_id: orderId,
+      order_no: order?.order_no ?? null,
       amount: dto.amount,
       createdBy: userId ?? null,
+      user_id: userId ?? null,
+      user_name: userName,
       paymentId: latest?.id ?? null,
-    });
+    };
+    this.eventEmitter.emit('payment.received', payload);
+    this.eventEmitter.emit('payment.recorded', payload);
 
     return this.getSummary(orderId);
   }
@@ -156,11 +171,15 @@ export class PaymentService {
     };
   }
 
-  getPayments(orderId: number): Promise<Payment[]> {
-    return this.paymentRepo.find({
-      where: { order_id: orderId },
-      order: { created_at: 'ASC' },
-    });
+  async getPayments(orderId: number): Promise<any[]> {
+    return this.paymentRepo.manager.query(
+      `SELECT p.*, u.name AS received_by_name, u.role AS received_by_role
+       FROM payments p
+       LEFT JOIN "user" u ON u.id = p.created_by
+       WHERE p.order_id = $1
+       ORDER BY p.created_at ASC`,
+      [orderId],
+    );
   }
 
   /** Aggregate of all outstanding payment balances across all orders — used by dashboard/sidebar. */

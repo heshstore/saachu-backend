@@ -9,6 +9,11 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import {
+  enrichRowsWithSalesman,
+  attachLinkedOrderApproval,
+  enrichQuotationsWithLinkedOrderApproval,
+} from '../shared/ownership.util';
 import { Quotation, QuotationStatus, QuotationDiscountType } from './quotation.entity';
 import { QuotationItem } from './quotation-item.entity';
 import { OrdersService } from '../orders/orders.service';
@@ -299,7 +304,7 @@ export class QuotationService {
 
     const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
     if (user?.role && !fullAccessRoles.includes(user.role) && user.id) {
-      qb.andWhere('q.created_by = :userId', { userId: user.id });
+      qb.andWhere('(q.created_by = :userId OR q.salesman_id = :userId)', { userId: user.id });
     }
 
     if (filters.status)      qb.andWhere('q.status = :status',  { status: filters.status });
@@ -307,18 +312,28 @@ export class QuotationService {
     if (filters.from_date)   qb.andWhere('q.created_at >= :from', { from: filters.from_date });
     if (filters.to_date)     qb.andWhere('q.created_at <= :to',   { to: filters.to_date });
 
-    return qb.getMany();
+    const list = await qb.getMany();
+    const ds = this.quotationRepo.manager.connection;
+    await enrichRowsWithSalesman(ds, list as any[]);
+    await enrichQuotationsWithLinkedOrderApproval(ds, list as any[]);
+    return list;
   }
 
   async findOne(id: number): Promise<Quotation> {
     const q = await this.quotationRepo.findOne({ where: { id }, relations: ['items'], withDeleted: false });
     if (!q) throw new NotFoundException('Quotation not found');
+    const ds = this.quotationRepo.manager.connection;
+    await enrichRowsWithSalesman(ds, [q as any]);
+    await attachLinkedOrderApproval(ds, q as any);
     return q;
   }
 
   async findByNo(quotation_no: string): Promise<Quotation> {
     const q = await this.quotationRepo.findOne({ where: { quotation_no }, relations: ['items'] });
     if (!q) throw new NotFoundException(`Quotation ${quotation_no} not found`);
+    const ds = this.quotationRepo.manager.connection;
+    await enrichRowsWithSalesman(ds, [q as any]);
+    await attachLinkedOrderApproval(ds, q as any);
     return q;
   }
 

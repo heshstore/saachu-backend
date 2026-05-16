@@ -8,6 +8,8 @@ import { DispatchOrderItem } from './entities/dispatch-order-item.entity';
 import { Order, OrderStatus } from '../orders/entities/order.entity';
 import { OrderItem } from '../orders/entities/order-item.entity';
 import { InventoryTransaction } from '../inventory/entities/inventory-transaction.entity';
+import { EventEmitter2 } from '@nestjs/event-emitter';
+import { DISPATCH_ACTOR_JOINS, DISPATCH_ACTOR_SELECT } from '../shared/ownership.util';
 
 const EPS = 1e-6;
 
@@ -20,6 +22,7 @@ export class DispatchOrdersService {
     private readonly dispatchOrderRepo: Repository<DispatchOrder>,
 
     private readonly dataSource: DataSource,
+    private readonly eventEmitter: EventEmitter2,
   ) {}
 
   private async nextDispatchNumber(m?: EntityManager): Promise<string> {
@@ -156,9 +159,10 @@ export class DispatchOrdersService {
       where = `WHERE d.order_id = $${params.length}`;
     }
     return this.dataSource.query(
-      `SELECT d.*, o.order_no AS "orderNo", o.customer_name AS "customerName", o.status AS "orderStatus"
+      `SELECT d.*, o.order_no AS "orderNo", o.customer_name AS "customerName", o.status AS "orderStatus",
+              ${DISPATCH_ACTOR_SELECT}
        FROM dispatch_orders d
-       JOIN orders o ON o.id = d.order_id
+       ${DISPATCH_ACTOR_JOINS}
        ${where}
        ORDER BY d.created_at DESC`,
       params,
@@ -167,9 +171,10 @@ export class DispatchOrdersService {
 
   async findDispatchOrderById(id: number): Promise<any> {
     const heads: any[] = await this.dataSource.query(
-      `SELECT d.*, o.order_no AS "orderNo", o.customer_name AS "customerName", o.status AS "orderStatus"
+      `SELECT d.*, o.order_no AS "orderNo", o.customer_name AS "customerName", o.status AS "orderStatus",
+              ${DISPATCH_ACTOR_SELECT}
        FROM dispatch_orders d
-       JOIN orders o ON o.id = d.order_id
+       ${DISPATCH_ACTOR_JOINS}
        WHERE d.id = $1`,
       [id],
     );
@@ -295,6 +300,7 @@ export class DispatchOrdersService {
     dispatchOrderId: number,
     lineId: number,
     body: { packedQty: number; packingRemarks?: string; cartonCount?: number },
+    userId?: number,
   ): Promise<DispatchOrderItem> {
     return this.dataSource.transaction(async (m) => {
       const line = await m.findOne(DispatchOrderItem, {
@@ -330,6 +336,11 @@ export class DispatchOrdersService {
       line.packedQty = pq;
       if (body.packingRemarks !== undefined) line.packingRemarks = body.packingRemarks ?? null;
       if (body.cartonCount !== undefined) line.cartonCount = body.cartonCount ?? null;
+      if (userId && pq > EPS && !head.packedBy) {
+        head.packedBy = userId;
+        head.packedAt = new Date();
+        await m.save(head);
+      }
       return m.save(line);
     });
   }
@@ -432,9 +443,16 @@ export class DispatchOrdersService {
         if (dqty + EPS < Number(it.q)) allDisp = false;
       }
       head.status = allDisp ? 'DISPATCHED' : 'PARTIAL_DISPATCHED';
+      if (userId) head.dispatchedBy = userId;
 
       await m.save(head);
       await this.syncOrderStatusFromDispatch(head.orderId, m);
+      this.eventEmitter.emit('dispatch.confirmed', {
+        id: head.id,
+        order_id: head.orderId,
+        dispatch_number: head.dispatchNumber,
+        user_id: userId ?? null,
+      });
       return head;
     });
   }

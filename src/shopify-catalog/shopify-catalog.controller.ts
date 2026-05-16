@@ -7,31 +7,37 @@ export class ShopifyCatalogController {
   constructor(private readonly svc: ShopifyCatalogService) {}
 
   @Get()
+  @RequirePermission('item.view')
   findAll() {
     return this.svc.findAll();
   }
 
   @Get('stats')
+  @RequirePermission('item.view')
   getStats() {
     return this.svc.getStats();
   }
 
   @Get('pending')
+  @RequirePermission('item.view')
   findPending() {
     return this.svc.findPending();
   }
 
   @Get('ready')
+  @RequirePermission('item.view')
   findReady() {
     return this.svc.findReady();
   }
 
   @Get('hidden')
+  @RequirePermission('item.view')
   findIgnored() {
     return this.svc.findIgnored();
   }
 
   @Get(':id')
+  @RequirePermission('item.view')
   findById(@Param('id') id: string) {
     return this.svc.findById(+id);
   }

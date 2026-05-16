@@ -26,6 +26,46 @@ try {
   new Logger('PdfService').error(`pdfmake font setup failed: ${e?.message}`);
 }
 
+const SLATE_OWN = '#64748b';
+
+function ownershipPdfStack(data: any, opts?: { showPhone?: boolean; approvalPending?: boolean }) {
+  const lines: any[] = [];
+  const salesName = data?.salesman_name || data?.sales_person;
+  if (salesName) {
+    const parts = [salesName, data?.salesman_role, opts?.showPhone !== false ? data?.salesman_phone : null].filter(Boolean);
+    lines.push({
+      text: [{ text: 'Sales     ', bold: true, color: SLATE_OWN }, parts.join(' · ')],
+      fontSize: 8,
+    });
+  }
+  if (data?.approved_by_name) {
+    const appr = data.approved_by_role
+      ? `${data.approved_by_name} (${data.approved_by_role})`
+      : data.approved_by_name;
+    lines.push({
+      text: [{ text: 'Approved  ', bold: true, color: SLATE_OWN }, appr],
+      fontSize: 8,
+    });
+  } else if (opts?.approvalPending) {
+    lines.push({
+      text: [{ text: 'Approved  ', bold: true, color: SLATE_OWN }, 'Pending Approval'],
+      fontSize: 8,
+      italics: true,
+      color: '#b45309',
+    });
+  }
+  if (data?.generated_by_name) {
+    const gen = data.generated_by_role
+      ? `${data.generated_by_name} (${data.generated_by_role})`
+      : data.generated_by_name;
+    lines.push({
+      text: [{ text: 'Generated ', bold: true, color: SLATE_OWN }, gen],
+      fontSize: 8,
+    });
+  }
+  return lines;
+}
+
 @Injectable()
 export class PdfService {
   private readonly logger = new Logger(PdfService.name);
@@ -191,7 +231,7 @@ export class PdfService {
       { text: [{ text: 'PI Date ', bold: true, color: SLATE }, date(data?.created_at)],        fontSize: 8 },
     ];
     if (data?.valid_till) piStack.push({ text: [{ text: 'Valid   ', bold: true, color: SLATE }, date(data.valid_till)], fontSize: 8 });
-    if (data?.sales_person) piStack.push({ text: [{ text: 'Sales   ', bold: true, color: SLATE }, safe(data.sales_person)], fontSize: 8 });
+    piStack.push(...ownershipPdfStack(data, { showPhone: true, approvalPending: !data?.approved_by_name }));
 
     // Customer addresses
     const custName = safe(data?.customer_name, '—');
@@ -580,8 +620,16 @@ export class PdfService {
       { text: [{ text: 'Order No.  ', bold: true, color: SLATE }, orderNo],          fontSize: 8 },
       { text: [{ text: 'Order Date ', bold: true, color: SLATE }, date(data?.created_at)], fontSize: 8 },
     ];
-    if (data?.due_date)       detailStack.push({ text: [{ text: 'Exp. Delivery ', bold: true, color: SLATE }, date(data.due_date)], fontSize: 8 });
-    if (data?.salesman_name)  detailStack.push({ text: [{ text: 'Sales Man ', bold: true, color: SLATE }, safe(data.salesman_name)], fontSize: 8 });
+    if (data?.due_date) detailStack.push({ text: [{ text: 'Exp. Delivery ', bold: true, color: SLATE }, date(data.due_date)], fontSize: 8 });
+    const orderPending =
+      String(data?.status || '').toUpperCase() === 'PENDING_APPROVAL' ||
+      String(data?.status || '').toUpperCase() === 'GENERATED';
+    detailStack.push(
+      ...ownershipPdfStack(data, {
+        showPhone: true,
+        approvalPending: orderPending && !data?.approved_by_name,
+      }),
+    );
     if (statusText)           detailStack.push({ text: statusText, fontSize: 7.5, bold: true, color: '#fff', background: statusBg, margin: [0, 3, 0, 0] });
 
     // Customer addresses
@@ -848,11 +896,19 @@ export class PdfService {
       `₹${Number(item?.amount || 0).toFixed(2)}`,
     ]);
 
+    const ownershipLines = ownershipPdfStack(data, {
+      showPhone: true,
+      approvalPending:
+        String(data?.order_status || data?.status || '').toUpperCase() === 'PENDING_APPROVAL' &&
+        !data?.approved_by_name,
+    });
+
     return {
       content: [
         { text: appConfig?.companyName || 'Saachu', style: 'header' },
         { text: `INVOICE: ${data?.invoice_no || data?.id || ''}`, style: 'subheader' },
-        { text: `Customer: ${data?.customer_name || ''}`, margin: [0, 4, 0, 8] },
+        { text: `Customer: ${data?.customer_name || ''}`, margin: [0, 4, 0, 2] },
+        ...(ownershipLines.length ? [{ stack: ownershipLines, margin: [0, 0, 0, 8] }] : []),
         {
           table: {
             headerRows: 1,

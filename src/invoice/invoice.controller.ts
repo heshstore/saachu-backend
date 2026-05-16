@@ -40,6 +40,7 @@ export class InvoiceController {
   }
 
   @Get(':id/pdf')
+  @RequirePermission('invoice.view')
   async getPdf(@Param('id') id: string, @Res() res: Response) {
     const data = await this.invoiceService.findOne(Number(id));
     const buffer = await this.pdfService.generateBuffer(
@@ -53,6 +54,7 @@ export class InvoiceController {
   }
 
   @Post(':id/email')
+  @RequirePermission('invoice.view')
   async sendEmail(@Param('id') id: string, @Body() body: { to: string }) {
     const data = await this.invoiceService.findOne(Number(id));
     const filePath = await this.pdfService.generateAndSave('invoice', Number(id), data);

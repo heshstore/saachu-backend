@@ -40,6 +40,15 @@ export class DispatchOrder {
   @Column({ name: 'created_by', type: 'int', nullable: true })
   createdBy: number | null;
 
+  @Column({ name: 'packed_by', type: 'int', nullable: true })
+  packedBy: number | null;
+
+  @Column({ name: 'packed_at', type: 'timestamptz', nullable: true })
+  packedAt: Date | null;
+
+  @Column({ name: 'dispatched_by', type: 'int', nullable: true })
+  dispatchedBy: number | null;
+
   @Column({ name: 'transporter_name', length: 255, nullable: true })
   transporterName: string | null;
 
