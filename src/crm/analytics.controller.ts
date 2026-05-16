@@ -79,4 +79,10 @@ export class AnalyticsController {
   getResponseBuckets(@Request() req) {
     return this.analyticsService.getResponseBuckets(req.user);
   }
+
+  @Get('source-roi')
+  @RequirePermission('crm.analytics.team')
+  getSourceROI(@Request() req) {
+    return this.analyticsService.getSourceROI(req.user);
+  }
 }

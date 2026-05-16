@@ -27,18 +27,28 @@ export interface DecisionContext {
 }
 
 const SOURCE_SCORES: Record<string, number> = {
-  INDIAMART: 30,
-  DIRECT:    28,
-  META:      25,
-  GOOGLE:    22,
-  LINKEDIN:  22,
-  WHATSAPP:  20,
-  SHOPIFY:   15,
+  // High-trust manual sources (physical/relationship context)
+  OLD_CUSTOMER:     38,
+  REFERRAL:         35,
+  WALK_IN:          32,
+  EXHIBITION:       30,
+  FIELD_VISIT:      30,
+  DEALER_REFERENCE: 28,
+  BUSINESS_CARD:    25,
+  IMPORTED:         18,
+  // Digital / inbound sources
+  INDIAMART:        30,
+  DIRECT:           28,
+  META:             25,
+  GOOGLE:           22,
+  LINKEDIN:         22,
+  WHATSAPP:         20,
+  SHOPIFY:          15,
   // Legacy keys — kept so un-migrated DB rows still score correctly
-  MANUAL:      28,  // maps to DIRECT score
-  META_ADS:    25,
-  GOOGLE_ADS:  22,
-  DIRECT_CALL: 28,
+  MANUAL:           28,
+  META_ADS:         25,
+  GOOGLE_ADS:       22,
+  DIRECT_CALL:      28,
 };
 
 const PRIORITY_BONUS: Record<string, number> = {
@@ -48,18 +58,28 @@ const PRIORITY_BONUS: Record<string, number> = {
 };
 
 const SOURCE_LABELS: Record<string, string> = {
-  INDIAMART: 'IndiaMart',
-  META:      'Meta Ads',
-  GOOGLE:    'Google Ads',
-  LINKEDIN:  'LinkedIn',
-  SHOPIFY:   'Shopify',
-  WHATSAPP:  'WhatsApp',
-  DIRECT:    'Direct',
+  // Digital sources — business-friendly names for telecaller scripts
+  INDIAMART:        'IndiaMart',
+  META:             'Facebook',
+  GOOGLE:           'Google',
+  LINKEDIN:         'LinkedIn',
+  SHOPIFY:          'our website',
+  WHATSAPP:         'WhatsApp',
+  DIRECT:           'Direct',
+  // Manual high-trust sources
+  WALK_IN:          'Walk-In',
+  REFERRAL:         'Reference',
+  EXHIBITION:       'Exhibition',
+  FIELD_VISIT:      'Field Visit',
+  OLD_CUSTOMER:     'Old Customer',
+  DEALER_REFERENCE: 'Dealer Reference',
+  BUSINESS_CARD:    'Business Card',
+  IMPORTED:         'Imported',
   // Legacy keys
-  MANUAL:      'Direct',
-  META_ADS:    'Meta Ads',
-  GOOGLE_ADS:  'Google Ads',
-  DIRECT_CALL: 'Direct',
+  MANUAL:           'Direct',
+  META_ADS:         'Facebook',
+  GOOGLE_ADS:       'Google',
+  DIRECT_CALL:      'Direct',
 };
 
 const URGENCY_WORDS = [
@@ -114,7 +134,7 @@ export class DecisionEngineService {
           urgency: 'HIGH',
           nextStatusOnComplete: LeadStatus.CONTACTED,
           script:
-            `Namaste ${firstName}! I am calling from Saachu regarding your enquiry about ${product} through ${sourceLabel}.\n\n` +
+            `Namaste ${firstName}! I am calling from Hesh Store regarding your enquiry about ${product} through ${sourceLabel}.\n\n` +
             `Please ask:\n` +
             `1. What exactly are you looking for?\n` +
             `2. What is your approximate budget?\n` +
@@ -178,7 +198,7 @@ export class DecisionEngineService {
           urgency: 'LOW',
           nextStatusOnComplete: LeadStatus.CONTACTED,
           script:
-            `Namaste ${firstName}! Hope you are doing well. Calling from Saachu.\n\n` +
+            `Namaste ${firstName}! Hope you are doing well. Calling from Hesh Store.\n\n` +
             `We have new options for ${product} that might interest you. Do you have 2 minutes?\n\n` +
             `If open: Restart discovery conversation.\n` +
             `If busy: "Can I send you the details on WhatsApp?"`,

@@ -9,6 +9,10 @@ export enum NoteType {
   EMAIL    = 'EMAIL',
   WHATSAPP = 'WHATSAPP',
   GENERAL  = 'GENERAL',
+  /** Internal/admin notes: automation actions, system events, WA click tracking.
+   *  Stored in lead_notes but EXCLUDED from the Customer Journey timeline.
+   *  Flows into System Audit via activity_log events. */
+  SYSTEM   = 'SYSTEM',
 }
 
 @Entity('lead_notes')

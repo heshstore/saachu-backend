@@ -1,5 +1,6 @@
 import { Controller, Get, Param, Query, Request, ParseIntPipe } from '@nestjs/common';
 import { ActivityService } from './activity.service';
+import { RequirePermission } from '../auth/require-permission.decorator';
 
 @Controller('activity')
 export class ActivityController {
@@ -7,6 +8,7 @@ export class ActivityController {
 
   /** Global activity feed with optional filters */
   @Get()
+  @RequirePermission('staff.view')
   getGlobal(
     @Query('module')      module?: string,
     @Query('entity_type') entity_type?: string,
@@ -31,6 +33,7 @@ export class ActivityController {
 
   /** Timeline for a specific entity (e.g. lead:42, job:7) */
   @Get('entity/:type/:id')
+  @RequirePermission('lead.view')
   getEntityTimeline(
     @Param('type')            entityType: string,
     @Param('id', ParseIntPipe) entityId:  number,
@@ -45,6 +48,7 @@ export class ActivityController {
 
   /** Activity log for a specific user */
   @Get('user/:id')
+  @RequirePermission('staff.view')
   getUserActivity(
     @Param('id', ParseIntPipe) userId: number,
     @Query('page')             page?: string,

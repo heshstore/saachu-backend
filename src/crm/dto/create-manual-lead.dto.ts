@@ -7,33 +7,35 @@ import { LeadSource, LeadPriority } from '../entities/lead.entity';
 import { LEGACY_SOURCE_MAP } from './create-lead.dto';
 
 /**
- * Strict DTO for human-entered leads via POST /crm/leads.
- * Enforces all required fields per CRM spec. Use CreateLeadDto for
- * internal service calls and webhook integrations where fields may be absent.
+ * DTO for human-entered leads via POST /crm/leads.
+ * Phone is optional — walk-in, exhibition, business card, and referral leads
+ * often lack a mobile number at time of entry. The quality engine marks these
+ * PARTIAL and skips telecaller auto-assignment until a phone is enriched later.
  */
 export class CreateManualLeadDto {
   @IsNotEmpty()
   @IsString()
   name: string;
 
-  @IsNotEmpty()
+  /** Optional — manual leads (walk-in, referral, business card) may not have a mobile yet. */
+  @IsOptional()
   @IsString()
   @Matches(/^(\+\d{10,15}|\d{10})$/, {
     message: 'Phone must be a 10-digit number or E.164 format (e.g. +919876543210)',
   })
-  phone: string;
+  phone?: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  city: string;
+  city?: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  country: string;
+  country?: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   @IsString()
-  product_interest: string;
+  product_interest?: string;
 
   /** Accepts legacy values (MANUAL, META_ADS, etc.) and normalises them to canonical enum. */
   @Transform(({ value }) => LEGACY_SOURCE_MAP[value] ?? value)

@@ -237,6 +237,23 @@ export class ActivityService {
     });
   }
 
+  @OnEvent('crm.lead.followup.created')
+  onFollowupCreated(e: { lead_id: number; lead_name: string; due_date: string; note: string | null; user_id: number | null; user_name: string | null }): void {
+    const dueStr = new Date(e.due_date).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Kolkata' });
+    void this.logActivity({
+      module:               'CRM',
+      entity_type:          'lead',
+      entity_id:            e.lead_id,
+      action:               'FOLLOWUP_CREATED',
+      title:                `Callback scheduled for ${dueStr}`,
+      description:          e.note ?? null,
+      source:               'USER',
+      performed_by_user_id: e.user_id,
+      performed_by_name:    e.user_name,
+      severity:             'INFO',
+    });
+  }
+
   @OnEvent('crm.lead.followup.completed')
   onFollowupCompleted(e: { lead_id: number; followup_id: number; by_user_id: number; by_user_name: string }): void {
     void this.logActivity({
@@ -263,6 +280,60 @@ export class ActivityService {
       source:               'USER',
       performed_by_user_id: e.by_user_id,
       performed_by_name:    e.by_user_name,
+      severity:             'INFO',
+    });
+  }
+
+  @OnEvent('crm.lead.automation.toggled')
+  onAutomationToggled(e: {
+    lead_id: number; action: string; reason: string | null;
+    snooze_until?: string; user_id: number; user_name: string | null;
+  }): void {
+    const titleMap: Record<string, string> = {
+      PAUSED:  'Automation paused',
+      RESUMED: 'Automation resumed',
+      SNOOZED: `Automation snoozed until ${e.snooze_until ?? '?'}`,
+    };
+    void this.logActivity({
+      module:               'CRM',
+      entity_type:          'lead',
+      entity_id:            e.lead_id,
+      action:               `AUTOMATION_${e.action}`,
+      title:                titleMap[e.action] ?? `Automation ${e.action.toLowerCase()}`,
+      description:          e.reason ? `Reason: ${e.reason}` : null,
+      source:               'USER',
+      performed_by_user_id: e.user_id,
+      performed_by_name:    e.user_name,
+      severity:             'INFO',
+    });
+  }
+
+  @OnEvent('crm.lead.action_logged')
+  onActionLogged(e: { lead_id: number; lead_name: string; user_id: number | null; user_name: string | null }): void {
+    void this.logActivity({
+      module:               'CRM',
+      entity_type:          'lead',
+      entity_id:            e.lead_id,
+      action:               'CALL_LOGGED',
+      title:                `Call outcome logged for ${e.lead_name}`,
+      source:               'USER',
+      performed_by_user_id: e.user_id,
+      performed_by_name:    e.user_name,
+      severity:             'INFO',
+    });
+  }
+
+  @OnEvent('crm.lead.system_note')
+  onSystemNote(e: { lead_id: number; note: string; user_id: number | null; user_name: string | null }): void {
+    void this.logActivity({
+      module:               'CRM',
+      entity_type:          'lead',
+      entity_id:            e.lead_id,
+      action:               'SYSTEM_NOTE',
+      title:                e.note.slice(0, 150),
+      source:               e.user_id ? 'USER' : 'SYSTEM',
+      performed_by_user_id: e.user_id,
+      performed_by_name:    e.user_name,
       severity:             'INFO',
     });
   }
@@ -304,6 +375,155 @@ export class ActivityService {
   }
 
   // ── Orders / Production ───────────────────────────────────────────────────────
+
+  @OnEvent('order.approved')
+  onOrderApproved(e: {
+    orderId: number; order_no?: string;
+    user_id?: number | null; user_name?: string | null; user_role?: string | null;
+  }): void {
+    void this.logActivity({
+      module:               'ORDERS',
+      entity_type:          'order',
+      entity_id:            e.orderId,
+      action:               'ORDER_APPROVED',
+      title:                `Order ${e.order_no ?? e.orderId} approved`,
+      source:               'USER',
+      performed_by_user_id: e.user_id ?? null,
+      performed_by_name:    e.user_name ?? null,
+      performed_by_role:    e.user_role ?? null,
+      severity:             'INFO',
+    });
+  }
+
+  @OnEvent('quotation.converted')
+  onQuotationConverted(e: {
+    quotation_id: number; order_id: number; quotation_no?: string;
+    user_id?: number | null; user_name?: string | null;
+  }): void {
+    void this.logActivity({
+      module:               'QUOTATIONS',
+      entity_type:          'quotation',
+      entity_id:            e.quotation_id,
+      action:               'QUOTATION_CONVERTED',
+      title:                `Quotation ${e.quotation_no ?? e.quotation_id} → Order #${e.order_id}`,
+      source:               'USER',
+      performed_by_user_id: e.user_id ?? null,
+      performed_by_name:    e.user_name ?? null,
+      metadata:             { order_id: e.order_id },
+      severity:             'INFO',
+    });
+  }
+
+  @OnEvent('production.stage.started')
+  onProdStageStarted(e: {
+    stage_id: number; job_id: number; department_name?: string;
+    user_id?: number | null; user_name?: string | null;
+  }): void {
+    void this.logActivity({
+      module:               'PRODUCTION',
+      entity_type:          'production_stage',
+      entity_id:            e.stage_id,
+      action:               'STAGE_STARTED',
+      title:                `Production started — ${e.department_name ?? 'stage'}`,
+      source:               'USER',
+      performed_by_user_id: e.user_id ?? null,
+      performed_by_name:    e.user_name ?? null,
+      metadata:             { job_id: e.job_id },
+      severity:             'INFO',
+    });
+  }
+
+  @OnEvent('production.stage.stopped')
+  onProdStageStopped(e: {
+    stage_id: number; job_id: number; department_name?: string;
+    user_id?: number | null; user_name?: string | null;
+  }): void {
+    void this.logActivity({
+      module:               'PRODUCTION',
+      entity_type:          'production_stage',
+      entity_id:            e.stage_id,
+      action:               'STAGE_STOPPED',
+      title:                `Work stopped — ${e.department_name ?? 'stage'}`,
+      source:               'USER',
+      performed_by_user_id: e.user_id ?? null,
+      performed_by_name:    e.user_name ?? null,
+      metadata:             { job_id: e.job_id },
+      severity:             'INFO',
+    });
+  }
+
+  @OnEvent('production.stage.moved')
+  onProdStageMoved(e: {
+    stage_id: number; job_id: number; department_name?: string;
+    user_id?: number | null; user_name?: string | null;
+  }): void {
+    void this.logActivity({
+      module:               'PRODUCTION',
+      entity_type:          'production_stage',
+      entity_id:            e.stage_id,
+      action:               'STAGE_MOVED',
+      title:                `Handover — ${e.department_name ?? 'next dept'}`,
+      source:               'USER',
+      performed_by_user_id: e.user_id ?? null,
+      performed_by_name:    e.user_name ?? null,
+      metadata:             { job_id: e.job_id },
+      severity:             'INFO',
+    });
+  }
+
+  @OnEvent('dispatch.confirmed')
+  onDispatchConfirmed(e: {
+    id: number; order_id: number; dispatch_number?: string; user_id?: number | null;
+  }): void {
+    void this.logActivity({
+      module:               'DISPATCH',
+      entity_type:          'dispatch_order',
+      entity_id:            e.id,
+      action:               'DISPATCH_CONFIRMED',
+      title:                `Dispatch ${e.dispatch_number ?? e.id} confirmed`,
+      source:               'USER',
+      performed_by_user_id: e.user_id ?? null,
+      metadata:             { order_id: e.order_id },
+      severity:             'INFO',
+    });
+  }
+
+  @OnEvent('service.ticket.closed')
+  onServiceTicketClosed(e: {
+    ticket_id: number; ticket_number?: string;
+    user_id?: number | null; user_name?: string | null;
+  }): void {
+    void this.logActivity({
+      module:               'SERVICE',
+      entity_type:          'service_ticket',
+      entity_id:            e.ticket_id,
+      action:               'TICKET_CLOSED',
+      title:                `Service ticket ${e.ticket_number ?? e.ticket_id} closed`,
+      source:               'USER',
+      performed_by_user_id: e.user_id ?? null,
+      performed_by_name:    e.user_name ?? null,
+      severity:             'INFO',
+    });
+  }
+
+  @OnEvent('payment.recorded')
+  onPaymentRecorded(e: {
+    order_id: number; order_no?: string; amount: number;
+    user_id?: number | null; user_name?: string | null;
+  }): void {
+    void this.logActivity({
+      module:               'ACCOUNTS',
+      entity_type:          'order',
+      entity_id:            e.order_id,
+      action:               'PAYMENT_RECORDED',
+      title:                `Payment ₹${e.amount} recorded${e.order_no ? ` — ${e.order_no}` : ''}`,
+      source:               'USER',
+      performed_by_user_id: e.user_id ?? null,
+      performed_by_name:    e.user_name ?? null,
+      metadata:             { amount: e.amount },
+      severity:             'INFO',
+    });
+  }
 
   @OnEvent('order.created')
   onOrderCreated(e: { order_id: number; order_no: string }): void {

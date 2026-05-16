@@ -13,7 +13,26 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Lead, LeadSource, LeadStatus, LeadPriority, LeadStage } from './entities/lead.entity';
+import { Lead, LeadSource, LeadStatus, LeadPriority, LeadStage, LeadQuality } from './entities/lead.entity';
+
+/**
+ * Manual / high-trust sources where phone is optional.
+ * These represent physical or relationship-based lead captures —
+ * the person's presence or referral already provides trust context.
+ * Leads from these sources are still created even with no phone or email,
+ * but are NOT auto-assigned to telecallers (requires phone for call queue).
+ */
+const MANUAL_TRUST_SOURCES = new Set<LeadSource>([
+  LeadSource.WALK_IN,
+  LeadSource.REFERRAL,
+  LeadSource.EXHIBITION,
+  LeadSource.FIELD_VISIT,
+  LeadSource.OLD_CUSTOMER,
+  LeadSource.DEALER_REFERENCE,
+  LeadSource.BUSINESS_CARD,
+  LeadSource.IMPORTED,
+  LeadSource.DIRECT,
+]);
 import { LeadContext, contextToLabel } from './enums/lead-context.enum';
 import { LogsService, LogAction } from '../logs/logs.service';
 import { LeadNote, NoteType } from './entities/lead-note.entity';
@@ -157,6 +176,91 @@ export class LeadService implements OnModuleInit {
       this.logger.error('Failed to ensure leads.last_salesman_reply_at column', e);
     }
 
+    try {
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_quality  VARCHAR(20)`);
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS quality_score INT`);
+      await this.ds.query(`CREATE INDEX IF NOT EXISTS idx_leads_quality ON leads(lead_quality)`);
+    } catch (e) {
+      this.logger.error('Failed to ensure leads quality columns', e);
+    }
+
+    // Backfill quality classification for existing leads (source-aware)
+    try {
+      await this.ds.query(`
+        UPDATE leads SET
+          lead_quality = CASE
+            WHEN duplicate_flag = true
+              THEN 'DUPLICATE'
+            WHEN is_phone_valid = false AND phone IS NOT NULL
+              THEN 'AUTO_CAPTURED'
+            WHEN phone IS NOT NULL AND email IS NOT NULL
+              THEN 'QUALIFIED'
+            WHEN phone IS NOT NULL OR email IS NOT NULL
+              THEN 'PARTIAL'
+            WHEN source IN ('WALK_IN','REFERRAL','EXHIBITION','FIELD_VISIT',
+                            'OLD_CUSTOMER','DEALER_REFERENCE','BUSINESS_CARD',
+                            'IMPORTED','DIRECT')
+              THEN 'PARTIAL'
+            WHEN product_interest IS NOT NULL
+              THEN 'TRACKING_ONLY'
+            ELSE 'JUNK'
+          END,
+          quality_score = CASE
+            WHEN duplicate_flag = true                        THEN 20
+            WHEN is_phone_valid = false AND phone IS NOT NULL THEN 15
+            WHEN phone IS NOT NULL AND email IS NOT NULL
+              AND source = 'OLD_CUSTOMER'                     THEN 95
+            WHEN phone IS NOT NULL AND email IS NOT NULL
+              AND source = 'REFERRAL'                         THEN 90
+            WHEN phone IS NOT NULL AND email IS NOT NULL      THEN 85
+            WHEN phone IS NOT NULL
+              AND source IN ('OLD_CUSTOMER','REFERRAL')       THEN 75
+            WHEN phone IS NOT NULL                            THEN 60
+            WHEN email IS NOT NULL
+              AND source IN ('WALK_IN','REFERRAL','EXHIBITION','FIELD_VISIT',
+                             'OLD_CUSTOMER','DEALER_REFERENCE','BUSINESS_CARD',
+                             'IMPORTED','DIRECT')             THEN 50
+            WHEN email IS NOT NULL                            THEN 40
+            WHEN source IN ('WALK_IN','REFERRAL','EXHIBITION','FIELD_VISIT',
+                            'OLD_CUSTOMER','DEALER_REFERENCE','BUSINESS_CARD',
+                            'IMPORTED','DIRECT')
+              AND product_interest IS NOT NULL                THEN 25
+            WHEN source IN ('WALK_IN','REFERRAL','EXHIBITION','FIELD_VISIT',
+                            'OLD_CUSTOMER','DEALER_REFERENCE','BUSINESS_CARD',
+                            'IMPORTED','DIRECT')              THEN 20
+            WHEN product_interest IS NOT NULL                 THEN 10
+            ELSE 5
+          END
+        WHERE lead_quality IS NULL
+      `);
+      this.logger.log('[LeadService] Lead quality backfill complete (source-aware)');
+    } catch (e) {
+      this.logger.error('Failed to backfill lead quality', e);
+    }
+
+    try {
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_ref VARCHAR(20)`);
+      await this.ds.query(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_lead_ref ON leads(lead_ref) WHERE lead_ref IS NOT NULL`,
+      );
+      await this.ds.query(`
+        UPDATE leads
+        SET lead_ref = 'LD-' || TO_CHAR(created_at, 'YYYY') || '-' || LPAD(id::text, 6, '0')
+        WHERE lead_ref IS NULL
+      `);
+      this.logger.log('[LeadService] lead_ref column and index ensured');
+    } catch (e) {
+      this.logger.error('Failed to ensure leads.lead_ref column', e);
+    }
+
+    try {
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS automation_snooze_until TIMESTAMPTZ`);
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS automation_snooze_reason TEXT`);
+      this.logger.log('[LeadService] automation snooze columns ensured');
+    } catch (e) {
+      this.logger.error('Failed to ensure automation snooze columns', e);
+    }
+
   }
 
   /** Returns the customer id from customer_phones for the given E.164 phone, or null. */
@@ -288,9 +392,17 @@ export class LeadService implements OnModuleInit {
 
     let assignedTo = dto.assigned_to;
     if (!assignedTo) {
-      assignedTo = await this.assignmentService.getNextAssignee(dto.source) ?? undefined;
-      if (!assignedTo) {
-        this.logger.warn(`No eligible telecaller found for source=${dto.source} — lead will be unassigned`);
+      if (storedPhone) {
+        // Auto-assign to telecaller queue only when a mobile number is present.
+        // No phone = telecaller cannot call the lead → skip round-robin, leave for manual assignment.
+        assignedTo = await this.assignmentService.getNextAssignee(dto.source) ?? undefined;
+        if (!assignedTo) {
+          this.logger.warn(`No eligible telecaller found for source=${dto.source} — lead will be unassigned`);
+        }
+      } else {
+        this.logger.log(
+          `[Assignment] source=${dto.source} — no phone on lead, skipping auto-assign (manual follow-up required)`,
+        );
       }
     }
 
@@ -300,6 +412,23 @@ export class LeadService implements OnModuleInit {
 
     // Link to existing customer if phone is already registered.
     const linkedCustomerId = await this.findCustomerIdByPhone(storedPhone);
+
+    const isDuplicate = dupCount > 0;
+    const isPhoneValid = dto.is_phone_valid !== false; // default true unless explicitly false
+    const { quality, score } = this.computeLeadQuality(
+      storedPhone,
+      dto.email,
+      dto.product_interest,
+      isPhoneValid,
+      isDuplicate,
+      dto.source,
+    );
+
+    // Auto-elevate priority for highest-trust sources if not explicitly set
+    const highTrustSources = new Set([LeadSource.OLD_CUSTOMER, LeadSource.REFERRAL]);
+    if (!dto.lead_priority && highTrustSources.has(dto.source)) {
+      (dto as any).lead_priority = LeadPriority.HIGH;
+    }
 
     const lead = this.leadRepo.create({
       ...dto,
@@ -311,13 +440,15 @@ export class LeadService implements OnModuleInit {
       product_interest: dto.product_interest != null && dto.product_interest !== '' ? sentenceCaseWords(dto.product_interest) : undefined,
       assigned_to: assignedTo,
       created_by: user?.id,
-      duplicate_flag: dupCount > 0,
+      duplicate_flag: isDuplicate,
       idempotency_key: idempotencyKey ?? undefined,
       contextHistory: dto.context ? [dto.context] : [],
       context_history: dto.context ?? undefined,
       customer_id: linkedCustomerId ?? undefined,
       whatsappMessageId: dto.whatsappMessageId,
       hasSerializedId: dto.hasSerializedId ?? false,
+      lead_quality: quality,
+      quality_score: score,
     });
 
     console.log('Saving lead with messageId:', lead.whatsappMessageId);
@@ -379,6 +510,14 @@ export class LeadService implements OnModuleInit {
 
     await this.scheduleFirstFollowUp(saved);
 
+    // Generate permanent lead_ref (LD-2026-000001) — set once on creation, never changed
+    const refYear = new Date(saved.created_at ?? Date.now()).getFullYear();
+    const lead_ref = `LD-${refYear}-${saved.id.toString().padStart(6, '0')}`;
+    try {
+      await this.leadRepo.update(saved.id, { lead_ref });
+      saved.lead_ref = lead_ref;
+    } catch { /* onModuleInit backfill covers any misses on restart */ }
+
     return { lead: saved, warning: dupCount > 0 ? 'duplicate_phone' : undefined };
   }
 
@@ -404,12 +543,23 @@ export class LeadService implements OnModuleInit {
     if (filters.source) q.andWhere('l.source = :source', { source: filters.source });
     if (filters.assigned_to) q.andWhere('l.assigned_to = :at', { at: filters.assigned_to });
     if (filters.search) {
-      q.andWhere('(l.name ILIKE :s OR l.phone ILIKE :s OR l.email ILIKE :s)', {
+      q.andWhere('(l.name ILIKE :s OR l.phone ILIKE :s OR l.email ILIKE :s OR l.lead_ref ILIKE :s)', {
         s: `%${filters.search}%`,
       });
     }
     if (filters.from) q.andWhere('l.created_at >= :from', { from: filters.from });
     if (filters.to) q.andWhere('l.created_at <= :to', { to: filters.to });
+
+    // Quality filter: exact tier when specified; operational-only excludes TRACKING_ONLY/JUNK/DUPLICATE.
+    // NULL quality rows (pre-backfill) are treated as operational (included).
+    if (filters.quality) {
+      q.andWhere('l.lead_quality = :quality', { quality: filters.quality });
+    } else if (filters.operationalOnly === 'true') {
+      q.andWhere(
+        '(l.lead_quality IS NULL OR l.lead_quality NOT IN (:...nonOp))',
+        { nonOp: ['TRACKING_ONLY', 'JUNK', 'DUPLICATE'] },
+      );
+    }
 
     q.orderBy('l.created_at', 'DESC');
     return q.getMany();
@@ -419,23 +569,43 @@ export class LeadService implements OnModuleInit {
     id: number,
     user: any,
     ip?: string,
-  ): Promise<Lead & { activityNotes: LeadNote[]; followups: LeadFollowUp[] }> {
+  ): Promise<Lead & { activityNotes: LeadNote[]; followups: LeadFollowUp[]; journey: any }> {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
     void this.auditService.log(id, user.id, 'VIEWED', undefined, ip);
 
-    const notes = await this.noteRepo.find({
-      where: { lead_id: id },
-      order: { created_at: 'DESC' },
-    });
-    const followups = await this.followUpRepo.find({
-      where: { lead_id: id },
-      order: { due_date: 'ASC' },
-    });
+    const [notes, followups, quotationRows, orderRows, prevLeadRows] = await Promise.all([
+      this.noteRepo.find({ where: { lead_id: id }, order: { created_at: 'DESC' } }),
+      this.followUpRepo.find({ where: { lead_id: id }, order: { due_date: 'ASC' } }),
+      this.ds.query<any[]>(
+        `SELECT id, quotation_no, status, total_amount, created_at FROM quotation WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 10`,
+        [id],
+      ),
+      this.ds.query<any[]>(
+        `SELECT id, order_no, status, total_amount, created_at FROM orders WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 10`,
+        [id],
+      ),
+      lead.customer_id
+        ? this.ds.query<any[]>(
+            `SELECT id, lead_ref, status, stage, source, created_at FROM leads WHERE customer_id = $1 AND id != $2 AND is_active = true ORDER BY created_at DESC LIMIT 10`,
+            [lead.customer_id, id],
+          )
+        : Promise.resolve([]),
+    ]);
 
-    return { ...lead, activityNotes: notes, followups };
+    const totalRevenue = orderRows.reduce((sum: number, o: any) => sum + Number(o.total_amount || 0), 0);
+
+    const journey = {
+      quotations: quotationRows,
+      orders: orderRows,
+      totalRevenue,
+      previousLeads: prevLeadRows,
+      previousLeadsCount: prevLeadRows.length,
+    };
+
+    return { ...lead, activityNotes: notes, followups, journey };
   }
 
   // ── Decision Engine endpoints ────────────────────────────────────────────────
@@ -450,6 +620,13 @@ export class LeadService implements OnModuleInit {
     if (!fullAccessRoles.includes(user?.role)) {
       q.andWhere('(l.assigned_to = :uid OR l.created_by = :uid)', { uid: user.id });
     }
+
+    // Exclude non-actionable quality tiers — telecallers cannot work TRACKING_ONLY/JUNK/DUPLICATE leads.
+    // NULL quality (pre-backfill rows) are treated as operational.
+    q.andWhere(
+      '(l.lead_quality IS NULL OR l.lead_quality NOT IN (:...nonOp))',
+      { nonOp: ['TRACKING_ONLY', 'JUNK', 'DUPLICATE'] },
+    );
 
     q.orderBy('l.created_at', 'DESC');
     const leads = await q.getMany();
@@ -503,6 +680,21 @@ export class LeadService implements OnModuleInit {
 
     if (noteType === NoteType.CALL) {
       void this.auditService.log(id, user.id, 'CALLED', body.note.slice(0, 120), ip);
+      this.eventEmitter.emit('crm.lead.action_logged', {
+        lead_id:   id,
+        lead_name: lead.name,
+        user_id:   user?.id ?? null,
+        user_name: user?.name ?? null,
+      });
+    }
+
+    if (noteType === NoteType.SYSTEM) {
+      this.eventEmitter.emit('crm.lead.system_note', {
+        lead_id: id,
+        note: body.note,
+        user_id: user?.id ?? null,
+        user_name: user?.name ?? null,
+      });
     }
 
     if (body.newStatus && body.newStatus !== lead.status) {
@@ -647,6 +839,14 @@ export class LeadService implements OnModuleInit {
     const saved = await this.followUpRepo.save(fu);
     await this.tryKeywordAdvance(lead, body.note, user);
     void this.auditService.log(leadId, user.id, 'FOLLOWUP_CREATED', `due: ${body.due_date}`, ip);
+    this.eventEmitter.emit('crm.lead.followup.created', {
+      lead_id:   leadId,
+      lead_name: lead.name,
+      due_date:  body.due_date,
+      note:      body.note ?? null,
+      user_id:   user?.id ?? null,
+      user_name: user?.name ?? null,
+    });
     return saved;
   }
 
@@ -677,6 +877,322 @@ export class LeadService implements OnModuleInit {
       .andWhere('f.due_date <= :window', { window })
       .andWhere('l.is_active = true')
       .getMany();
+  }
+
+  /**
+   * Customer Intelligence Match — phone-first, email-fallback.
+   * Returns null when no existing customer is found.
+   * All heavy queries run in parallel via Promise.all.
+   * Called on-demand from LeadDetail/WorkMode only (NOT injected into queue responses).
+   */
+  async getCustomerMatch(id: number, user: any): Promise<Record<string, any> | null> {
+    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    if (!lead) throw new NotFoundException('Lead not found');
+    this.assertAccess(lead, user);
+
+    const em = this.leadRepo.manager;
+
+    let customerId: number | null = null;
+    let matchedBy: 'phone' | 'email' = 'phone';
+    let matchTier: 'EXACT' | 'HIGH' | 'MEDIUM' | 'LOW' = 'LOW';
+
+    // 0. Shortcut: lead.customer_id already set at creation (fastest path)
+    if (lead.customer_id) {
+      customerId = lead.customer_id;
+      matchTier = 'EXACT';
+    }
+
+    // 1. Phone match — generate all normalized formats so we hit regardless of how
+    //    the phone was stored in leads (bare-10 "9884052555") vs customer_phones ("+919884052555").
+    if (!customerId && lead.phone) {
+      const digits = lead.phone.replace(/\D/g, '');
+      const bare10 = digits.slice(-10);
+      // Build de-duplicated set of all plausible stored formats
+      const formats = [...new Set([
+        lead.phone,          // stored as-is in leads
+        bare10,              // bare 10-digit
+        `+91${bare10}`,      // E.164 with +
+        `91${bare10}`,       // E.164 without +
+      ])].filter(Boolean);
+      const ph = formats.map((_, i) => `$${i + 1}`).join(', ');
+
+      // a. customer_phones index (indexed — fast)
+      const cpRows = await em.query(
+        `SELECT cp.customer_id FROM customer_phones cp WHERE cp.phone IN (${ph}) LIMIT 1`,
+        formats,
+      );
+      if (cpRows.length) { customerId = Number(cpRows[0].customer_id); matchTier = 'EXACT'; }
+
+      // b. Direct mobile1 fallback — covers customers created before the phone registry
+      if (!customerId) {
+        const c1Rows = await em.query(
+          `SELECT id FROM customer WHERE mobile1 IN (${ph}) LIMIT 1`,
+          formats,
+        );
+        if (c1Rows.length) { customerId = Number(c1Rows[0].id); matchTier = 'HIGH'; }
+      }
+
+      // c. Digit-normalized fallback — covers phones stored with spaces/dashes/country code
+      //    Extracts last 10 digits from stored mobile1 and compares (no index, but LIMIT 1 is fast)
+      //    Uses [^0-9] instead of \D — PostgreSQL POSIX regex doesn't support Perl shorthands
+      if (!customerId) {
+        const c2Rows = await em.query(
+          `SELECT id FROM customer
+           WHERE RIGHT(REGEXP_REPLACE(mobile1, '[^0-9]', '', 'g'), 10) = $1
+             AND mobile1 IS NOT NULL
+           LIMIT 1`,
+          [bare10],
+        );
+        if (c2Rows.length) { customerId = Number(c2Rows[0].id); matchTier = 'HIGH'; }
+      }
+    }
+
+    // 2. Email fallback — lowercase exact match only (no fuzzy, no partial)
+    if (!customerId && lead.email) {
+      matchedBy = 'email';
+      const rows = await em.query(
+        `SELECT id FROM customer WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+        [lead.email],
+      );
+      if (rows.length) { customerId = Number(rows[0].id); matchTier = 'HIGH'; }
+    }
+
+    console.log('[MATCH DEBUG]', { leadId: id, phone: lead.phone, email: lead.email, customer_id: lead.customer_id, matchedCustomerId: customerId });
+    if (!customerId) return null;
+
+    // 3. Parallel intelligence queries — all touch indexed columns
+    let customerRows: any[], ordersRows: any[], recentProductsRows: any[],
+        financeRows: any[], ticketsRows: any[], amcRows: any[], pendingQuotesRows: any[],
+        channelsRows: any[], salesmenRows: any[], ownershipRows: any[], recentLeadsRows: any[];
+    try {
+      [
+        customerRows,
+        ordersRows,
+        recentProductsRows,
+        financeRows,
+        ticketsRows,
+        amcRows,
+        pendingQuotesRows,
+        channelsRows,
+        salesmenRows,
+        ownershipRows,
+        recentLeadsRows,
+      ] = await Promise.all([
+        em.query(
+          `SELECT id, "companyName", "contactName", mobile1, email, city, "createdAt", "creditLimit" FROM customer WHERE id = $1`,
+          [customerId],
+        ),
+        em.query(
+          `SELECT COUNT(*)::int AS total,
+                  MAX(created_at) AS last_order_date,
+                  COALESCE(SUM(total_amount), 0)::numeric AS total_value,
+                  MAX(order_no) AS last_order_no
+           FROM orders WHERE customer_id = $1 AND status != 'CANCELLED'`,
+          [customerId],
+        ),
+        em.query(
+          `SELECT DISTINCT oi.item_name
+           FROM order_item oi
+           JOIN orders o ON o.id = oi."orderId"
+           WHERE o.customer_id = $1
+             AND o.created_at > NOW() - INTERVAL '1 year'
+             AND oi.item_name IS NOT NULL
+           ORDER BY oi.item_name LIMIT 5`,
+          [customerId],
+        ),
+        em.query(
+          `SELECT COALESCE(SUM(outstanding_amount), 0)::numeric AS outstanding,
+                  COALESCE(SUM(CASE WHEN status = 'OVERDUE' THEN outstanding_amount ELSE 0 END), 0)::numeric AS overdue
+           FROM customer_receivables WHERE customer_id = $1 AND status != 'PAID'`,
+          [customerId],
+        ),
+        em.query(
+          `SELECT COUNT(*)::int AS open_tickets
+           FROM service_tickets WHERE customer_id = $1 AND status NOT IN ('RESOLVED','CLOSED','CANCELLED')`,
+          [customerId],
+        ),
+        em.query(
+          `SELECT COUNT(*)::int AS active_amc FROM amc_contracts WHERE customer_id = $1 AND status = 'ACTIVE'`,
+          [customerId],
+        ),
+        em.query(
+          `SELECT COUNT(*)::int AS pending FROM quotation WHERE customer_id = $1 AND status IN ('DRAFT','GENERATED')`,
+          [customerId],
+        ),
+        // distinct lead sources → channels array
+        em.query(
+          `SELECT DISTINCT source FROM leads WHERE customer_id = $1 AND source IS NOT NULL`,
+          [customerId],
+        ),
+        // all salesmen who touched this customer across leads / quotations / orders
+        em.query(
+          `SELECT DISTINCT u.id, u.name, u.role
+           FROM (
+             SELECT assigned_to AS uid FROM leads WHERE customer_id = $1 AND assigned_to IS NOT NULL
+             UNION
+             SELECT salesman_id FROM quotation WHERE customer_id = $1 AND salesman_id IS NOT NULL
+             UNION
+             SELECT salesman_id FROM orders WHERE customer_id = $1 AND salesman_id IS NOT NULL
+           ) t
+           JOIN "user" u ON u.id = t.uid`,
+          [customerId],
+        ),
+        // latest revenue-generating interaction for ownership risk calculation
+        em.query(
+          `SELECT salesman_id, salesman_name, source_type, event_date FROM (
+             SELECT o.salesman_id, u.name AS salesman_name, 'ORDER' AS source_type, o.created_at AS event_date
+             FROM orders o
+             LEFT JOIN "user" u ON u.id = o.salesman_id
+             WHERE o.customer_id = $1 AND o.salesman_id IS NOT NULL AND o.status != 'CANCELLED'
+             UNION ALL
+             SELECT q.salesman_id, u.name AS salesman_name, 'QUOTATION' AS source_type, q.created_at AS event_date
+             FROM quotation q
+             LEFT JOIN "user" u ON u.id = q.salesman_id
+             WHERE q.customer_id = $1 AND q.salesman_id IS NOT NULL
+           ) combined
+           ORDER BY event_date DESC LIMIT 1`,
+          [customerId],
+        ),
+        // recent leads linked to this customer (for context panel)
+        em.query(
+          `SELECT id, status, stage, source, created_at FROM leads
+           WHERE customer_id = $1 AND is_active = true
+           ORDER BY created_at DESC LIMIT 5`,
+          [customerId],
+        ),
+      ]);
+    } catch (e) {
+      console.error('[CUSTOMER MATCH ERROR] intelligence query failed for customerId', customerId, e);
+      throw e;
+    }
+
+    if (!customerRows.length) return null;
+    const c = customerRows[0];
+
+    const totalOrders      = Number(ordersRows[0]?.total    ?? 0);
+    const totalValue       = Number(ordersRows[0]?.total_value ?? 0);
+    const outstanding      = Number(financeRows[0]?.outstanding ?? 0);
+    const overdue          = Number(financeRows[0]?.overdue ?? 0);
+    const openTickets      = Number(ticketsRows[0]?.open_tickets ?? 0);
+    const activeAmc        = Number(amcRows[0]?.active_amc ?? 0);
+    const pendingQuotations = Number(pendingQuotesRows[0]?.pending ?? 0);
+    const lastOrderDate: string | null = ordersRows[0]?.last_order_date ?? null;
+    const daysSinceLastOrder = lastOrderDate
+      ? Math.floor((Date.now() - new Date(lastOrderDate).getTime()) / 86_400_000)
+      : null;
+
+    // Relationship flags — computed from live business data, no separate tables
+    const flags: string[] = [];
+    if (totalOrders >= 1)                                            flags.push('REPEAT_CUSTOMER');
+    if (totalValue >= 100_000)                                       flags.push('HIGH_VALUE');
+    if (overdue > 0)                                                 flags.push('PAYMENT_OVERDUE');
+    if (activeAmc > 0)                                               flags.push('AMC_ACTIVE');
+    if (openTickets > 0)                                             flags.push('SERVICE_RISK');
+    if (daysSinceLastOrder !== null && daysSinceLastOrder > 180)     flags.push('INACTIVE_CUSTOMER');
+    if (totalOrders >= 4)                                            flags.push('FREQUENT_BUYER');
+
+    // Identity confidence — how certain we are this is the right customer
+    const identity_confidence = matchTier;
+
+    // Channels — lead sources that brought this customer in
+    const channels: string[] = channelsRows.map((r: any) => r.source as string);
+
+    // Salesmen who've handled this customer
+    const salesmen = salesmenRows.map((r: any) => ({ id: Number(r.id), name: r.name, role: r.role }));
+
+    // Ownership risk — compare the lead's current assignee vs the last revenue-generating salesman
+    const ownershipRow = ownershipRows[0] ?? null;
+    let ownershipRisk: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH' = 'NONE';
+    let ownershipWarning: string | null = null;
+    if (ownershipRow) {
+      const daysSinceOwnership = ownershipRow.event_date
+        ? Math.floor((Date.now() - new Date(ownershipRow.event_date).getTime()) / 86_400_000)
+        : null;
+      const sameOwner = lead.assigned_to && Number(lead.assigned_to) === Number(ownershipRow.salesman_id);
+      if (!sameOwner) {
+        if (daysSinceOwnership !== null && daysSinceOwnership <= 30) {
+          ownershipRisk = 'HIGH';
+          ownershipWarning = `Last ${ownershipRow.source_type.toLowerCase()} was handled by ${ownershipRow.salesman_name} ${daysSinceOwnership}d ago — confirm before proceeding.`;
+        } else if (daysSinceOwnership !== null && daysSinceOwnership <= 90) {
+          ownershipRisk = 'MEDIUM';
+          ownershipWarning = `Previously engaged by ${ownershipRow.salesman_name} — check with them before converting.`;
+        } else {
+          ownershipRisk = 'LOW';
+          ownershipWarning = `Previous salesman: ${ownershipRow.salesman_name}.`;
+        }
+      }
+    }
+
+    // Customer health score — weighted penalty model
+    let healthScore = 100;
+    if (overdue > 0)                                                        healthScore -= 30;
+    if (openTickets > 0)                                                    healthScore -= 20;
+    if (daysSinceLastOrder !== null && daysSinceLastOrder > 180)            healthScore -= 25;
+    if (pendingQuotations === 0 && totalOrders === 0)                       healthScore -= 15;
+    const healthGrade =
+      healthScore >= 80 ? 'EXCELLENT' :
+      healthScore >= 60 ? 'GOOD' :
+      healthScore >= 40 ? 'RISK' : 'CRITICAL';
+
+    return {
+      matched: true,
+      matchedBy,
+      identity_confidence,
+      customer: {
+        id: customerId,
+        companyName: c.companyName,
+        contactName: c.contactName,
+        mobile1: c.mobile1,
+        email: c.email,
+        city: c.city,
+        createdAt: c.createdAt,
+        creditLimit: Number(c.creditLimit ?? 0),
+      },
+      commercial: {
+        totalOrders,
+        totalValue,
+        lastOrderDate,
+        lastOrderNo: ordersRows[0]?.last_order_no ?? null,
+        pendingQuotations,
+        recentProducts: recentProductsRows.map((r: any) => r.item_name as string),
+      },
+      finance: {
+        outstanding,
+        overdue,
+        paymentDiscipline: overdue === 0 ? 'GOOD'
+          : overdue / Math.max(outstanding, 1) > 0.5 ? 'POOR'
+          : 'FAIR',
+      },
+      service: {
+        openTickets,
+        activeAmc,
+        daysSinceLastOrder,
+      },
+      flags,
+      channels,
+      salesmen,
+      ownership: {
+        salesman_id: ownershipRow?.salesman_id ?? null,
+        userName: ownershipRow?.salesman_name ?? null,
+        sourceType: ownershipRow?.source_type ?? null,
+        daysAgo: ownershipRow?.event_date
+          ? Math.floor((Date.now() - new Date(ownershipRow.event_date).getTime()) / 86_400_000)
+          : null,
+        risk: ownershipRisk,
+        warning: ownershipWarning,
+      },
+      health: {
+        score: healthScore,
+        grade: healthGrade,
+      },
+      recentLeads: recentLeadsRows.map((r: any) => ({
+        id: r.id,
+        status: r.status,
+        stage: r.stage,
+        source: r.source,
+        createdAt: r.created_at,
+      })),
+    };
   }
 
   async checkConvert(id: number, user: any): Promise<any> {
@@ -904,6 +1420,15 @@ export class LeadService implements OnModuleInit {
     const normalizedPhone = phoneIsReal ? normalizePhone(payload.phone ?? '') : 'unknown';
     const resolvedPhone   = phoneIsReal && normalizedPhone !== 'unknown' ? normalizedPhone : undefined;
 
+    // ── Quality firewall: no contact info → analytics only, not CRM ──────────────
+    if (!resolvedPhone && !rawEmail) {
+      this.logger.log(
+        `[LeadQuality] Anonymous Shopify click (no phone, no email) → analytics only. action=${payload.action ?? 'unknown'}`,
+      );
+      await this.storeAsAnalyticsEvent(payload);
+      return { ok: true }; // no leadId — not a CRM lead
+    }
+
     const leadData: CreateLeadDto = {
       name:              rawName    || undefined,
       phone:             resolvedPhone,
@@ -966,7 +1491,7 @@ export class LeadService implements OnModuleInit {
       this.logger.log(`Shopify lead id=${lead.id} external_id=${externalId}`);
       if (!phoneIsReal) {
         try {
-          await this.addNote(lead.id, { note: 'Phone not provided from Shopify', type: NoteType.GENERAL }, { id: null, role: 'Admin' });
+          await this.addNote(lead.id, { note: 'Phone not provided from Shopify', type: NoteType.SYSTEM }, { id: null, role: 'Admin' });
         } catch { /* note failure must not block lead creation */ }
       }
       return { ok: true, leadId: lead.id };
@@ -1236,6 +1761,83 @@ export class LeadService implements OnModuleInit {
     return quotation;
   }
 
+  /**
+   * Compute quality tier and score for a new lead before saving.
+   *
+   * Scoring principles:
+   * - DUPLICATE / AUTO_CAPTURED always win regardless of source
+   * - Phone + email → QUALIFIED (any source)
+   * - Phone only → PARTIAL; manual sources get a trust boost
+   * - Email only → PARTIAL; manual sources get a trust boost
+   * - No contact info:
+   *     Manual/high-trust source → PARTIAL (physical context = some trust)
+   *     Digital tracking source  → TRACKING_ONLY or JUNK
+   */
+  private computeLeadQuality(
+    phone: string | null,
+    email: string | undefined,
+    productInterest: string | undefined,
+    isPhoneValid: boolean,
+    isDuplicate: boolean,
+    source?: LeadSource,
+  ): { quality: LeadQuality; score: number } {
+    if (isDuplicate)         return { quality: LeadQuality.DUPLICATE,    score: 20 };
+    if (!isPhoneValid && phone) return { quality: LeadQuality.AUTO_CAPTURED, score: 15 };
+
+    const isManual     = source ? MANUAL_TRUST_SOURCES.has(source) : false;
+    const isOldCust    = source === LeadSource.OLD_CUSTOMER;
+    const isReferral   = source === LeadSource.REFERRAL;
+    const hasProduct   = !!productInterest;
+
+    // Both phone + email → QUALIFIED (trust boost for old customer / referral)
+    if (phone && email) {
+      const boost = isOldCust ? 10 : isReferral ? 5 : 0;
+      return { quality: LeadQuality.QUALIFIED, score: Math.min(100, 85 + boost) };
+    }
+
+    // Phone only → PARTIAL with source-aware score
+    if (phone) {
+      let score = hasProduct ? 65 : 60;
+      if (isOldCust || isReferral) score += 10;
+      else if (isManual)           score += 5;
+      return { quality: LeadQuality.PARTIAL, score: Math.min(100, score) };
+    }
+
+    // Email only → PARTIAL with source-aware score
+    if (email) {
+      let score = hasProduct ? 45 : 40;
+      if (isManual) score += 10;
+      return { quality: LeadQuality.PARTIAL, score: Math.min(100, score) };
+    }
+
+    // No contact info at all
+    // Manual sources: physical/relationship context → PARTIAL (requires manual follow-up)
+    if (isManual) {
+      return { quality: LeadQuality.PARTIAL, score: hasProduct ? 25 : 20 };
+    }
+    // Digital tracking sources: TRACKING_ONLY or JUNK
+    if (hasProduct) return { quality: LeadQuality.TRACKING_ONLY, score: 10 };
+    return             { quality: LeadQuality.JUNK,           score: 5 };
+  }
+
+  /** Store an anonymous Shopify event in analytics_events without creating a CRM lead. */
+  private async storeAsAnalyticsEvent(payload: Record<string, any>): Promise<void> {
+    try {
+      await this.ds.query(
+        `INSERT INTO analytics_events (session_id, event, product, page_url, created_at)
+         VALUES ($1, $2, $3, $4, now())`,
+        [
+          `anon_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          payload.action || payload.event || 'shopify_click',
+          payload.product || payload.product_title || null,
+          payload.page_url || '',
+        ],
+      );
+    } catch (e: any) {
+      this.logger.warn(`storeAsAnalyticsEvent failed: ${e?.message}`);
+    }
+  }
+
   private assertAccess(lead: Lead, user: any) {
     const fullAccess = ['Admin', 'COO', 'Sales Manager'];
     if (fullAccess.includes(user?.role)) return;
@@ -1345,7 +1947,29 @@ export class LeadService implements OnModuleInit {
     return this.getAutomationSettings();
   }
 
-  async setAutomationPaused(id: number, paused: boolean): Promise<Lead> {
+  async getAuditLog(id: number, user: any): Promise<any[]> {
+    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    if (!lead) throw new NotFoundException('Lead not found');
+    this.assertAccess(lead, user);
+    return this.ds.query(
+      `SELECT a.id, a.action, a.detail, a.ip_address, a.created_at,
+              u.name AS user_name, a.user_id
+       FROM lead_audit_logs a
+       LEFT JOIN "user" u ON u.id = a.user_id
+       WHERE a.lead_id = $1
+       ORDER BY a.created_at DESC
+       LIMIT 100`,
+      [id],
+    );
+  }
+
+  async setAutomationPaused(
+    id: number,
+    paused: boolean,
+    reason?: string,
+    user?: any,
+    ip?: string,
+  ): Promise<Lead> {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
     const tags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
@@ -1354,6 +1978,75 @@ export class LeadService implements OnModuleInit {
     } else {
       lead.tags = tags.filter(t => t !== 'automation_off');
     }
-    return this.leadRepo.save(lead);
+    // Always clear snooze state when manually pausing or resuming
+    lead.automation_snooze_until = null;
+    lead.automation_snooze_reason = null;
+    const saved = await this.leadRepo.save(lead);
+
+    // Audit trail
+    if (user?.id) {
+      const action = paused ? 'paused' : 'resumed';
+      const reasonSuffix = reason?.trim() ? ` Reason: ${reason.trim()}.` : '';
+      await this.noteRepo.save(
+        this.noteRepo.create({
+          lead_id: id,
+          note: `Automation ${action}.${reasonSuffix}`,
+          type: NoteType.SYSTEM,
+          created_by: user.id,
+        }),
+      );
+      void this.auditService.log(id, user.id, 'UPDATED', `Automation ${action}${reasonSuffix}`, ip);
+      this.eventEmitter.emit('crm.lead.automation.toggled', {
+        lead_id:   id,
+        action:    paused ? 'PAUSED' : 'RESUMED',
+        reason:    reason?.trim() || null,
+        user_id:   user.id,
+        user_name: user.name ?? null,
+      });
+    }
+    return saved;
+  }
+
+  async snoozeAutomation(
+    id: number,
+    durationMins: number,
+    reason: string,
+    user: any,
+    ip?: string,
+  ): Promise<Lead> {
+    if (!reason?.trim()) throw new BadRequestException('Reason is required to snooze automation');
+    if (!durationMins || durationMins <= 0) throw new BadRequestException('Duration must be a positive number of minutes');
+
+    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    if (!lead) throw new NotFoundException('Lead not found');
+
+    const tags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
+    if (!tags.includes('automation_off')) lead.tags = [...tags, 'automation_off'];
+
+    const snoozeUntil = new Date(Date.now() + durationMins * 60 * 1000);
+    lead.automation_snooze_until = snoozeUntil;
+    lead.automation_snooze_reason = reason.trim();
+    const saved = await this.leadRepo.save(lead);
+
+    // Audit trail
+    const snoozeUntilStr = snoozeUntil.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+    await this.noteRepo.save(
+      this.noteRepo.create({
+        lead_id: id,
+        note: `Automation snoozed until ${snoozeUntilStr}. Reason: ${reason.trim()}.`,
+        type: NoteType.SYSTEM,
+        created_by: user.id,
+      }),
+    );
+    void this.auditService.log(id, user.id, 'UPDATED', `Automation snoozed ${durationMins}min: ${reason.trim()}`, ip);
+    this.eventEmitter.emit('crm.lead.automation.toggled', {
+      lead_id:      id,
+      action:       'SNOOZED',
+      reason:       reason.trim(),
+      snooze_until: snoozeUntilStr,
+      user_id:      user.id,
+      user_name:    user.name ?? null,
+    });
+    return saved;
   }
 }

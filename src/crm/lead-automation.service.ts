@@ -534,7 +534,32 @@ export class LeadAutomationService {
     this.logger.log(`alertUnansweredCustomerReply: ${leads.length} unanswered reply/replies`);
   }
 
-  // ── 9. Payment follow-ups (daily 10 AM) ───────────────────────────────────────
+  // ── 9. Auto-resume snoozed automation (every 30 min) ─────────────────────────
+
+  @Cron('*/30 * * * *')
+  async resumeExpiredSnoozes(): Promise<void> {
+    const result: Array<{ id: number }> = await this.ds.query(
+      `UPDATE leads
+       SET tags                   = (
+             SELECT COALESCE(jsonb_agg(t), '[]'::jsonb)
+             FROM   jsonb_array_elements_text(COALESCE(tags, '[]'::jsonb)) AS t
+             WHERE  t <> 'automation_off'
+           ),
+           automation_snooze_until  = NULL,
+           automation_snooze_reason = NULL,
+           updated_at               = NOW()
+       WHERE automation_snooze_until IS NOT NULL
+         AND automation_snooze_until < NOW()
+         AND is_active = true
+       RETURNING id`,
+    );
+
+    if (result.length) {
+      this.logger.log(`resumeExpiredSnoozes: resumed automation for ${result.length} lead(s)`);
+    }
+  }
+
+  // ── 10. Payment follow-ups (daily 10 AM) ──────────────────────────────────────
 
   @Cron('0 10 * * *')
   async paymentFollowUps(): Promise<void> {
@@ -606,5 +631,204 @@ export class LeadAutomationService {
     } catch (e: any) {
       this.logger.warn(`WA send to phone ${phone} failed: ${e?.message}`);
     }
+  }
+
+  // ── 10. Auto-priority elevation (every 6 hours) ───────────────────────────────
+  // LOW → MEDIUM after 24h no activity; MEDIUM → HIGH after 24h no activity.
+  // Skips TRACKING_ONLY / JUNK / DUPLICATE leads and automation_off leads.
+
+  @Cron('0 */6 * * *')
+  async autoPriorityElevation(): Promise<void> {
+    if (!await this.isSetting('automation.followup_reminders')) return;
+
+    const lowToMedium: Array<{ id: number; name: string; assigned_to: number }> = await this.ds.query(`
+      UPDATE leads
+      SET lead_priority = 'MEDIUM', updated_at = NOW()
+      WHERE lead_priority = 'LOW'
+        AND status NOT IN ('CONVERTED', 'LOST')
+        AND is_active = true
+        AND updated_at < NOW() - INTERVAL '24 hours'
+        AND (lead_quality IS NULL OR lead_quality NOT IN ('TRACKING_ONLY', 'JUNK', 'DUPLICATE'))
+        AND NOT (COALESCE(tags, '[]'::jsonb) ? 'automation_off')
+      RETURNING id, name, assigned_to
+    `);
+
+    const medToHigh: Array<{ id: number; name: string; assigned_to: number }> = await this.ds.query(`
+      UPDATE leads
+      SET lead_priority = 'HIGH', updated_at = NOW()
+      WHERE lead_priority = 'MEDIUM'
+        AND status NOT IN ('CONVERTED', 'LOST')
+        AND is_active = true
+        AND updated_at < NOW() - INTERVAL '24 hours'
+        AND (lead_quality IS NULL OR lead_quality NOT IN ('TRACKING_ONLY', 'JUNK', 'DUPLICATE'))
+        AND NOT (COALESCE(tags, '[]'::jsonb) ? 'automation_off')
+      RETURNING id, name, assigned_to
+    `);
+
+    for (const lead of medToHigh) {
+      if (!lead.assigned_to) continue;
+      await this.notifService.createNotification({
+        user_id:         lead.assigned_to,
+        type:            NotificationType.ACTION,
+        priority:        NotificationPriority.HIGH,
+        title:           'Lead priority auto-elevated to HIGH',
+        message:         `${lead.name} — no activity in 24h. Priority raised automatically.`,
+        entity_type:     'lead',
+        entity_id:       lead.id,
+        cooldownMinutes: 360,
+        is_automated:    true,
+      });
+    }
+
+    const total = (lowToMedium?.length ?? 0) + (medToHigh?.length ?? 0);
+    if (total > 0) {
+      this.logger.log(
+        `autoPriorityElevation: ${lowToMedium?.length ?? 0} LOW→MEDIUM, ${medToHigh?.length ?? 0} MEDIUM→HIGH`,
+      );
+    }
+    await this.recordLastRun('cron.priority_elevation.last_run');
+  }
+
+  // ── 11. Auto-reassign stale leads (every 12 hours) ───────────────────────────
+  // Leads with no activity in 48h are reassigned to the least-loaded active telecaller.
+
+  @Cron('0 */12 * * *')
+  async autoReassignStaleLeads(): Promise<void> {
+    if (!await this.isSetting('automation.followup_reminders')) return;
+
+    const stale: Array<{ id: number; name: string; phone: string; assigned_to: number; source: string }> =
+      await this.ds.query(`
+        SELECT id, name, phone, assigned_to, source
+        FROM leads
+        WHERE status NOT IN ('CONVERTED', 'LOST')
+          AND is_active = true
+          AND assigned_to IS NOT NULL
+          AND updated_at < NOW() - INTERVAL '48 hours'
+          AND (lead_quality IS NULL OR lead_quality NOT IN ('TRACKING_ONLY', 'JUNK', 'DUPLICATE'))
+          AND NOT (COALESCE(tags, '[]'::jsonb) ? 'automation_off')
+          AND NOT (COALESCE(tags, '[]'::jsonb) ? 'auto_reassigned')
+        ORDER BY updated_at ASC
+        LIMIT 20
+      `);
+
+    if (!stale.length) return;
+
+    for (const lead of stale) {
+      try {
+        // Pick least-loaded active telecaller (excluding current assignee)
+        const candidates: Array<{ id: number }> = await this.ds.query(`
+          SELECT u.id
+          FROM "user" u
+          WHERE u.role IN ('Tele calling Executive', 'Territory Manager', 'Field Executive')
+            AND u.is_active = true
+            AND u.id != $1
+          ORDER BY (
+            SELECT COUNT(*) FROM leads l2
+            WHERE l2.assigned_to = u.id
+              AND l2.status NOT IN ('CONVERTED', 'LOST')
+              AND l2.is_active = true
+          ) ASC
+          LIMIT 1
+        `, [lead.assigned_to]);
+
+        if (!candidates.length) continue;
+        const newAssigneeId = candidates[0].id;
+        const oldAssigneeId = lead.assigned_to;
+
+        await this.ds.query(
+          `UPDATE leads
+           SET assigned_to = $1,
+               updated_at  = NOW(),
+               tags        = COALESCE(tags, '[]'::jsonb) || '["auto_reassigned"]'::jsonb
+           WHERE id = $2`,
+          [newAssigneeId, lead.id],
+        );
+
+        await this.notifService.createNotification({
+          user_id:         oldAssigneeId,
+          type:            NotificationType.INFO,
+          priority:        NotificationPriority.LOW,
+          title:           'Lead auto-reassigned',
+          message:         `${lead.name} was reassigned after 48h of no activity.`,
+          entity_type:     'lead',
+          entity_id:       lead.id,
+          cooldownMinutes: 1440,
+          is_automated:    true,
+        });
+
+        await this.notifService.createNotification({
+          user_id:         newAssigneeId,
+          type:            NotificationType.ACTION,
+          priority:        NotificationPriority.HIGH,
+          title:           'Lead reassigned to you',
+          message:         `${lead.name}${lead.phone ? ` · ${lead.phone}` : ''} — transferred from inactive salesman. Follow up now.`,
+          entity_type:     'lead',
+          entity_id:       lead.id,
+          cooldownMinutes: 60,
+          is_automated:    true,
+        });
+
+        await this.safeWaSendToUser(
+          newAssigneeId,
+          `📋 *Lead Reassigned to You*\n` +
+          `Name: ${lead.name}\n` +
+          `Phone: ${lead.phone ?? 'N/A'}\n` +
+          `Source: ${lead.source}\n\n` +
+          `Previous salesman had no activity for 48+ hours. Please follow up immediately.`,
+        );
+      } catch (e: any) {
+        this.logger.warn(`autoReassignStaleLeads: failed for lead ${lead.id}: ${e?.message}`);
+      }
+    }
+
+    this.logger.log(`autoReassignStaleLeads: processed ${stale.length} stale lead(s)`);
+    await this.recordLastRun('cron.auto_reassign.last_run');
+  }
+
+  // ── 12. Reactivation engine (daily 10:30 AM) ─────────────────────────────────
+  // Surfaces converted customers who've had no activity in 90+ days.
+  // Notifies the assigned salesman with a re-engagement opportunity.
+  // Does NOT create new leads — tags the existing lead to track sent notifications.
+
+  @Cron('30 10 * * *')
+  async reactivationEngine(): Promise<void> {
+    const candidates: Array<{ id: number; name: string; phone: string; product_interest: string; assigned_to: number }> =
+      await this.ds.query(`
+        SELECT id, name, phone, product_interest, assigned_to
+        FROM leads
+        WHERE status = 'CONVERTED'
+          AND is_active = true
+          AND assigned_to IS NOT NULL
+          AND updated_at < NOW() - INTERVAL '90 days'
+          AND NOT (COALESCE(tags, '[]'::jsonb) ? 'reactivation_sent')
+        ORDER BY updated_at ASC
+        LIMIT 20
+      `);
+
+    if (!candidates.length) return;
+
+    for (const lead of candidates) {
+      await this.notifService.createNotification({
+        user_id:         lead.assigned_to,
+        type:            NotificationType.ACTION,
+        priority:        NotificationPriority.MEDIUM,
+        title:           'Reactivation opportunity',
+        message:         `${lead.name}${lead.phone ? ` · ${lead.phone}` : ''} — past customer, 90+ days inactive. Reach out for repeat business.`,
+        entity_type:     'lead',
+        entity_id:       lead.id,
+        cooldownMinutes: 10080, // 7 days — one notification per week max
+        is_automated:    true,
+      });
+
+      await this.ds.query(
+        `UPDATE leads
+         SET tags = COALESCE(tags, '[]'::jsonb) || '["reactivation_sent"]'::jsonb
+         WHERE id = $1`,
+        [lead.id],
+      );
+    }
+
+    this.logger.log(`reactivationEngine: ${candidates.length} reactivation opportunity/ies surfaced`);
+    await this.recordLastRun('cron.reactivation.last_run');
   }
 }

@@ -1,5 +1,6 @@
 import { Controller, Get, Query, Request } from '@nestjs/common';
 import { SlaEngineService } from './sla-engine.service';
+import { RequirePermission } from '../auth/require-permission.decorator';
 
 @Controller('sla')
 export class SlaController {
@@ -7,6 +8,7 @@ export class SlaController {
 
   /** Admin view: all SLA events with optional filters */
   @Get()
+  @RequirePermission('staff.view')
   listAll(
     @Query('status')   status?: string,
     @Query('module')   module?: string,
@@ -29,6 +31,7 @@ export class SlaController {
 
   /** Counts by status + module (non-resolved only) */
   @Get('stats')
+  @RequirePermission('staff.view')
   getStats() {
     return this.slaEngine.getStats();
   }

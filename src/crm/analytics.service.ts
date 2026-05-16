@@ -428,6 +428,60 @@ export class AnalyticsService {
     };
   }
 
+  async getSourceROI(user: any) {
+    const where = this.isFullAccess(user)
+      ? `WHERE l.is_active = true AND l.status = 'CONVERTED' AND l.customer_id IS NOT NULL`
+      : `WHERE l.is_active = true AND l.status = 'CONVERTED' AND l.customer_id IS NOT NULL
+         AND (l.assigned_to = $1 OR l.created_by = $1)`;
+    const params = this.isFullAccess(user) ? [] : [user.id];
+
+    // ROI per source: for leads that converted, sum order values via customer_id join.
+    // Note: if the same customer has multiple converted leads, order values may appear
+    // across multiple source rows — this is intentional for channel attribution.
+    const rows = await this.ds.query(`
+      SELECT
+        l.source,
+        COUNT(DISTINCT l.id) AS converted_leads,
+        COUNT(DISTINCT o.id) AS order_count,
+        COALESCE(SUM(o.total_amount), 0) AS total_order_value,
+        COALESCE(SUM(o.total_amount - COALESCE(o.pending_amount, 0)), 0) AS total_paid,
+        COALESCE(AVG(o.total_amount), 0) AS avg_order_value
+      FROM leads l
+      LEFT JOIN orders o ON o.customer_id = l.customer_id
+        AND o.status NOT IN ('CANCELLED')
+      ${where}
+      GROUP BY l.source
+      ORDER BY total_order_value DESC, converted_leads DESC
+    `, params);
+
+    // Also get total lead count per source (all statuses, not just CONVERTED)
+    const allWhere = this.isFullAccess(user)
+      ? `WHERE l.is_active = true`
+      : `WHERE l.is_active = true AND (l.assigned_to = $1 OR l.created_by = $1)`;
+    const totalRows = await this.ds.query(`
+      SELECT source, COUNT(*) AS total_leads
+      FROM leads l
+      ${allWhere}
+      GROUP BY source
+    `, params);
+
+    const totalMap: Record<string, number> = {};
+    for (const r of totalRows) totalMap[r.source] = +r.total_leads;
+
+    return rows.map((r: any) => ({
+      source:          r.source,
+      totalLeads:      totalMap[r.source] ?? 0,
+      convertedLeads:  +r.converted_leads,
+      conversionPct:   (totalMap[r.source] ?? 0) > 0
+        ? Math.round((+r.converted_leads / totalMap[r.source]) * 100)
+        : 0,
+      orderCount:      +r.order_count,
+      totalOrderValue: Math.round(+r.total_order_value),
+      totalPaid:       Math.round(+r.total_paid),
+      avgOrderValue:   +r.avg_order_value ? Math.round(+r.avg_order_value) : 0,
+    }));
+  }
+
   async getResponseBuckets(user: any) {
     const where = this.isFullAccess(user)
       ? `WHERE last_customer_reply_at IS NOT NULL AND is_active = true`

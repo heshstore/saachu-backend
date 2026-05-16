@@ -55,6 +55,18 @@ export class LeadController {
     return this.leadService.logAction(id, body, req.user, req.ip);
   }
 
+  @Get(':id/audit')
+  @RequirePermission('lead.view')
+  getAuditLog(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    return this.leadService.getAuditLog(id, req.user);
+  }
+
+  @Get(':id/customer-match')
+  @RequirePermission('lead.view')
+  getCustomerMatch(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    return this.leadService.getCustomerMatch(id, req.user);
+  }
+
   @Get(':id')
   @RequirePermission('lead.view')
   findOne(@Param('id', ParseIntPipe) id: number, @Request() req) {
@@ -178,8 +190,21 @@ export class LeadController {
   setAutomationPaused(
     @Param('id', ParseIntPipe) id: number,
     @Body('paused') paused: boolean,
+    @Body('reason') reason: string,
+    @Request() req,
   ) {
-    return this.leadService.setAutomationPaused(id, paused);
+    return this.leadService.setAutomationPaused(id, paused, reason, req.user, req.ip);
+  }
+
+  @Post(':id/automation/snooze')
+  @RequirePermission('lead.edit')
+  snoozeAutomation(
+    @Param('id', ParseIntPipe) id: number,
+    @Body('durationMins') durationMins: number,
+    @Body('reason') reason: string,
+    @Request() req,
+  ) {
+    return this.leadService.snoozeAutomation(id, durationMins, reason, req.user, req.ip);
   }
 
   // ── Automation settings (Admin only) ─────────────────────────────────────────
