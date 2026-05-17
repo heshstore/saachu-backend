@@ -8,6 +8,7 @@ import { NotificationService } from '../notifications/notification.service';
 import { NotificationType, NotificationPriority } from '../notifications/notification.entity';
 import { LeadSource, LeadStatus, WorkflowState } from './entities/lead.entity';
 import { LeadAuditService } from './lead-audit.service';
+import { CRM_OPERATIONAL_QUALITY_SQL } from './crm.constants';
 
 export interface LeadCreatedEvent {
   id:              number;
@@ -1118,7 +1119,7 @@ export class LeadAutomationService {
         AND status NOT IN ('CONVERTED', 'LOST')
         AND is_active = true
         AND updated_at < NOW() - INTERVAL '24 hours'
-        AND (lead_quality IS NULL OR lead_quality NOT IN ('TRACKING_ONLY', 'JUNK', 'DUPLICATE'))
+        AND ${CRM_OPERATIONAL_QUALITY_SQL.replace(/lead_quality/g, 'lead_quality')}
         AND NOT (COALESCE(tags, '[]'::jsonb) ? 'automation_off')
       RETURNING id, name, assigned_to
     `);
@@ -1130,7 +1131,7 @@ export class LeadAutomationService {
         AND status NOT IN ('CONVERTED', 'LOST')
         AND is_active = true
         AND updated_at < NOW() - INTERVAL '24 hours'
-        AND (lead_quality IS NULL OR lead_quality NOT IN ('TRACKING_ONLY', 'JUNK', 'DUPLICATE'))
+        AND ${CRM_OPERATIONAL_QUALITY_SQL}
         AND NOT (COALESCE(tags, '[]'::jsonb) ? 'automation_off')
       RETURNING id, name, assigned_to
     `);
@@ -1174,7 +1175,7 @@ export class LeadAutomationService {
           AND is_active = true
           AND assigned_to IS NOT NULL
           AND next_action_due_at < NOW() - INTERVAL '72 hours'
-          AND (lead_quality IS NULL OR lead_quality NOT IN ('TRACKING_ONLY', 'JUNK', 'DUPLICATE'))
+          AND ${CRM_OPERATIONAL_QUALITY_SQL}
           AND NOT (COALESCE(tags, '[]'::jsonb) ? 'automation_off')
           AND NOT (COALESCE(tags, '[]'::jsonb) ? 'assignment_locked')
           -- SEND_QUOTATION with a quotation linked is actively progressing — do not reassign

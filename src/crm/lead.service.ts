@@ -7,6 +7,7 @@ import {
   isShopifyPhoneReal,
   normalizeIdentityField,
   normalizePhoneForIdentity,
+  normalizeRequirement,
   toSentenceCase,
   sentenceCaseWords,
 } from './normalizers/lead-normalizer';
@@ -47,6 +48,7 @@ import { IsNull } from 'typeorm';
 import { LeadAuditService } from './lead-audit.service';
 import { QuotationService } from '../quotation/quotation.service';
 import { DEDUP } from '../config/config';
+import { CRM_FULL_ACCESS_ROLES, CRM_WORKFLOW_BYPASS_ROLES, CRM_NON_OPERATIONAL_QUALITIES, hasOperationalIdentity, hasContactInfo } from './crm.constants';
 
 // Allowed forward-only status transitions.
 // Admin/COO bypass this check entirely.
@@ -59,7 +61,9 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   LOST:       ['CONTACTED'],
 };
 
-const WORKFLOW_BYPASS_ROLES = ['Admin', 'COO'];
+// Re-exported from crm.constants.ts for use inside this file.
+// CRM_WORKFLOW_BYPASS_ROLES intentionally excludes 'Sales Manager' — see crm.constants.ts.
+const WORKFLOW_BYPASS_ROLES = CRM_WORKFLOW_BYPASS_ROLES;
 
 /** Result of LeadService.create() — CRM row or analytics-only routing. */
 export type LeadCreateResult = {
@@ -78,6 +82,20 @@ const PROTECTED_WORKFLOW_STATES = new Set<WorkflowState>([
   WorkflowState.CHASE_QUOTATION,
   WorkflowState.NEGOTIATING,
   WorkflowState.CONVERTED,
+]);
+
+// States where a lead MUST have at least one identity field (phone or email).
+// Terminal/passive states (CONVERTED, LOST, NURTURE) are exempt from the identity gate.
+const OPERATIONAL_WORKFLOW_STATES = new Set<WorkflowState>([
+  WorkflowState.FIRST_CALL,
+  WorkflowState.FOLLOW_UP,
+  WorkflowState.NO_ANSWER_1,
+  WorkflowState.NO_ANSWER_2,
+  WorkflowState.NO_ANSWER_ESC,
+  WorkflowState.CALLBACK_WAIT,
+  WorkflowState.SEND_QUOTATION,
+  WorkflowState.CHASE_QUOTATION,
+  WorkflowState.NEGOTIATING,
 ]);
 
 /**
@@ -99,6 +117,7 @@ function extractPhoneFromText(text: string): string | null {
   const normalized = normalizePhone(selected);
   return normalized && normalized !== 'unknown' ? normalized : null;
 }
+
 
 function generateIdempotencyKey(phone: string | null, dto: Partial<CreateLeadDto>): string | null {
   if (!phone || phone === 'unknown') return null;
@@ -157,7 +176,7 @@ export class LeadService implements OnModuleInit {
   releaseLock(leadId: number, user: any): boolean {
     const lock = this.leadLockMap.get(leadId);
     if (!lock) return true;
-    const isBypass = ['Admin', 'COO', 'Sales Manager'].includes(user?.role);
+    const isBypass = (CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role);
     if (lock.userId !== user?.id && !isBypass) return false;
     this.leadLockMap.delete(leadId);
     return true;
@@ -181,297 +200,23 @@ export class LeadService implements OnModuleInit {
   ) {}
 
   async onModuleInit() {
-    // Verify that pending migrations have been applied. Missing columns cause silent
-    // failures in createFromShopifyClick (errors are swallowed so the Shopify theme
-    // JS gets a clean response). Catching it here makes the problem immediately visible.
+    // Runtime safety probe: missing columns cause silent failures in createFromShopifyClick
+    // (errors are swallowed so the Shopify theme JS gets a clean response). This makes
+    // the problem immediately visible at startup instead.
+    //
+    // All schema migrations and data backfills have been moved to:
+    //   scripts/migrate-crm-phase20-1-startup-cleanup.js
+    // Run that script once per environment after deploying Phase 20.1.
     try {
       await this.ds.query(`SELECT tags FROM leads LIMIT 0`);
     } catch {
       this.logger.error(
-        '┌─────────────────────────────────────────────────────────────┐\n' +
-        '│  MIGRATION REQUIRED — leads.tags column is missing          │\n' +
-        '│  Shopify leads will silently fail until you run:            │\n' +
-        '│    npm run migrate:crm-hardening                            │\n' +
-        '└─────────────────────────────────────────────────────────────┘',
+        '┌─────────────────────────────────────────────────────────────────────┐\n' +
+        '│  MIGRATION REQUIRED — leads.tags column is missing                  │\n' +
+        '│  Run: node scripts/migrate-crm-phase20-1-startup-cleanup.js         │\n' +
+        '└─────────────────────────────────────────────────────────────────────┘',
       );
     }
-
-    // Add is_phone_valid column if it doesn't exist yet (safe — has a default so existing rows are unaffected)
-    try {
-      await this.ds.query(`
-        ALTER TABLE leads
-        ADD COLUMN IF NOT EXISTS is_phone_valid BOOLEAN NOT NULL DEFAULT TRUE
-      `);
-    } catch (e) {
-      this.logger.error('Failed to ensure leads.is_phone_valid column', e);
-    }
-
-    try {
-      await this.ds.query(`
-        ALTER TABLE leads
-        ADD COLUMN IF NOT EXISTS last_customer_reply_at TIMESTAMPTZ
-      `);
-    } catch (e) {
-      this.logger.error('Failed to ensure leads.last_customer_reply_at column', e);
-    }
-
-    try {
-      await this.ds.query(`
-        ALTER TABLE leads
-        ADD COLUMN IF NOT EXISTS last_salesman_reply_at TIMESTAMPTZ
-      `);
-    } catch (e) {
-      this.logger.error('Failed to ensure leads.last_salesman_reply_at column', e);
-    }
-
-    try {
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_quality  VARCHAR(20)`);
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS quality_score INT`);
-      await this.ds.query(`CREATE INDEX IF NOT EXISTS idx_leads_quality ON leads(lead_quality)`);
-    } catch (e) {
-      this.logger.error('Failed to ensure leads quality columns', e);
-    }
-
-    // Backfill quality classification for existing leads (source-aware)
-    try {
-      await this.ds.query(`
-        UPDATE leads SET
-          lead_quality = CASE
-            WHEN duplicate_flag = true
-              THEN 'DUPLICATE'
-            WHEN is_phone_valid = false AND phone IS NOT NULL
-              THEN 'AUTO_CAPTURED'
-            WHEN phone IS NOT NULL AND email IS NOT NULL
-              THEN 'QUALIFIED'
-            WHEN phone IS NOT NULL OR email IS NOT NULL
-              THEN 'PARTIAL'
-            WHEN source IN ('WALK_IN','REFERRAL','EXHIBITION','FIELD_VISIT',
-                            'OLD_CUSTOMER','DEALER_REFERENCE','BUSINESS_CARD',
-                            'IMPORTED','DIRECT')
-              THEN 'PARTIAL'
-            WHEN product_interest IS NOT NULL
-              THEN 'TRACKING_ONLY'
-            ELSE 'JUNK'
-          END,
-          quality_score = CASE
-            WHEN duplicate_flag = true                        THEN 20
-            WHEN is_phone_valid = false AND phone IS NOT NULL THEN 15
-            WHEN phone IS NOT NULL AND email IS NOT NULL
-              AND source = 'OLD_CUSTOMER'                     THEN 95
-            WHEN phone IS NOT NULL AND email IS NOT NULL
-              AND source = 'REFERRAL'                         THEN 90
-            WHEN phone IS NOT NULL AND email IS NOT NULL      THEN 85
-            WHEN phone IS NOT NULL
-              AND source IN ('OLD_CUSTOMER','REFERRAL')       THEN 75
-            WHEN phone IS NOT NULL                            THEN 60
-            WHEN email IS NOT NULL
-              AND source IN ('WALK_IN','REFERRAL','EXHIBITION','FIELD_VISIT',
-                             'OLD_CUSTOMER','DEALER_REFERENCE','BUSINESS_CARD',
-                             'IMPORTED','DIRECT')             THEN 50
-            WHEN email IS NOT NULL                            THEN 40
-            WHEN source IN ('WALK_IN','REFERRAL','EXHIBITION','FIELD_VISIT',
-                            'OLD_CUSTOMER','DEALER_REFERENCE','BUSINESS_CARD',
-                            'IMPORTED','DIRECT')
-              AND product_interest IS NOT NULL                THEN 25
-            WHEN source IN ('WALK_IN','REFERRAL','EXHIBITION','FIELD_VISIT',
-                            'OLD_CUSTOMER','DEALER_REFERENCE','BUSINESS_CARD',
-                            'IMPORTED','DIRECT')              THEN 20
-            WHEN product_interest IS NOT NULL                 THEN 10
-            ELSE 5
-          END
-        WHERE lead_quality IS NULL
-      `);
-      this.logger.log('[LeadService] Lead quality backfill complete (source-aware)');
-    } catch (e) {
-      this.logger.error('Failed to backfill lead quality', e);
-    }
-
-    try {
-      const archived = await this.archiveOrphanTrackingLeads();
-      if (archived > 0) {
-        this.logger.log(`[LeadService] Archived ${archived} tracking-only lead(s) without contact identity`);
-      }
-    } catch (e) {
-      this.logger.error('Failed to archive orphan tracking-only leads', e);
-    }
-
-    try {
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_ref VARCHAR(20)`);
-      await this.ds.query(
-        `CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_lead_ref ON leads(lead_ref) WHERE lead_ref IS NOT NULL`,
-      );
-      await this.ds.query(`
-        UPDATE leads
-        SET lead_ref = 'LD-' || TO_CHAR(created_at, 'YYYY') || '-' || LPAD(id::text, 6, '0')
-        WHERE lead_ref IS NULL
-      `);
-      this.logger.log('[LeadService] lead_ref column and index ensured');
-    } catch (e) {
-      this.logger.error('Failed to ensure leads.lead_ref column', e);
-    }
-
-    try {
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS automation_snooze_until TIMESTAMPTZ`);
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS automation_snooze_reason TEXT`);
-      this.logger.log('[LeadService] automation snooze columns ensured');
-    } catch (e) {
-      this.logger.error('Failed to ensure automation snooze columns', e);
-    }
-
-    // ── Structured workflow memory columns ──────────────────────────────────────
-    try {
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS workflow_state      VARCHAR(30)`);
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_outcome_type   VARCHAR(20)`);
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_objection_type VARCHAR(30)`);
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS call_attempt_count  INT NOT NULL DEFAULT 0`);
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS no_answer_count     INT NOT NULL DEFAULT 0`);
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_contacted_at   TIMESTAMPTZ`);
-      await this.ds.query(`CREATE INDEX IF NOT EXISTS idx_leads_workflow_state ON leads(workflow_state)`);
-      this.logger.log('[LeadService] Workflow memory columns ensured');
-    } catch (e) {
-      this.logger.error('Failed to ensure workflow memory columns', e);
-    }
-
-    // Backfill workflow_state from status for existing leads (runs once — WHERE NULL guard)
-    try {
-      await this.ds.query(`
-        UPDATE leads SET workflow_state = CASE
-          WHEN status = 'NEW'        THEN 'FIRST_CALL'
-          WHEN status = 'CONTACTED'  THEN 'FOLLOW_UP'
-          WHEN status = 'INTERESTED' THEN 'SEND_QUOTATION'
-          WHEN status = 'QUOTATION'  THEN 'CHASE_QUOTATION'
-          WHEN status = 'CONVERTED'  THEN 'CONVERTED'
-          WHEN status = 'LOST'       THEN 'LOST'
-          ELSE 'FIRST_CALL'
-        END
-        WHERE workflow_state IS NULL
-      `);
-      this.logger.log('[LeadService] workflow_state backfill complete');
-    } catch (e) {
-      this.logger.error('Failed to backfill workflow_state', e);
-    }
-
-    // Backfill call/no-answer counters from existing lead_notes (one-time, WHERE 0 guard)
-    try {
-      await this.ds.query(`
-        UPDATE leads l SET
-          call_attempt_count = sub.total_calls,
-          no_answer_count    = sub.no_answers,
-          last_contacted_at  = sub.last_call_at
-        FROM (
-          SELECT
-            lead_id,
-            COUNT(*)                                              AS total_calls,
-            COUNT(*) FILTER (WHERE note LIKE '📵%')             AS no_answers,
-            MAX(created_at)                                       AS last_call_at
-          FROM lead_notes
-          WHERE type = 'CALL'
-          GROUP BY lead_id
-        ) sub
-        WHERE l.id = sub.lead_id
-          AND l.call_attempt_count = 0
-      `);
-      this.logger.log('[LeadService] call_attempt_count / no_answer_count backfill complete');
-    } catch (e) {
-      this.logger.error('Failed to backfill call attempt counters', e);
-    }
-
-    // Backfill last_outcome_type from the most recent CALL note emoji prefix (one-time)
-    try {
-      await this.ds.query(`
-        UPDATE leads l SET last_outcome_type = sub.otype
-        FROM (
-          SELECT DISTINCT ON (lead_id)
-            lead_id,
-            CASE
-              WHEN note LIKE '✅%' THEN 'INTERESTED'
-              WHEN note LIKE '📵%' THEN 'NO_ANSWER'
-              WHEN note LIKE '⏰%' THEN 'LATER'
-              WHEN note LIKE '❌%' THEN 'NOT_INTERESTED'
-              ELSE NULL
-            END AS otype
-          FROM lead_notes
-          WHERE type = 'CALL'
-          ORDER BY lead_id, created_at DESC
-        ) sub
-        WHERE l.id = sub.lead_id
-          AND l.last_outcome_type IS NULL
-          AND sub.otype IS NOT NULL
-      `);
-      this.logger.log('[LeadService] last_outcome_type backfill complete');
-    } catch (e) {
-      this.logger.error('Failed to backfill last_outcome_type', e);
-    }
-
-    // ── SLA orchestration columns ───────────────────────────────────────────────
-    try {
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_action_due_at       TIMESTAMPTZ`);
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS workflow_state_entered_at TIMESTAMPTZ`);
-      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS automation_manually_paused BOOLEAN NOT NULL DEFAULT false`);
-      await this.ds.query(`CREATE INDEX IF NOT EXISTS idx_leads_next_action_due ON leads(next_action_due_at) WHERE next_action_due_at IS NOT NULL`);
-      this.logger.log('[LeadService] SLA orchestration columns ensured');
-    } catch (e) {
-      this.logger.error('Failed to ensure SLA orchestration columns', e);
-    }
-
-    // Backfill workflow_state_entered_at: best-effort from existing timestamps
-    try {
-      await this.ds.query(`
-        UPDATE leads
-        SET workflow_state_entered_at = COALESCE(last_contacted_at, updated_at, created_at)
-        WHERE workflow_state_entered_at IS NULL
-      `);
-      this.logger.log('[LeadService] workflow_state_entered_at backfill complete');
-    } catch (e) {
-      this.logger.error('Failed to backfill workflow_state_entered_at', e);
-    }
-
-    // Backfill next_action_due_at from workflow_state + SLA intervals (one-time, WHERE NULL guard)
-    // Mirrors computeNextActionDue() exactly — any change to SLA values must update both.
-    try {
-      await this.ds.query(`
-        UPDATE leads SET next_action_due_at = CASE
-          WHEN workflow_state = 'FIRST_CALL' AND source IN ('META', 'GOOGLE', 'WHATSAPP', 'SHOPIFY')
-            THEN COALESCE(workflow_state_entered_at, created_at) + INTERVAL '1 hour'
-          WHEN workflow_state = 'FIRST_CALL'
-            THEN COALESCE(workflow_state_entered_at, created_at) + INTERVAL '4 hours'
-          WHEN workflow_state = 'FOLLOW_UP'
-            THEN COALESCE(
-              NULLIF(follow_up_date, '1970-01-01'::timestamptz),
-              COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '24 hours'
-            )
-          WHEN workflow_state = 'NO_ANSWER_1'
-            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '8 hours'
-          WHEN workflow_state = 'NO_ANSWER_2'
-            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '24 hours'
-          WHEN workflow_state = 'NO_ANSWER_ESC'
-            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '48 hours'
-          WHEN workflow_state = 'CALLBACK_WAIT'
-            THEN COALESCE(
-              NULLIF(follow_up_date, '1970-01-01'::timestamptz),
-              COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '24 hours'
-            )
-          WHEN workflow_state = 'SEND_QUOTATION'
-            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '2 hours'
-          WHEN workflow_state = 'CHASE_QUOTATION'
-            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '72 hours'
-          WHEN workflow_state = 'NEGOTIATING'
-            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '48 hours'
-          WHEN workflow_state = 'NURTURE'
-            THEN COALESCE(
-              NULLIF(follow_up_date, '1970-01-01'::timestamptz),
-              COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '30 days'
-            )
-          ELSE NULL
-        END
-        WHERE next_action_due_at IS NULL
-          AND workflow_state NOT IN ('CONVERTED', 'LOST')
-      `);
-      this.logger.log('[LeadService] next_action_due_at backfill complete');
-    } catch (e) {
-      this.logger.error('Failed to backfill next_action_due_at', e);
-    }
-
   }
 
   /** Returns the customer id from customer_phones for the given E.164 phone, or null. */
@@ -487,9 +232,10 @@ export class LeadService implements OnModuleInit {
   // ── Create ──────────────────────────────────────────────────────────────────
 
   async create(dto: CreateLeadDto, user: any): Promise<LeadCreateResult> {
-    console.log(`[DEBUG] Creating lead in DB — source=${dto.source} phone=${dto.phone} user_id=${user?.id ?? 'null'}`);
 
-    // Coerce legacy 'MANUAL' source values from older clients / DB rows
+    // @deprecated Coercion guard for legacy 'MANUAL' source value — no current client sends this.
+    // Safe to remove once confirmed no MANUAL rows exist in production DB.
+    // Check: SELECT COUNT(*) FROM leads WHERE source = 'MANUAL'
     if ((dto.source as string) === 'MANUAL') (dto as any).source = LeadSource.DIRECT;
 
     const identityNorm = this.applyIdentityNormalization(dto);
@@ -502,7 +248,7 @@ export class LeadService implements OnModuleInit {
     if (!storedPhone && !storedEmail) {
       const reason = 'no_phone_no_email';
       this.logger.warn(
-        `[LEAD_BLOCKED] source=${dto.source} reason=${reason} context=${dto.context ?? dto.lead_source_label ?? 'n/a'}`,
+        `[IDENTITY_BLOCKED] source=${dto.source} reason=${reason} context=${dto.context ?? dto.lead_source_label ?? 'n/a'} ts=${new Date().toISOString()}`,
       );
       await this.storeAsAnalyticsEventFromDto(dto, reason);
       return { analyticsOnly: true, blocked: true, reason };
@@ -533,69 +279,89 @@ export class LeadService implements OnModuleInit {
       }
     }
 
-    // ── Strict phone dedup: any existing lead for this phone → enrich, not create
-    // Anonymous leads (no phone) always create a new row.
+    // ── Requirement-aware phone dedup ──────────────────────────────────────────
+    // A new submission is the SAME opportunity only when ALL match:
+    //   1. same phone (already normalised to E.164)
+    //   2. same normalised product_interest (or both empty)
+    //   3. same source/platform
+    //   4. existing lead is still active (is_active = true)
+    // Any mismatch means a NEW opportunity for the same customer — do not merge.
     if (storedPhone) {
       const rows = await this.ds.query<Lead[]>(
         `SELECT * FROM leads
          WHERE phone = $1
            AND is_active = true
-         ORDER BY created_at DESC LIMIT 1`,
+         ORDER BY created_at DESC LIMIT 10`,
         [storedPhone],
       );
 
       if (rows.length > 0) {
-        const existing: Lead = rows[0];
-        const patch: Partial<Lead> = {};
+        const normNewReq = normalizeRequirement(dto.product_interest);
 
-        // Append requirement_note; never overwrite prior content.
-        const mergedNote = [existing.requirement_note, dto.requirement_note]
-          .filter(Boolean)
-          .join('\n---\n') || undefined;
-        if (mergedNote && mergedNote !== existing.requirement_note) {
-          patch.requirement_note = mergedNote;
-        }
+        // Find an active lead that matches on requirement + source.
+        const matchingLead = rows.find((row) => {
+          const normExistingReq = normalizeRequirement(row.product_interest);
+          return normNewReq === normExistingReq && row.source === dto.source;
+        }) ?? null;
 
-        // Fill product_interest only when the existing lead has none.
-        if (!existing.product_interest && dto.product_interest) {
-          patch.product_interest = sentenceCaseWords(dto.product_interest);
-        }
+        if (matchingLead) {
+          const existing: Lead = matchingLead;
+          const patch: Partial<Lead> = {};
 
-        // Accumulate all context labels in contextHistory TEXT[].
-        const mergedHistory = Array.from(new Set([
-          ...(existing.contextHistory || []),
-          ...(dto.context ? [dto.context] : []),
-        ]));
-        if (mergedHistory.length > (existing.contextHistory || []).length) {
-          patch.contextHistory = mergedHistory;
-        }
-
-        // context = latest touch-point only.
-        // context_history = full pipe-separated journey, deduped, newest at end.
-        if (dto.context) {
-          patch.context = dto.context;
-          const historyParts = (existing.context_history || '').split(' | ').map(s => s.trim()).filter(Boolean);
-          if (!historyParts.includes(dto.context)) {
-            patch.context_history = [...historyParts, dto.context].join(' | ');
+          // Append requirement_note; never overwrite prior content.
+          const mergedNote = [existing.requirement_note, dto.requirement_note]
+            .filter(Boolean)
+            .join('\n---\n') || undefined;
+          if (mergedNote && mergedNote !== existing.requirement_note) {
+            patch.requirement_note = mergedNote;
           }
+
+          // Fill product_interest only when the existing lead has none.
+          if (!existing.product_interest && dto.product_interest) {
+            patch.product_interest = sentenceCaseWords(dto.product_interest);
+          }
+
+          // Accumulate all context labels in contextHistory TEXT[].
+          const mergedHistory = Array.from(new Set([
+            ...(existing.contextHistory || []),
+            ...(dto.context ? [dto.context] : []),
+          ]));
+          if (mergedHistory.length > (existing.contextHistory || []).length) {
+            patch.contextHistory = mergedHistory;
+          }
+
+          // context = latest touch-point; context_history = full pipe-separated journey.
+          if (dto.context) {
+            patch.context = dto.context;
+            const historyParts = (existing.context_history || '').split(' | ').map(s => s.trim()).filter(Boolean);
+            if (!historyParts.includes(dto.context)) {
+              patch.context_history = [...historyParts, dto.context].join(' | ');
+            }
+          }
+
+          // Link customer if not already set and a matching customer exists.
+          if (!existing.customer_id) {
+            const linkedCustomerId = await this.findCustomerIdByPhone(storedPhone);
+            if (linkedCustomerId) patch.customer_id = linkedCustomerId;
+          }
+
+          if (Object.keys(patch).length > 0) {
+            await this.leadRepo.update(existing.id, patch);
+          }
+
+          const updated = (await this.leadRepo.findOne({ where: { id: existing.id } })) ?? existing;
+          this.logger.log(
+            `[RETURNING_CUSTOMER] lead=${existing.lead_ref ?? existing.id} phone=${storedPhone} src=${dto.source} req="${normNewReq.slice(0, 30)}" action=enrich` +
+            (Object.keys(patch).length ? ` patched=${Object.keys(patch).join(',')}` : ' no_changes') +
+            ` ts=${new Date().toISOString()}`,
+          );
+          return { lead: updated };
         }
 
-        // Link customer if not already set and a matching customer exists.
-        if (!existing.customer_id) {
-          const linkedCustomerId = await this.findCustomerIdByPhone(storedPhone);
-          if (linkedCustomerId) patch.customer_id = linkedCustomerId;
-        }
-
-        if (Object.keys(patch).length > 0) {
-          await this.leadRepo.update(existing.id, patch);
-        }
-
-        const updated = (await this.leadRepo.findOne({ where: { id: existing.id } })) ?? existing;
+        // Different requirement or different source — create a new opportunity.
         this.logger.log(
-          `Phone dedup: enriched lead id=${existing.id} phone=${storedPhone}` +
-          (Object.keys(patch).length ? ` — patched: ${Object.keys(patch).join(', ')}` : ' — no changes'),
+          `[OPPORTUNITY_CREATED] phone=${storedPhone} src=${dto.source} req="${normNewReq.slice(0, 30)}" existing_leads=${rows.length} ts=${new Date().toISOString()}`,
         );
-        return { lead: updated };
       }
     }
 
@@ -623,14 +389,22 @@ export class LeadService implements OnModuleInit {
       }
     }
 
+    // Count OTHER active leads for this phone — used only for logging (returning customer detection).
+    // isDuplicate is intentionally FALSE here: if we reached this line, the requirement-aware dedup
+    // fell through, meaning this is a DIFFERENT requirement from any existing active lead.
+    // Marking a new opportunity as DUPLICATE would exclude it from getQueue() and findAll()
+    // (operational quality filter), making a valid opportunity invisible to telecallers.
+    // True duplicates (same phone + same requirement + same source) are caught earlier and
+    // handled by enriching the existing lead — they never reach this point.
     const dupCount = storedPhone
       ? await this.leadRepo.count({ where: { phone: storedPhone, is_active: true } })
       : 0;
+    const isReturningCustomer = dupCount > 0; // informational only — NOT used for quality classification
 
     // Link to existing customer if phone is already registered.
     const linkedCustomerId = await this.findCustomerIdByPhone(storedPhone);
 
-    const isDuplicate = dupCount > 0;
+    const isDuplicate = false; // never a true duplicate — see comment on isReturningCustomer above
     const isPhoneValid = dto.is_phone_valid !== false; // default true unless explicitly false
     const { quality, score } = this.computeLeadQuality(
       storedPhone,
@@ -674,8 +448,6 @@ export class LeadService implements OnModuleInit {
       automation_manually_paused: false,
     });
 
-    console.log('Saving lead with messageId:', lead.whatsappMessageId);
-
     // WhatsApp fallback: when the channel is down, telecaller must call the customer
     // manually. Escalate priority and surface a clear instruction note so the lead
     // rises to the top of the queue and the assigned telecaller knows what to do.
@@ -713,12 +485,18 @@ export class LeadService implements OnModuleInit {
       throw err;
     }
 
+    const qualityTag = (quality === 'TRACKING_ONLY' || quality === 'JUNK')
+      ? `[${quality}]`
+      : '[CRM_LEAD_CREATED]';
     this.logger.log(
-      `Lead created id=${saved.id} phone=${storedPhone} source=${dto.source} assigned_to=${assignedTo ?? 'none'}${dupCount > 0 ? ' [DUPLICATE]' : ''}${this._whatsappDown ? ' [WA_FALLBACK]' : ''}`,
+      `${qualityTag} lead=${saved.lead_ref ?? saved.id} src=${dto.source} quality=${quality} phone=${storedPhone ?? 'none'} assigned_to=${assignedTo ?? 'none'}` +
+      (isReturningCustomer ? ' returning_customer=true' : '') +
+      (this._whatsappDown ? ' wa_fallback=true' : '') +
+      ` ts=${new Date().toISOString()}`,
     );
     this.logsService.log(
       LogAction.LEAD_CREATED,
-      { leadId: saved.id, phone: storedPhone, source: dto.source, assigned_to: assignedTo ?? null, duplicate: dupCount > 0 },
+      { leadId: saved.id, phone: storedPhone, source: dto.source, assigned_to: assignedTo ?? null, returning_customer: isReturningCustomer },
       user?.id ?? null,
     );
 
@@ -733,25 +511,44 @@ export class LeadService implements OnModuleInit {
 
     await this.scheduleFirstFollowUp(saved);
 
-    // Generate permanent lead_ref (LD-2026-000001) — set once on creation, never changed
+    // Generate permanent lead_ref — set once on creation, never changed.
+    // LD-YYYY-NNNNNN for operational leads; TRK-YYYY-NNNNNN for tracking/analytics.
+    // Uses independent PostgreSQL sequences — TRK counter never affects LD counter.
     const refYear = new Date(saved.created_at ?? Date.now()).getFullYear();
-    const lead_ref = `LD-${refYear}-${saved.id.toString().padStart(6, '0')}`;
+    const isTrkRef = !hasOperationalIdentity(saved);
+    const seqName  = isTrkRef ? 'lead_ref_trk_seq' : 'lead_ref_ld_seq';
+    const refPrefix = isTrkRef ? 'TRK' : 'LD';
     try {
+      const [{ nextval }] = await this.ds.query(`SELECT nextval('${seqName}') AS nextval`);
+      const lead_ref = `${refPrefix}-${refYear}-${String(nextval).padStart(6, '0')}`;
       await this.leadRepo.update(saved.id, { lead_ref });
       saved.lead_ref = lead_ref;
-    } catch { /* onModuleInit backfill covers any misses on restart */ }
+      this.logger.log(
+        `[LEAD_REF_ASSIGNED] type=${refPrefix} leadId=${saved.id} lead_ref=${lead_ref} source=${saved.source} quality=${saved.lead_quality ?? 'null'} ts=${new Date().toISOString()}`,
+      );
+    } catch (e) {
+      this.logger.error(
+        `[LEAD_REF_FAILED] leadId=${saved.id} seq=${seqName}: ${(e as any)?.message}`,
+      );
+      // Lead still exists without ref — migration script backfills on next run
+    }
 
-    return { lead: saved, warning: dupCount > 0 ? 'duplicate_phone' : undefined };
+    return { lead: saved, warning: isReturningCustomer ? 'returning_customer' : undefined };
   }
 
   // ── List / Detail ────────────────────────────────────────────────────────────
 
   async findAll(filters: any, user: any): Promise<Lead[]> {
     const q = this.leadRepo.createQueryBuilder('l');
-    q.where('l.is_active = true');
 
-    const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
-    if (!fullAccessRoles.includes(user?.role)) {
+    // includeInactive=true is used exclusively by the All Leads historical view.
+    // It must never apply to operational views (Today Tasks, Available Leads).
+    // Restricted to elevated roles — telecallers always see active leads only.
+    const canSeeInactive = filters.includeInactive === 'true' && (CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role);
+    if (!canSeeInactive) {
+      q.where('l.is_active = true');
+    }
+    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role)) {
       // Show leads explicitly assigned/created by this user, plus unowned leads
       // (assigned_to IS NULL AND created_by IS NULL) — these are system-generated
       // webhook/Shopify leads that haven't been assigned yet. They form an open pool
@@ -764,8 +561,7 @@ export class LeadService implements OnModuleInit {
 
     // Manager review queue — surfaces all leads needing human intervention
     if (filters.filter === 'manager-review') {
-      const managerRoles = ['Admin', 'COO', 'Sales Manager'];
-      if (!managerRoles.includes(user?.role)) throw new ForbiddenException('Manager review requires elevated access');
+      if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role)) throw new ForbiddenException('Manager review requires elevated access');
       q.andWhere(
         `(
           l.tags @> '["needs_manager_review"]'
@@ -799,8 +595,10 @@ export class LeadService implements OnModuleInit {
     } else if (filters.operationalOnly === 'true') {
       q.andWhere(
         '(l.lead_quality IS NULL OR l.lead_quality NOT IN (:...nonOp))',
-        { nonOp: ['TRACKING_ONLY', 'JUNK', 'DUPLICATE'] },
+        { nonOp: [...CRM_NON_OPERATIONAL_QUALITIES] },
       );
+      // Identity gate: Available Leads (operational view) only shows contactable leads.
+      q.andWhere('(l.phone IS NOT NULL OR l.email IS NOT NULL)');
     }
 
     q.orderBy('l.created_at', 'DESC');
@@ -821,7 +619,7 @@ export class LeadService implements OnModuleInit {
     const lockInfo = this.getLockInfo(id);
     void this.auditService.log(id, user.id, 'VIEWED', undefined, ip);
 
-    const [notes, followups, quotationRows, orderRows, prevLeadRows] = await Promise.all([
+    const [notes, followups, quotationRows, orderRows, prevLeadRows, siblingOpportunities] = await Promise.all([
       this.noteRepo.find({ where: { lead_id: id }, order: { created_at: 'DESC' } }),
       this.followUpRepo.find({ where: { lead_id: id }, order: { due_date: 'ASC' } }),
       this.ds.query<any[]>(
@@ -838,6 +636,24 @@ export class LeadService implements OnModuleInit {
             [lead.customer_id, id],
           )
         : Promise.resolve([]),
+      // Customer lifetime — all CRM opportunities for the same phone or email, regardless of active/inactive.
+      // Groups same-phone requirements so telecallers see the full customer journey
+      // across separate opportunities (e.g., "Microfiber Cloth" vs "Display Stand" from same customer).
+      (lead.phone || lead.email)
+        ? this.ds.query<any[]>(
+            `SELECT id, lead_ref, status, workflow_state, source, product_interest,
+                    created_at, last_outcome_type, call_attempt_count, is_active
+             FROM leads
+             WHERE id != $1
+               AND (
+                 ($2::varchar IS NOT NULL AND phone = $2)
+                 OR ($3::varchar IS NOT NULL AND email = $3)
+               )
+             ORDER BY created_at DESC
+             LIMIT 20`,
+            [id, lead.phone ?? null, lead.email ?? null],
+          )
+        : Promise.resolve([]),
     ]);
 
     const totalRevenue = orderRows.reduce((sum: number, o: any) => sum + Number(o.total_amount || 0), 0);
@@ -848,9 +664,56 @@ export class LeadService implements OnModuleInit {
       totalRevenue,
       previousLeads: prevLeadRows,
       previousLeadsCount: prevLeadRows.length,
+      // Requirement-separated opportunities from the same customer identity (phone/email).
+      previousOpportunities: siblingOpportunities,
     };
 
     return { ...lead, activityNotes: notes, followups, journey, lockInfo };
+  }
+
+  // ── State observability ──────────────────────────────────────────────────────
+
+  /** Emit a [STATE_CHANGE] log line at every status/workflow_state/stage mutation. */
+  private logStateChange(
+    field: 'status' | 'workflow_state' | 'stage',
+    prev: string | null,
+    next: string,
+    lead: { id: number; lead_ref?: string | null },
+    trigger: string,
+    userId: number | string | null,
+  ): void {
+    this.logger.log(
+      `[STATE_CHANGE] lead=${lead.lead_ref ?? lead.id} field=${field} prev=${prev ?? 'null'} next=${next} trigger=${trigger} userId=${userId ?? 'system'} ts=${new Date().toISOString()}`,
+    );
+  }
+
+  /**
+   * Detect and log logical inconsistencies between the three parallel state systems.
+   * Observe-only — does NOT auto-fix. Called after any state mutation.
+   */
+  private detectStateDivergence(lead: Partial<Lead> & { id: number }, trigger: string): void {
+    const status = lead.status as string | undefined;
+    const wf     = lead.workflow_state as string | undefined;
+    if (!status) return;
+
+    const checks: Array<[boolean, string]> = [
+      [['CONTACTED', 'INTERESTED', 'QUOTATION'].includes(status) && !wf,
+        `status=${status} but workflow_state=null`],
+      [status === 'CONVERTED' && !!wf && wf !== 'CONVERTED',
+        `status=CONVERTED but workflow_state=${wf}`],
+      [status === 'LOST' && !!wf && wf !== 'LOST',
+        `status=LOST but workflow_state=${wf}`],
+      [status === 'NEW' && (wf === 'CONVERTED' || wf === 'LOST'),
+        `status=NEW but workflow_state=${wf}`],
+    ];
+
+    for (const [cond, detail] of checks) {
+      if (cond) {
+        this.logger.warn(
+          `[STATE_DIVERGENCE] lead=${lead.lead_ref ?? lead.id} trigger=${trigger} detail="${detail}"`,
+        );
+      }
+    }
   }
 
   // ── Workflow state mutation helper ──────────────────────────────────────────
@@ -878,6 +741,7 @@ export class LeadService implements OnModuleInit {
       `UPDATE leads SET workflow_state = $1, workflow_state_entered_at = NOW(), next_action_due_at = $3 WHERE id = $2`,
       [to, lead.id, nextDue],
     );
+    this.logStateChange('workflow_state', from, to, lead, 'transitionWorkflowState', user?.id ?? null);
     void this.auditService.log(lead.id, user.id, 'UPDATED', `Workflow: ${from ?? 'none'} → ${to}`, ip);
     return { nextDue };
   }
@@ -904,16 +768,18 @@ export class LeadService implements OnModuleInit {
     // LOST leads can be surfaced via explicit re-engagement filters in future.
     q.andWhere('l.status NOT IN (:...done)', { done: ['CONVERTED', 'LOST'] });
 
-    const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
-    if (!fullAccessRoles.includes(user?.role)) {
+    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role)) {
       q.andWhere('(l.assigned_to = :uid OR l.created_by = :uid)', { uid: user.id });
     }
 
     // Non-actionable quality tiers excluded — NULL quality rows treated as operational.
     q.andWhere(
       '(l.lead_quality IS NULL OR l.lead_quality NOT IN (:...nonOp))',
-      { nonOp: ['TRACKING_ONLY', 'JUNK', 'DUPLICATE'] },
+      { nonOp: [...CRM_NON_OPERATIONAL_QUALITIES] },
     );
+    // Identity gate: Today Tasks must only include leads with at least one contact field.
+    // Leads without phone AND email cannot be called or contacted — no queue slot needed.
+    q.andWhere('(l.phone IS NOT NULL OR l.email IS NOT NULL)');
 
     // No DB ordering — tier engine produces the final sorted output
     const leads = await q.getMany();
@@ -1050,8 +916,9 @@ export class LeadService implements OnModuleInit {
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
-    // Lock enforcement: reject if another user holds an active view lock (Admin/COO bypass)
-    const isBypass = ['Admin', 'COO'].includes(user?.role);
+    // Lock enforcement: reject if another user holds an active view lock.
+    // Uses workflow bypass roles (Admin/COO only) — Sales Manager cannot bypass locks.
+    const isBypass = (CRM_WORKFLOW_BYPASS_ROLES as readonly string[]).includes(user?.role);
     if (!isBypass) {
       const lock = this.getLockInfo(id);
       if (lock && lock.userId !== user.id) {
@@ -1086,6 +953,11 @@ export class LeadService implements OnModuleInit {
 
       // ── Atomic workflow memory mutation ────────────────────────────────────
       // All counter increments use SQL so concurrent calls don't race.
+      if (body.outcomeType && !LeadService.hasIdentity(lead)) {
+        throw new BadRequestException(
+          'Cannot log a call outcome on a lead without a valid phone number or email address.',
+        );
+      }
       if (body.outcomeType) {
         const outcome = body.outcomeType;
         let newWorkflowState: WorkflowState;
@@ -1134,8 +1006,14 @@ export class LeadService implements OnModuleInit {
             WHERE id = $2
           `, [outcome, id]);
 
+          const noAnswerNewCount = (lead.no_answer_count ?? 0) + 1;
+          const noAnswerNewState = noAnswerNewCount === 1 ? WorkflowState.NO_ANSWER_1
+            : noAnswerNewCount === 2 ? WorkflowState.NO_ANSWER_2
+            : WorkflowState.NO_ANSWER_ESC;
+          this.logStateChange('workflow_state', lead.workflow_state ?? null, noAnswerNewState, lead, 'call_outcome_NO_ANSWER', user?.id ?? null);
+
           // Circuit breaker: 5+ unanswered calls → tag + escalate to manager
-          const newNoAnswerCount = (lead.no_answer_count ?? 0) + 1;
+          const newNoAnswerCount = noAnswerNewCount;
           if (newNoAnswerCount >= 5) {
             await this.ds.query(`
               UPDATE leads
@@ -1178,6 +1056,7 @@ export class LeadService implements OnModuleInit {
             id,
             nextDue,
           ]);
+          this.logStateChange('workflow_state', lead.workflow_state ?? null, newWorkflowState, lead, `call_outcome_${outcome}`, user?.id ?? null);
         }
       } else {
         // Unstructured CALL note (free-text, no outcomeType) — only increment attempt count
@@ -1254,6 +1133,7 @@ export class LeadService implements OnModuleInit {
       Object.assign(lead, dto);
       let saved = await this.leadRepo.save(lead);
 
+      this.logStateChange('status', prevStatus, saved.status, saved, 'manual_update', user?.id ?? null);
       void this.auditService.log(id, user.id, 'STATUS_CHANGED', `${prevStatus} → ${saved.status}`, ip);
 
       if (prevStatus !== saved.status) {
@@ -1294,9 +1174,16 @@ export class LeadService implements OnModuleInit {
           const isBypass       = WORKFLOW_BYPASS_ROLES.includes(user?.role);
           const isRegression   = !isBypass && currentWfState && PROTECTED_WORKFLOW_STATES.has(currentWfState) && targetRank < currentRank;
 
-          if (isRegression) {
+          // Identity gate: operational workflow states require phone or email.
+          // Log + skip — the status save succeeds, but the no-identity lead stays
+          // in its current workflow_state rather than advancing operationally.
+          if (OPERATIONAL_WORKFLOW_STATES.has(targetWfState) && !LeadService.hasIdentity(saved)) {
             this.logger.warn(
-              `[update] Workflow regression blocked for lead ${id}: ${currentWfState}(rank ${currentRank}) → ${targetWfState}(rank ${targetRank})`,
+              `[STATE_CHANGE] lead=${saved.lead_ref ?? id} field=workflow_state trigger=update_identity_blocked: no phone/email, keeping ${currentWfState ?? 'null'} instead of ${targetWfState}`,
+            );
+          } else if (isRegression) {
+            this.logger.warn(
+              `[STATE_CHANGE] lead=${saved.lead_ref ?? id} field=workflow_state trigger=update_regression_blocked: ${currentWfState}(rank ${currentRank}) → ${targetWfState}(rank ${targetRank}) blocked`,
             );
           } else {
             const nextDue = computeNextActionDue(targetWfState, saved.source, saved.follow_up_date, new Date());
@@ -1304,11 +1191,13 @@ export class LeadService implements OnModuleInit {
               `UPDATE leads SET workflow_state = $1, workflow_state_entered_at = NOW(), next_action_due_at = $3 WHERE id = $2`,
               [targetWfState, id, nextDue],
             );
+            this.logStateChange('workflow_state', currentWfState, targetWfState, saved, 'status_sync', user?.id ?? null);
             saved.workflow_state = targetWfState;
             saved.workflow_state_entered_at = new Date();
             saved.next_action_due_at = nextDue!;
           }
         }
+        this.detectStateDivergence(saved, 'update');
       }
 
       return saved;
@@ -1334,8 +1223,7 @@ export class LeadService implements OnModuleInit {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
 
-    const managerRoles = ['Admin', 'COO', 'Sales Manager'];
-    if (!managerRoles.includes(user?.role)) {
+    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role)) {
       this.assertAccess(lead, user);
     }
 
@@ -1384,6 +1272,14 @@ export class LeadService implements OnModuleInit {
 
   private static isOperationallyBlocked(lead: Lead): boolean {
     return (lead.no_answer_count ?? 0) >= 5;
+  }
+
+  /**
+   * @deprecated Use hasContactInfo() from crm.constants instead.
+   * Kept for call sites not yet migrated.
+   */
+  static hasIdentity(lead: Lead): boolean {
+    return hasContactInfo(lead);
   }
 
   async addFollowUp(leadId: number, body: { due_date: string; note?: string }, user: any, ip?: string): Promise<LeadFollowUp> {
@@ -1532,7 +1428,6 @@ export class LeadService implements OnModuleInit {
       if (rows.length) { customerId = Number(rows[0].id); matchTier = 'HIGH'; }
     }
 
-    console.log('[MATCH DEBUG]', { leadId: id, phone: lead.phone, email: lead.email, customer_id: lead.customer_id, matchedCustomerId: customerId });
     if (!customerId) return null;
 
     // 3. Parallel intelligence queries — all touch indexed columns
@@ -1957,7 +1852,7 @@ export class LeadService implements OnModuleInit {
     if (newStage === LeadStage.LOST) {
       lead.stage = LeadStage.LOST;
       const saved = await this.leadRepo.save(lead);
-      this.logger.log(`[CRM] Stage: ${currentStage} → ${LeadStage.LOST} (lead=${id} by user=${user.id})`);
+      this.logStateChange('stage', currentStage, LeadStage.LOST, saved, 'updateStage', user?.id ?? null);
       return saved;
     }
 
@@ -1985,8 +1880,10 @@ export class LeadService implements OnModuleInit {
       const prev = saved.stage;
       saved.stage = order[i];
       saved = await this.leadRepo.save({ ...saved });
-      this.logger.log(
-        `[CRM] Stage: ${prev} → ${saved.stage} (lead=${id} by user=${user.id}${i < targetIdx ? ' [auto-step]' : ''})`,
+      this.logStateChange(
+        'stage', prev, saved.stage, saved,
+        i < targetIdx ? 'updateStage_auto_step' : 'updateStage',
+        user?.id ?? null,
       );
     }
 
@@ -2019,8 +1916,6 @@ export class LeadService implements OnModuleInit {
     page_url?: string; lead_type?: string; priority?: string; timestamp?: string;
     tag?: string;
   }): Promise<{ ok: boolean; leadId?: number; error?: string }> {
-    console.log('📥 SERVICE PAYLOAD:', JSON.stringify(payload));
-
     const externalId = generateShopifyExternalId(payload);
 
     const rawName    = (payload.name || '').trim();
@@ -2056,14 +1951,6 @@ export class LeadService implements OnModuleInit {
       },
     };
 
-    console.log('📧 EMAIL:', leadData.email);
-    console.log('🚨 FINAL SANITY CHECK:', {
-      phone:   leadData.phone,
-      email:   leadData.email,
-      product: leadData.product_interest,
-      context: leadData.context,
-    });
-
     // ── Time-based idempotency ────────────────────────────────────────────────
     // Same phone + same product within 30 min → touch updated_at and return.
     // Prevents duplicate CRM entries from repeated button/form interactions.
@@ -2096,7 +1983,6 @@ export class LeadService implements OnModuleInit {
         return { ok: true };
       }
       const lead = created.lead;
-      console.log('LEAD CREATED:', { id: lead.id, phone: lead.phone, source: lead.source });
       this.logger.log(`Shopify lead id=${lead.id} external_id=${externalId}`);
       if (!phoneIsReal) {
         try {
@@ -2145,7 +2031,6 @@ export class LeadService implements OnModuleInit {
     messageId?: string;
     hasSerializedId?: boolean;
   }): Promise<void> {
-    console.log('LEAD SERVICE RECEIVED:', payload);
     try {
       const { messageId } = payload;
       const normalized = normalizePhone(payload.phone ?? '');
@@ -2242,8 +2127,6 @@ export class LeadService implements OnModuleInit {
         whatsappMessageId:  messageId,
         hasSerializedId:    payload.hasSerializedId ?? false,
       };
-
-      console.log('Saving lead with messageId:', dto.whatsappMessageId);
 
       try {
         const created = await this.create(dto, { id: null, role: 'Admin' });
@@ -2439,6 +2322,46 @@ export class LeadService implements OnModuleInit {
   }
 
   /**
+   * One-time cleanup (called from onModuleInit): deactivate leads that entered
+   * operational workflow states without a valid phone or email.
+   * Tags with 'archived_invalid_identity', clears workflow_state and next_action_due_at.
+   * Never deletes data — purely sets is_active = false.
+   */
+  async archiveOperationalLeadsWithNoIdentity(): Promise<number> {
+    const rows: { id: number }[] = await this.ds.query(`
+      UPDATE leads SET
+        is_active             = false,
+        workflow_state        = NULL,
+        next_action_due_at    = NULL,
+        tags = CASE
+          WHEN COALESCE(tags, '[]'::jsonb) ? 'archived_invalid_identity' THEN tags
+          ELSE COALESCE(tags, '[]'::jsonb) || '["archived_invalid_identity"]'::jsonb
+        END,
+        notes = CASE
+          WHEN notes IS NULL OR notes = ''
+            THEN '[System] Archived: operational workflow state reached without valid contact identity.'
+          WHEN notes NOT LIKE '%archived_invalid_identity%'
+            THEN notes || E'\\n[System] Archived: operational workflow state reached without valid contact identity.'
+          ELSE notes
+        END,
+        updated_at = NOW()
+      WHERE is_active = true
+        AND (phone IS NULL OR TRIM(phone) = '' OR LOWER(TRIM(phone)) = 'unknown')
+        AND (email IS NULL OR TRIM(email) = '')
+        AND workflow_state IS NOT NULL
+        AND workflow_state NOT IN ('CONVERTED', 'LOST', 'NURTURE')
+      RETURNING id
+    `);
+    const count = rows?.length ?? 0;
+    if (count > 0) {
+      this.logger.warn(
+        `[LeadService] archiveOperationalLeadsWithNoIdentity: deactivated ${count} lead(s) — no phone/email in operational state`,
+      );
+    }
+    return count;
+  }
+
+  /**
    * Mark active TRACKING_ONLY leads with no phone/email as operationally inactive.
    * Uses existing is_active + tags only — no schema changes.
    */
@@ -2528,8 +2451,7 @@ export class LeadService implements OnModuleInit {
   }
 
   private assertAccess(lead: Lead, user: any) {
-    const fullAccess = ['Admin', 'COO', 'Sales Manager'];
-    if (fullAccess.includes(user?.role)) return;
+    if ((CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role)) return;
     if (lead.assigned_to !== user?.id && lead.created_by !== user?.id) {
       // NotFoundException instead of ForbiddenException intentionally: returning 403 on a valid
       // lead ID confirms the resource exists and its ownership — an enumeration oracle. 404 is

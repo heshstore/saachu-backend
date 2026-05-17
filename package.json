@@ -64,6 +64,8 @@
     "migrate:notifications-v2": "node scripts/migrate-notifications-v2.js",
     "migrate:job-priority-index": "node scripts/migrate-job-priority-index.js",
     "migrate:job-status-priority-index": "node scripts/migrate-job-status-priority-index.js",
+    "migrate:crm-phase20-1-startup-cleanup": "node scripts/migrate-crm-phase20-1-startup-cleanup.js",
+    "migrate:crm-phase21-lead-ref-sequences": "node scripts/migrate-crm-phase21-lead-ref-sequences.js",
     "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {

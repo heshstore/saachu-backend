@@ -1,6 +1,7 @@
 import { Controller, ForbiddenException, Get, Param, ParseIntPipe, Query, Request } from '@nestjs/common';
 import { AnalyticsService } from './analytics.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
+import { CRM_FULL_ACCESS_ROLES } from './crm.constants';
 
 @Controller('crm/analytics')
 export class AnalyticsController {
@@ -89,8 +90,7 @@ export class AnalyticsController {
   @Get('telecaller-metrics')
   @RequirePermission('crm.analytics.all')
   getTelecallerMetrics(@Request() req) {
-    const managerRoles = ['Admin', 'COO', 'Sales Manager'];
-    if (!managerRoles.includes(req.user?.role)) {
+    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)) {
       throw new ForbiddenException('Telecaller metrics require manager access');
     }
     return this.analyticsService.getTelecallerMetrics(req.user);
@@ -125,8 +125,7 @@ export class AnalyticsController {
   @Get('telecaller-effectiveness')
   @RequirePermission('crm.analytics.all')
   getTelecallerEffectiveness(@Request() req) {
-    const managerRoles = ['Admin', 'COO', 'Sales Manager'];
-    if (!managerRoles.includes(req.user?.role)) {
+    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)) {
       throw new ForbiddenException('Telecaller effectiveness requires manager access');
     }
     return this.analyticsService.getTelecallerEffectiveness(req.user);
@@ -136,5 +135,18 @@ export class AnalyticsController {
   @RequirePermission('crm.analytics.team')
   getPipelineLeaks(@Request() req) {
     return this.analyticsService.getPipelineLeaks(req.user);
+  }
+
+  // ── Source health / ingestion reliability ─────────────────────────────────────
+  // Covers ALL leads (including archived/inactive) — full ingestion visibility.
+  // Restricted to Admin/COO/Sales Manager only.
+
+  @Get('source-health')
+  @RequirePermission('crm.analytics.all')
+  getSourceHealth(@Request() req) {
+    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)) {
+      throw new ForbiddenException('Source health requires manager-level access');
+    }
+    return this.analyticsService.getSourceHealth();
   }
 }

@@ -159,6 +159,11 @@ export class Lead {
   @Column({ nullable: true })
   customer_id: number;
 
+  /**
+   * @deprecated Reverse-link not populated by any code path.
+   * Quotations are linked via quotation.lead_id — read quotations via findOne() journey.quotations.
+   * Written only by markConverted() and createQuotation(). Candidate for removal in a future migration.
+   */
   @Column({ nullable: true })
   quotation_id: number;
 
@@ -193,6 +198,13 @@ export class Lead {
   @Column({ type: 'text', nullable: true })
   landing_page: string;
 
+  /**
+   * @deprecated Superseded by lead_quality = 'DUPLICATE'.
+   * Always written as false for new leads since requirement-aware dedup (Phase 19 Step 7)
+   * ensures true phone+requirement duplicates never create new rows.
+   * Legacy rows (pre-Phase 19) may still carry true here.
+   * Removal requires a DB migration — keep until a planned migration cycle.
+   */
   @Column({ default: false })
   duplicate_flag: boolean;
 

@@ -1,13 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { CRM_FULL_ACCESS_ROLES, CRM_OPERATIONAL_QUALITY_SQL } from './crm.constants';
 
 @Injectable()
 export class AnalyticsService {
   constructor(@InjectDataSource() private ds: DataSource) {}
 
   private isFullAccess(user: any) {
-    return ['Admin', 'COO', 'Sales Manager'].includes(user?.role);
+    return (CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role);
   }
 
   async getOverview(user: any) {
@@ -530,9 +531,8 @@ export class AnalyticsService {
   }
 
   // ── Operational lead quality guard ────────────────────────────────────────────
-  // Used by all commercial intelligence queries to exclude non-actionable leads.
-  private static readonly OPERATIONAL_QUALITY_FILTER =
-    `(lead_quality IS NULL OR lead_quality NOT IN ('TRACKING_ONLY', 'JUNK', 'DUPLICATE'))`;
+  // Sourced from crm.constants.ts — single definition for all operational filters.
+  private static readonly OPERATIONAL_QUALITY_FILTER = CRM_OPERATIONAL_QUALITY_SQL;
 
   // ── Part 1: Objection Intelligence ────────────────────────────────────────────
 
@@ -984,6 +984,214 @@ export class AnalyticsService {
       const rank = { HIGH: 0, MEDIUM: 1, LOW: 2 };
       return (rank[a.severity] - rank[b.severity]) || (b.affectedCount - a.affectedCount);
     });
+  }
+
+  // ── Part 7: Source Health Engine ─────────────────────────────────────────────
+  // Covers ALL leads (no is_active filter) — full ingestion picture, not operational view.
+  // Restricted to Admin/COO/Sales Manager at the controller layer.
+
+  private static computeSourceReliability(
+    identityRate: number,
+    noiseRate: number,
+    archivedInvalidCount: number,
+  ): 'HEALTHY' | 'WARNING' | 'CRITICAL' {
+    if (identityRate < 20 || noiseRate > 50 || archivedInvalidCount > 5) return 'CRITICAL';
+    if (identityRate < 60 || noiseRate > 20 || archivedInvalidCount > 0) return 'WARNING';
+    return 'HEALTHY';
+  }
+
+  async getSourceHealth(): Promise<{
+    sources: any[];
+    issues: any[];
+    duplicatePatterns: { suspectedDuplicateCount: number; patterns: any[] };
+  }> {
+    // ── 1. Main per-source aggregation (all leads, including archived) ──────────
+    const sourceRows: any[] = await this.ds.query(`
+      SELECT
+        COALESCE(l.source, 'OTHER')                                          AS source,
+        COUNT(*)                                                              AS total,
+        COUNT(*) FILTER (WHERE l.is_active = true)                           AS active_count,
+        COUNT(*) FILTER (WHERE l.status = 'CONVERTED')                       AS converted_count,
+        COUNT(*) FILTER (WHERE l.status = 'LOST')                            AS lost_count,
+        COUNT(*) FILTER (
+          WHERE COALESCE(l.tags,'[]'::jsonb) @> '["archived_invalid_identity"]'
+        )                                                                     AS archived_invalid_count,
+        COUNT(*) FILTER (WHERE l.lead_quality = 'TRACKING_ONLY')             AS tracking_only_count,
+        COUNT(*) FILTER (WHERE l.lead_quality = 'JUNK')                      AS junk_count,
+        COUNT(*) FILTER (WHERE l.lead_quality = 'DUPLICATE')                 AS duplicate_count,
+        COUNT(*) FILTER (WHERE l.lead_quality = 'AUTO_CAPTURED')             AS auto_captured_count,
+        COUNT(*) FILTER (WHERE l.phone IS NOT NULL OR l.email IS NOT NULL)   AS identified_count,
+        COUNT(*) FILTER (WHERE l.phone IS NOT NULL)                          AS phone_count,
+        COUNT(*) FILTER (WHERE l.email IS NOT NULL)                          AS email_count,
+        ROUND(AVG(
+          EXTRACT(EPOCH FROM (l.updated_at - l.created_at)) / 86400.0
+        ) FILTER (WHERE l.status = 'CONVERTED')::numeric, 1)                 AS avg_days_to_conversion,
+        COUNT(*) FILTER (
+          WHERE l.is_active = true
+            AND COALESCE(l.tags,'[]'::jsonb) @> '["stale_lead"]'
+            AND l.status NOT IN ('CONVERTED','LOST')
+        )                                                                     AS stale_count,
+        COUNT(*) FILTER (
+          WHERE l.is_active = true AND l.workflow_state = 'NO_ANSWER_ESC'
+        )                                                                     AS no_answer_esc_count,
+        COUNT(*) FILTER (
+          WHERE l.is_active = true
+            AND COALESCE(l.tags,'[]'::jsonb) @> '["callback_abuse_risk"]'
+        )                                                                     AS callback_abuse_count
+      FROM leads l
+      GROUP BY COALESCE(l.source, 'OTHER')
+      ORDER BY total DESC
+    `);
+
+    // ── 2. Avg first-response time per source (only identified leads) ───────────
+    const responseRows: any[] = await this.ds.query(`
+      SELECT l.source AS source,
+        ROUND(AVG(
+          EXTRACT(EPOCH FROM (fc.first_call - l.created_at)) / 60.0
+        )::numeric, 1) AS avg_response_min
+      FROM leads l
+      JOIN (
+        SELECT lead_id, MIN(created_at) AS first_call
+        FROM lead_audit_logs
+        WHERE action = 'CALLED'
+        GROUP BY lead_id
+      ) fc ON fc.lead_id = l.id
+      WHERE l.phone IS NOT NULL OR l.email IS NOT NULL
+      GROUP BY l.source
+    `);
+    const responseMap: Record<string, number | null> = {};
+    for (const r of responseRows) {
+      responseMap[r.source] = r.avg_response_min !== null ? +r.avg_response_min : null;
+    }
+
+    // ── 3. Duplicate phone pattern detection ──────────────────────────────────
+    const dupRows: any[] = await this.ds.query(`
+      SELECT
+        phone,
+        COUNT(*)                    AS occurrence_count,
+        COUNT(DISTINCT source)      AS source_count,
+        array_agg(DISTINCT source)  AS sources,
+        MIN(created_at)             AS first_seen,
+        MAX(created_at)             AS last_seen
+      FROM leads
+      WHERE phone IS NOT NULL AND TRIM(phone) != ''
+      GROUP BY phone
+      HAVING COUNT(*) >= 2
+      ORDER BY occurrence_count DESC
+      LIMIT 20
+    `);
+
+    // ── 4. Build enriched source objects + issues ─────────────────────────────
+    const sources = sourceRows.map((r: any) => {
+      const total              = +r.total || 0;
+      const activeCount        = +r.active_count || 0;
+      const convertedCount     = +r.converted_count || 0;
+      const lostCount          = +r.lost_count || 0;
+      const archivedInvalid    = +r.archived_invalid_count || 0;
+      const trackingOnlyCount  = +r.tracking_only_count || 0;
+      const junkCount          = +r.junk_count || 0;
+      const duplicateCount     = +r.duplicate_count || 0;
+      const autoCapturedCount  = +r.auto_captured_count || 0;
+      const identifiedCount    = +r.identified_count || 0;
+      const phoneCount         = +r.phone_count || 0;
+      const emailCount         = +r.email_count || 0;
+      const staleCount         = +r.stale_count || 0;
+      const noAnswerEscCount   = +r.no_answer_esc_count || 0;
+      const callbackAbuseCount = +r.callback_abuse_count || 0;
+
+      const identityRate     = total > 0 ? Math.round((identifiedCount / total) * 100) : 0;
+      const phoneRate        = total > 0 ? Math.round((phoneCount / total) * 100) : 0;
+      const emailRate        = total > 0 ? Math.round((emailCount / total) * 100) : 0;
+      const conversionRate   = total > 0 ? Math.round((convertedCount / total) * 100) : 0;
+      const noiseRate        = total > 0 ? Math.round(((trackingOnlyCount + junkCount) / total) * 100) : 0;
+      const staleRate        = activeCount > 0 ? Math.round((staleCount / activeCount) * 100) : 0;
+      const noAnswerEscRate  = activeCount > 0 ? Math.round((noAnswerEscCount / activeCount) * 100) : 0;
+      const callbackAbuseRate= activeCount > 0 ? Math.round((callbackAbuseCount / activeCount) * 100) : 0;
+
+      const reliability = AnalyticsService.computeSourceReliability(
+        identityRate, noiseRate, archivedInvalid,
+      );
+
+      return {
+        source:              r.source,
+        totalLeadCount:      total,
+        activeLeadCount:     activeCount,
+        convertedLeadCount:  convertedCount,
+        lostLeadCount:       lostCount,
+        archivedInvalidCount: archivedInvalid,
+        trackingOnlyCount,
+        junkCount,
+        duplicateCount,
+        autoCapturedCount,
+        identityRate,
+        phoneRate,
+        emailRate,
+        conversionRate,
+        noiseRate,
+        staleLeadRate:          staleRate,
+        noAnswerEscalationRate: noAnswerEscRate,
+        callbackAbuseRate,
+        avgResponseMinutes:     responseMap[r.source] ?? null,
+        avgDaysToConversion:    r.avg_days_to_conversion !== null ? +r.avg_days_to_conversion : null,
+        reliability,
+      };
+    });
+
+    // ── 5. Generate deterministic issues list ─────────────────────────────────
+    const issues: Array<{ severity: 'CRITICAL'|'WARNING'; source: string; message: string }> = [];
+    for (const s of sources) {
+      if (s.totalLeadCount === 0) continue;
+      if (s.identityRate < 20) {
+        issues.push({ severity: 'CRITICAL', source: s.source,
+          message: `${s.source}: ${s.identityRate}% identity rate — most ingested leads have no phone or email. Webhook field mapping may be broken.` });
+      } else if (s.identityRate < 60) {
+        issues.push({ severity: 'WARNING', source: s.source,
+          message: `${s.source}: low identity rate (${s.identityRate}%) — integration is missing contact fields on many leads.` });
+      }
+      if (s.noiseRate > 50) {
+        issues.push({ severity: 'CRITICAL', source: s.source,
+          message: `${s.source}: ${s.noiseRate}% tracking/junk ratio — platform is generating mostly non-actionable anonymous traffic.` });
+      } else if (s.noiseRate > 20) {
+        issues.push({ severity: 'WARNING', source: s.source,
+          message: `${s.source}: ${s.noiseRate}% of leads are tracking-only or junk — high noise ratio.` });
+      }
+      if (s.archivedInvalidCount > 5) {
+        issues.push({ severity: 'CRITICAL', source: s.source,
+          message: `${s.source}: ${s.archivedInvalidCount} leads archived for missing identity — repeated ingestion without contact data.` });
+      } else if (s.archivedInvalidCount > 0) {
+        issues.push({ severity: 'WARNING', source: s.source,
+          message: `${s.source}: ${s.archivedInvalidCount} lead(s) archived for missing identity — verify webhook payload mapping.` });
+      }
+      if (s.duplicateCount > 10) {
+        issues.push({ severity: 'WARNING', source: s.source,
+          message: `${s.source}: ${s.duplicateCount} duplicate phone collisions — platform is re-submitting existing contacts.` });
+      }
+      if (s.noAnswerEscalationRate > 30) {
+        issues.push({ severity: 'WARNING', source: s.source,
+          message: `${s.source}: ${s.noAnswerEscalationRate}% of active leads have escalated no-answers — contact quality or timing issue.` });
+      }
+    }
+    // CRITICAL first, then WARNING
+    issues.sort((a, b) => (a.severity === 'CRITICAL' ? -1 : 1) - (b.severity === 'CRITICAL' ? -1 : 1));
+
+    // ── 6. Duplicate pattern summary ──────────────────────────────────────────
+    const patterns = dupRows.map((r: any) => ({
+      phone:           r.phone,
+      occurrenceCount: +r.occurrence_count,
+      sourceCount:     +r.source_count,
+      sources:         r.sources,
+      firstSeen:       r.first_seen,
+      lastSeen:        r.last_seen,
+    }));
+
+    return {
+      sources,
+      issues,
+      duplicatePatterns: {
+        suspectedDuplicateCount: patterns.length,
+        patterns,
+      },
+    };
   }
 
   async getTelecallerMetrics(user: any) {

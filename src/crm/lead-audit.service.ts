@@ -28,22 +28,7 @@ export class LeadAuditService implements OnModuleInit {
   }
 
   async onModuleInit() {
-    try {
-      await this.auditRepo.query(`
-        CREATE TABLE IF NOT EXISTS lead_audit_logs (
-          id          SERIAL PRIMARY KEY,
-          lead_id     INT NOT NULL,
-          user_id     INT NOT NULL,
-          action      VARCHAR(50) NOT NULL,
-          detail      TEXT,
-          ip_address  VARCHAR(50),
-          created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-      `);
-    } catch (e) {
-      console.error('Audit log table init failed', e);
-    }
-
+    // lead_audit_logs table creation moved to scripts/migrate-crm-phase20-1-startup-cleanup.js
     try {
       const [row] = await this.auditRepo.query(
         `SELECT id FROM "user" WHERE role IN ('Admin', 'COO') AND is_active = true ORDER BY id ASC LIMIT 1`,

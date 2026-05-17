@@ -103,6 +103,30 @@ export function normalizePhoneForIdentity(raw: string | null | undefined): strin
   return e164;
 }
 
+// ─── Requirement normalization ───────────────────────────────────────────────
+
+/**
+ * Normalises a product/requirement string for opportunity dedup and matching.
+ * Rules applied in order:
+ *   1. lowercase
+ *   2. trim
+ *   3. strip non-word, non-space characters  ("microfiber-cloth" → "microfiber cloth")
+ *   4. collapse interior whitespace          ("micro  fiber" → "micro fiber")
+ *
+ * "Micro Fiber Cloth", "Micro-Fiber Cloth", and "microfiber cloth" all produce
+ * the same token. "Microfiber Cloth" and "Display Stand" remain distinct.
+ *
+ * No fuzzy matching. Purely deterministic.
+ */
+export function normalizeRequirement(text: string | null | undefined): string {
+  if (!text) return '';
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\s]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
 // ─── Text utilities ──────────────────────────────────────────────────────────
 
 export function toSentenceCase(s: string): string {
