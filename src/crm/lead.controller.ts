@@ -9,7 +9,7 @@ import { CreateManualLeadDto } from './dto/create-manual-lead.dto';
 import { UpdateLeadDto } from './dto/update-lead.dto';
 import { NoteType } from './entities/lead-note.entity';
 import { RequirePermission } from '../auth/require-permission.decorator';
-import { LeadStage } from './entities/lead.entity';
+import { LeadStage, OutcomeType } from './entities/lead.entity';
 
 @Controller('crm/leads')
 export class LeadController {
@@ -49,7 +49,7 @@ export class LeadController {
   @RequirePermission('lead.edit')
   logAction(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { note: string; noteType?: NoteType; newStatus?: string },
+    @Body() body: { note: string; noteType?: NoteType; newStatus?: string; outcomeType?: OutcomeType; objectionType?: string; callbackDate?: string },
     @Request() req,
   ) {
     return this.leadService.logAction(id, body, req.user, req.ip);
@@ -181,6 +181,25 @@ export class LeadController {
     @Request() req,
   ) {
     return this.leadService.markConverted(id, body.customerId, body.quotationId, req.user, req.ip);
+  }
+
+  // ── Lead lock ─────────────────────────────────────────────────────────────────
+
+  @Post(':id/lock')
+  @RequirePermission('lead.view')
+  acquireLock(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    this.leadService.acquireLock(id, req.user);
+    return { locked: true, leadId: id, userId: req.user.id, userName: req.user.name };
+  }
+
+  @Delete(':id/lock')
+  @RequirePermission('lead.view')
+  releaseLock(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    const released = this.leadService.releaseLock(id, req.user);
+    if (!released) {
+      throw new ForbiddenException('You do not hold the lock on this lead');
+    }
+    return { released: true, leadId: id };
   }
 
   // ── Per-lead automation pause ─────────────────────────────────────────────────

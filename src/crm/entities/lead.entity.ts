@@ -3,6 +3,33 @@ import {
   UpdateDateColumn, ManyToOne, JoinColumn, Index,
 } from 'typeorm';
 
+/**
+ * Fine-grained operational state of a lead.
+ * Drives next script, urgency, SLA, and queue priority.
+ * Only mutated by logAction() (outcome-driven) and update() (status-driven).
+ */
+export enum WorkflowState {
+  FIRST_CALL      = 'FIRST_CALL',       // New lead, no calls made yet
+  FOLLOW_UP       = 'FOLLOW_UP',        // Contacted positively, standard follow-up
+  NO_ANSWER_1     = 'NO_ANSWER_1',      // 1 no-answer, retry at different time
+  NO_ANSWER_2     = 'NO_ANSWER_2',      // 2 no-answers, try different slot + WA
+  NO_ANSWER_ESC   = 'NO_ANSWER_ESC',    // 3+ no-answers, escalate to manager
+  CALLBACK_WAIT   = 'CALLBACK_WAIT',    // Customer requested callback at specific time
+  SEND_QUOTATION  = 'SEND_QUOTATION',   // Interested — create and send quotation now
+  CHASE_QUOTATION = 'CHASE_QUOTATION',  // Quotation sent, follow up on decision
+  NEGOTIATING     = 'NEGOTIATING',      // Post-quotation price/term discussion
+  NURTURE         = 'NURTURE',          // Not interested now, re-engage scheduled
+  CONVERTED       = 'CONVERTED',        // Deal closed
+  LOST            = 'LOST',             // Permanently closed
+}
+
+export enum OutcomeType {
+  INTERESTED     = 'INTERESTED',
+  NO_ANSWER      = 'NO_ANSWER',
+  LATER          = 'LATER',
+  NOT_INTERESTED = 'NOT_INTERESTED',
+}
+
 export enum LeadQuality {
   QUALIFIED     = 'QUALIFIED',     // has phone + email
   PARTIAL       = 'PARTIAL',       // has phone OR email (not both)
@@ -218,6 +245,49 @@ export class Lead {
 
   @Column({ nullable: true })
   created_by: number;
+
+  // ── Structured workflow memory ────────────────────────────────────────────────
+  // Written only by logAction() and update(). Never parsed from note text.
+
+  /** Fine-grained operational state — drives script, urgency, SLA, queue priority. */
+  @Column({ type: 'varchar', length: 30, nullable: true })
+  workflow_state: WorkflowState;
+
+  /** Last structured call outcome logged via logStructuredOutcome. */
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  last_outcome_type: OutcomeType;
+
+  /** Last objection type from a NOT_INTERESTED outcome. */
+  @Column({ type: 'varchar', length: 30, nullable: true })
+  last_objection_type: string;
+
+  /** Total CALL notes ever logged for this lead. Atomic counter — incremented by SQL. */
+  @Column({ type: 'int', default: 0 })
+  call_attempt_count: number;
+
+  /** Consecutive no-answer streak. Resets to 0 on any positive contact (INTERESTED/LATER). */
+  @Column({ type: 'int', default: 0 })
+  no_answer_count: number;
+
+  /** Timestamp of last logged CALL outcome — replaces note MAX(created_at) query. */
+  @Column({ type: 'timestamptz', nullable: true })
+  last_contacted_at: Date;
+
+  /** Machine-driven SLA deadline for queue priority and escalation.
+   *  Distinct from follow_up_date (human-promised callback time).
+   *  Written atomically at every workflow_state transition by computeNextActionDue(). */
+  @Column({ type: 'timestamptz', nullable: true })
+  next_action_due_at: Date;
+
+  /** When the current workflow_state was entered. Powers SLA breach detection and stage aging. */
+  @Column({ type: 'timestamptz', nullable: true })
+  workflow_state_entered_at: Date;
+
+  /** True only when a manager explicitly toggled automation off via the manual pause control.
+   *  Unlike the automation_off tag (set by both manual pause and snooze), this flag
+   *  is NOT cleared by resumeExpiredSnoozes() — so manual pauses survive snooze expiry. */
+  @Column({ default: false })
+  automation_manually_paused: boolean;
 
   @CreateDateColumn({ type: 'timestamptz' })
   created_at: Date;

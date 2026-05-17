@@ -528,4 +528,559 @@ export class AnalyticsService {
       conversionPct: +r.total > 0 ? Math.round((+r.converted / +r.total) * 100) : 0,
     }));
   }
+
+  // ── Operational lead quality guard ────────────────────────────────────────────
+  // Used by all commercial intelligence queries to exclude non-actionable leads.
+  private static readonly OPERATIONAL_QUALITY_FILTER =
+    `(lead_quality IS NULL OR lead_quality NOT IN ('TRACKING_ONLY', 'JUNK', 'DUPLICATE'))`;
+
+  // ── Part 1: Objection Intelligence ────────────────────────────────────────────
+
+  async getObjectionIntelligence(user: any) {
+    const where = this.isFullAccess(user)
+      ? `WHERE l.last_objection_type IS NOT NULL AND l.is_active = true AND ${AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality')}`
+      : `WHERE l.last_objection_type IS NOT NULL AND l.is_active = true AND ${AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality')} AND (l.assigned_to = $1 OR l.created_by = $1)`;
+    const params = this.isFullAccess(user) ? [] : [user.id];
+
+    const rows: any[] = await this.ds.query(`
+      SELECT
+        l.last_objection_type                                      AS objection,
+        COUNT(DISTINCT l.id)                                       AS total_count,
+        COUNT(DISTINCT l.id) FILTER (WHERE l.status = 'CONVERTED') AS converted_count,
+        ROUND(AVG(
+          EXTRACT(EPOCH FROM (l.updated_at - l.created_at)) / 86400.0
+        ) FILTER (WHERE l.status = 'CONVERTED')::numeric, 1)      AS avg_days_to_conversion,
+        ROUND(AVG(q.total_amount) FILTER (WHERE q.id IS NOT NULL)::numeric, 0) AS avg_quotation_value,
+        (
+          SELECT l2.workflow_state
+          FROM leads l2
+          WHERE l2.last_objection_type = l.last_objection_type
+            AND l2.status IN ('LOST', 'CONVERTED')
+            AND l2.workflow_state IS NOT NULL
+          GROUP BY l2.workflow_state
+          ORDER BY COUNT(*) DESC
+          LIMIT 1
+        ) AS common_exit_state
+      FROM leads l
+      LEFT JOIN quotation q ON q.lead_id = l.id AND q.status != 'DRAFT'
+      ${where}
+      GROUP BY l.last_objection_type
+      ORDER BY total_count DESC
+    `, params);
+
+    return rows.map((r: any) => ({
+      objection:           r.objection,
+      totalCount:          +r.total_count,
+      convertedCount:      +r.converted_count,
+      conversionPct:       +r.total_count > 0 ? Math.round((+r.converted_count / +r.total_count) * 100) : 0,
+      avgDaysToConversion: r.avg_days_to_conversion !== null ? +r.avg_days_to_conversion : null,
+      avgQuotationValue:   r.avg_quotation_value !== null ? Math.round(+r.avg_quotation_value) : null,
+      commonExitState:     r.common_exit_state ?? null,
+      isFatal:             +r.total_count > 0 && Math.round((+r.converted_count / +r.total_count) * 100) < 10,
+    }));
+  }
+
+  // ── Part 2: Workflow State Funnel ─────────────────────────────────────────────
+
+  async getWorkflowFunnel(user: any) {
+    const assignFilter = this.isFullAccess(user)
+      ? '' : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
+    const params = this.isFullAccess(user) ? [] : [user.id];
+    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality');
+
+    const stateRows: any[] = await this.ds.query(`
+      SELECT
+        l.workflow_state                                                  AS state,
+        COUNT(*)                                                          AS current_count,
+        COUNT(*) FILTER (WHERE l.next_action_due_at < NOW())              AS overdue_count,
+        ROUND(AVG(
+          EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0
+        )::numeric, 1)                                                    AS avg_hours_in_state,
+        COUNT(*) FILTER (WHERE COALESCE(l.tags,'[]'::jsonb) @> '["stale_lead"]') AS stale_count
+      FROM leads l
+      WHERE l.is_active = true
+        AND l.workflow_state IS NOT NULL
+        AND ${qualFilter}
+        ${assignFilter}
+      GROUP BY l.workflow_state
+      ORDER BY
+        CASE l.workflow_state
+          WHEN 'FIRST_CALL'      THEN 1
+          WHEN 'NO_ANSWER_1'     THEN 2
+          WHEN 'NO_ANSWER_2'     THEN 3
+          WHEN 'NO_ANSWER_ESC'   THEN 4
+          WHEN 'FOLLOW_UP'       THEN 5
+          WHEN 'CALLBACK_WAIT'   THEN 6
+          WHEN 'SEND_QUOTATION'  THEN 7
+          WHEN 'CHASE_QUOTATION' THEN 8
+          WHEN 'NEGOTIATING'     THEN 9
+          WHEN 'NURTURE'         THEN 10
+          WHEN 'CONVERTED'       THEN 11
+          WHEN 'LOST'            THEN 12
+          ELSE 99
+        END
+    `, params);
+
+    const totalActive = stateRows.reduce((s: number, r: any) =>
+      ['CONVERTED', 'LOST'].includes(r.state) ? s : s + +r.current_count, 0);
+
+    return stateRows.map((r: any) => ({
+      state:           r.state,
+      currentCount:    +r.current_count,
+      overdueCount:    +r.overdue_count,
+      avgHoursInState: r.avg_hours_in_state !== null ? +r.avg_hours_in_state : null,
+      staleCount:      +r.stale_count,
+      pctOfActive:     totalActive > 0 && !['CONVERTED', 'LOST'].includes(r.state)
+        ? Math.round((+r.current_count / totalActive) * 100) : null,
+    }));
+  }
+
+  // ── Part 3: Quotation Performance ─────────────────────────────────────────────
+
+  async getQuotationPerformance(user: any) {
+    const assignFilter = this.isFullAccess(user)
+      ? '' : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
+    const params = this.isFullAccess(user) ? [] : [user.id];
+    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality');
+
+    const [r]: any[] = await this.ds.query(`
+      SELECT
+        COUNT(DISTINCT q.id)                                                           AS total,
+        COUNT(DISTINCT q.id) FILTER (WHERE q.status = 'DRAFT')                         AS draft,
+        COUNT(DISTINCT q.id) FILTER (WHERE q.status = 'GENERATED')                     AS generated,
+        COUNT(DISTINCT q.id) FILTER (WHERE q.status = 'CONVERTED')                     AS converted,
+        COUNT(DISTINCT q.id) FILTER (WHERE q.status = 'CANCELLED')                     AS cancelled,
+        COUNT(DISTINCT q.id) FILTER (
+          WHERE q.status = 'GENERATED' AND l.workflow_state = 'NEGOTIATING'
+        )                                                                               AS negotiating,
+        COUNT(DISTINCT q.id) FILTER (
+          WHERE q.status = 'GENERATED'
+            AND q.created_at < NOW() - INTERVAL '7 days'
+            AND l.status NOT IN ('CONVERTED', 'LOST')
+        )                                                                               AS stalled,
+        ROUND(AVG(
+          EXTRACT(EPOCH FROM (q.created_at - l.created_at)) / 3600.0
+        ) FILTER (WHERE q.status != 'DRAFT')::numeric, 1)                              AS avg_hours_to_quote,
+        ROUND(AVG(
+          EXTRACT(EPOCH FROM (o.created_at - q.created_at)) / 86400.0
+        ) FILTER (WHERE o.id IS NOT NULL)::numeric, 1)                                 AS avg_days_to_convert,
+        ROUND(AVG(q.total_amount) FILTER (WHERE q.status = 'CONVERTED')::numeric, 0)  AS avg_converted_value,
+        ROUND(AVG(q.total_amount)::numeric, 0)                                         AS avg_all_value,
+        COUNT(DISTINCT q.id) FILTER (WHERE q.status = 'CONVERTED') * 100.0 /
+          NULLIF(COUNT(DISTINCT q.id) FILTER (WHERE q.status != 'DRAFT'), 0)           AS conversion_pct_of_sent
+      FROM quotation q
+      JOIN leads l ON l.id = q.lead_id
+      LEFT JOIN orders o ON o.lead_id = l.id AND o.status != 'CANCELLED'
+      WHERE l.is_active = true AND ${qualFilter} ${assignFilter}
+    `, params);
+
+    const total = +r.total || 0;
+    return {
+      total,
+      draft:            +r.draft,
+      generated:        +r.generated,
+      converted:        +r.converted,
+      cancelled:        +r.cancelled,
+      negotiating:      +r.negotiating,
+      stalled:          +r.stalled,
+      conversionPct:    total > 0 ? Math.round((+r.converted / total) * 100) : 0,
+      conversionPctOfSent: r.conversion_pct_of_sent !== null ? Math.round(+r.conversion_pct_of_sent) : 0,
+      avgHoursToQuote:  r.avg_hours_to_quote !== null ? +r.avg_hours_to_quote : null,
+      avgDaysToConvert: r.avg_days_to_convert !== null ? +r.avg_days_to_convert : null,
+      avgConvertedValue: r.avg_converted_value !== null ? Math.round(+r.avg_converted_value) : null,
+      avgAllValue:      r.avg_all_value !== null ? Math.round(+r.avg_all_value) : null,
+    };
+  }
+
+  // ── Part 4: Product Conversion Intelligence ───────────────────────────────────
+
+  async getProductConversion(user: any) {
+    const assignFilter = this.isFullAccess(user)
+      ? '' : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
+    const params = this.isFullAccess(user) ? [] : [user.id];
+    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality');
+
+    const rows: any[] = await this.ds.query(`
+      SELECT
+        TRIM(LOWER(l.product_interest))                                     AS product,
+        COUNT(DISTINCT l.id)                                                AS lead_count,
+        COUNT(DISTINCT q.id)                                                AS quotation_count,
+        COUNT(DISTINCT l.id) FILTER (WHERE l.status = 'CONVERTED')          AS converted_count,
+        ROUND(AVG(o.total_amount) FILTER (WHERE o.id IS NOT NULL)::numeric, 0) AS avg_order_value,
+        ROUND(AVG(
+          EXTRACT(EPOCH FROM (l.updated_at - l.created_at)) / 86400.0
+        ) FILTER (WHERE l.status = 'CONVERTED')::numeric, 1)               AS avg_sales_cycle_days,
+        (
+          SELECT l2.last_objection_type
+          FROM leads l2
+          WHERE TRIM(LOWER(l2.product_interest)) = TRIM(LOWER(l.product_interest))
+            AND l2.last_objection_type IS NOT NULL
+          GROUP BY l2.last_objection_type
+          ORDER BY COUNT(*) DESC
+          LIMIT 1
+        )                                                                   AS most_common_objection
+      FROM leads l
+      LEFT JOIN quotation q ON q.lead_id = l.id
+      LEFT JOIN orders o ON o.lead_id = l.id AND o.status != 'CANCELLED'
+      WHERE l.product_interest IS NOT NULL
+        AND TRIM(l.product_interest) != ''
+        AND l.is_active = true
+        AND ${qualFilter}
+        ${assignFilter}
+      GROUP BY TRIM(LOWER(l.product_interest))
+      HAVING COUNT(DISTINCT l.id) >= 2
+      ORDER BY converted_count DESC, lead_count DESC
+      LIMIT 20
+    `, params);
+
+    return rows.map((r: any) => ({
+      product:            r.product,
+      leadCount:          +r.lead_count,
+      quotationCount:     +r.quotation_count,
+      convertedCount:     +r.converted_count,
+      conversionPct:      +r.lead_count > 0 ? Math.round((+r.converted_count / +r.lead_count) * 100) : 0,
+      avgOrderValue:      r.avg_order_value !== null ? Math.round(+r.avg_order_value) : null,
+      avgSalesCycleDays:  r.avg_sales_cycle_days !== null ? +r.avg_sales_cycle_days : null,
+      mostCommonObjection: r.most_common_objection ?? null,
+    }));
+  }
+
+  // ── Part 5: Telecaller Effectiveness (conversion-centric) ─────────────────────
+
+  async getTelecallerEffectiveness(user: any) {
+    const rows: any[] = await this.ds.query(`
+      SELECT
+        u.id              AS user_id,
+        u.name            AS user_name,
+
+        -- Pipeline totals
+        (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id AND l.is_active = true
+           AND ${AnalyticsService.OPERATIONAL_QUALITY_FILTER}
+        ) AS total_leads,
+
+        (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id AND l.status = 'CONVERTED'
+           AND l.is_active = true AND ${AnalyticsService.OPERATIONAL_QUALITY_FILTER}
+        ) AS converted,
+
+        (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id AND l.status = 'LOST'
+           AND l.is_active = true AND ${AnalyticsService.OPERATIONAL_QUALITY_FILTER}
+        ) AS lost,
+
+        -- Quotation generation: leads that have at least one quotation
+        (SELECT COUNT(DISTINCT q.lead_id) FROM quotation q
+           JOIN leads l ON l.id = q.lead_id AND l.assigned_to = u.id
+           AND l.is_active = true AND ${AnalyticsService.OPERATIONAL_QUALITY_FILTER}
+        ) AS leads_with_quotation,
+
+        -- Avg hours from lead creation to first quotation
+        (SELECT ROUND(AVG(
+             EXTRACT(EPOCH FROM (q_first.first_quote - l.created_at)) / 3600.0
+           )::numeric, 1)
+         FROM leads l
+         JOIN (SELECT lead_id, MIN(created_at) AS first_quote FROM quotation GROUP BY lead_id) q_first
+           ON q_first.lead_id = l.id
+         WHERE l.assigned_to = u.id AND l.is_active = true
+           AND ${AnalyticsService.OPERATIONAL_QUALITY_FILTER}
+        ) AS avg_hours_to_quotation,
+
+        -- Callback success rate: CALLBACK_WAIT leads that advanced beyond it
+        (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id
+           AND l.workflow_state NOT IN ('CALLBACK_WAIT', 'LOST')
+           AND l.last_outcome_type = 'LATER'
+           AND l.call_attempt_count > 1
+           AND l.is_active = true
+        ) AS callback_successes,
+
+        (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id
+           AND l.last_outcome_type = 'LATER'
+           AND l.is_active = true
+        ) AS callback_total,
+
+        -- Objection recovery: NOT_INTERESTED leads that later converted
+        (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id
+           AND l.status = 'CONVERTED'
+           AND l.last_objection_type IS NOT NULL
+           AND l.is_active = true
+        ) AS objection_recoveries,
+
+        (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id
+           AND l.last_objection_type IS NOT NULL
+           AND l.is_active = true
+        ) AS objection_total,
+
+        -- Negotiation success: NEGOTIATING leads that converted
+        (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id
+           AND l.status = 'CONVERTED'
+           AND l.last_contacted_at IS NOT NULL
+           AND l.no_answer_count < 3
+           AND l.is_active = true
+        ) AS negotiation_successes,
+
+        -- Stale leads
+        (SELECT COUNT(*) FROM leads l WHERE l.assigned_to = u.id
+           AND COALESCE(l.tags,'[]'::jsonb) @> '["stale_lead"]'
+           AND l.is_active = true
+        ) AS stale_count
+
+      FROM "user" u
+      WHERE u.role IN ('Tele calling Executive', 'Territory Manager', 'Field Executive')
+        AND u.is_active = true
+      ORDER BY converted DESC NULLS LAST
+    `);
+
+    return rows.map((r: any) => {
+      const totalLeads = +r.total_leads || 0;
+      const converted  = +r.converted || 0;
+      const leadsWithQ = +r.leads_with_quotation || 0;
+      const cbSucc     = +r.callback_successes || 0;
+      const cbTotal    = +r.callback_total || 1;
+      const objRecov   = +r.objection_recoveries || 0;
+      const objTotal   = +r.objection_total || 1;
+      return {
+        userId:                   +r.user_id,
+        userName:                 r.user_name,
+        totalLeads,
+        converted,
+        lost:                     +r.lost,
+        conversionRate:           totalLeads > 0 ? Math.round((converted / totalLeads) * 100) : 0,
+        quotationGenerationRate:  totalLeads > 0 ? Math.round((leadsWithQ / totalLeads) * 100) : 0,
+        avgHoursToQuotation:      r.avg_hours_to_quotation !== null ? +r.avg_hours_to_quotation : null,
+        callbackSuccessRate:      Math.round((cbSucc / cbTotal) * 100),
+        objectionRecoveryRate:    Math.round((objRecov / objTotal) * 100),
+        staleLeadCount:           +r.stale_count,
+        staleLeadRate:            totalLeads > 0 ? Math.round((+r.stale_count / totalLeads) * 100) : 0,
+      };
+    });
+  }
+
+  // ── Part 6: Pipeline Leak Detection ──────────────────────────────────────────
+
+  async getPipelineLeaks(user: any) {
+    const assignFilter = this.isFullAccess(user)
+      ? '' : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
+    const params = this.isFullAccess(user) ? [] : [user.id];
+    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality');
+
+    const leaks: Array<{
+      stage: string;
+      leakReason: string;
+      affectedCount: number;
+      avgAgingHours: number | null;
+      operationalCause: string;
+      severity: 'HIGH' | 'MEDIUM' | 'LOW';
+    }> = [];
+
+    // 1. NO_ANSWER_ESC accumulation → slow first response
+    const [naEsc]: any = await this.ds.query(`
+      SELECT COUNT(*) AS cnt,
+             ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0)::numeric, 1) AS avg_hours
+      FROM leads l
+      WHERE l.workflow_state = 'NO_ANSWER_ESC' AND l.is_active = true AND ${qualFilter} ${assignFilter}
+    `, params);
+    if (+naEsc.cnt > 0) leaks.push({
+      stage: 'NO_ANSWER_ESC', leakReason: 'Unreachable leads accumulating',
+      affectedCount: +naEsc.cnt, avgAgingHours: naEsc.avg_hours !== null ? +naEsc.avg_hours : null,
+      operationalCause: 'Slow first response or wrong contact hours — increase call attempt spread',
+      severity: +naEsc.cnt >= 10 ? 'HIGH' : +naEsc.cnt >= 5 ? 'MEDIUM' : 'LOW',
+    });
+
+    // 2. SEND_QUOTATION aging >4h with no quotation sent
+    const [sqStale]: any = await this.ds.query(`
+      SELECT COUNT(*) AS cnt,
+             ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0)::numeric, 1) AS avg_hours
+      FROM leads l
+      WHERE l.workflow_state = 'SEND_QUOTATION'
+        AND l.quotation_id IS NULL
+        AND COALESCE(l.workflow_state_entered_at, l.created_at) < NOW() - INTERVAL '4 hours'
+        AND l.is_active = true AND ${qualFilter} ${assignFilter}
+    `, params);
+    if (+sqStale.cnt > 0) leaks.push({
+      stage: 'SEND_QUOTATION', leakReason: 'Quotation not sent after interest confirmed',
+      affectedCount: +sqStale.cnt, avgAgingHours: sqStale.avg_hours !== null ? +sqStale.avg_hours : null,
+      operationalCause: 'Quotation turnaround delay — assign pricing authority or pre-built templates',
+      severity: +sqStale.cnt >= 5 ? 'HIGH' : +sqStale.cnt >= 2 ? 'MEDIUM' : 'LOW',
+    });
+
+    // 3. CHASE_QUOTATION aging >72h
+    const [cqStale]: any = await this.ds.query(`
+      SELECT COUNT(*) AS cnt,
+             ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0)::numeric, 1) AS avg_hours
+      FROM leads l
+      WHERE l.workflow_state = 'CHASE_QUOTATION'
+        AND COALESCE(l.workflow_state_entered_at, l.created_at) < NOW() - INTERVAL '72 hours'
+        AND l.is_active = true AND ${qualFilter} ${assignFilter}
+    `, params);
+    if (+cqStale.cnt > 0) leaks.push({
+      stage: 'CHASE_QUOTATION', leakReason: 'Quotation follow-up gap >72h',
+      affectedCount: +cqStale.cnt, avgAgingHours: cqStale.avg_hours !== null ? +cqStale.avg_hours : null,
+      operationalCause: 'Post-quotation follow-up gap — call 3 days post-send, lead goes cold otherwise',
+      severity: +cqStale.cnt >= 5 ? 'HIGH' : +cqStale.cnt >= 2 ? 'MEDIUM' : 'LOW',
+    });
+
+    // 4. CALLBACK_WAIT overdue (promised callback missed)
+    const [cbOver]: any = await this.ds.query(`
+      SELECT COUNT(*) AS cnt,
+             ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - l.next_action_due_at)) / 3600.0)::numeric, 1) AS avg_hours
+      FROM leads l
+      WHERE l.workflow_state = 'CALLBACK_WAIT'
+        AND l.next_action_due_at < NOW()
+        AND l.is_active = true AND ${qualFilter} ${assignFilter}
+    `, params);
+    if (+cbOver.cnt > 0) leaks.push({
+      stage: 'CALLBACK_WAIT', leakReason: 'Promised callbacks not honored',
+      affectedCount: +cbOver.cnt, avgAgingHours: cbOver.avg_hours !== null ? +cbOver.avg_hours : null,
+      operationalCause: 'Callback discipline issue — customer expectation not met, trust erodes fast',
+      severity: +cbOver.cnt >= 3 ? 'HIGH' : +cbOver.cnt >= 1 ? 'MEDIUM' : 'LOW',
+    });
+
+    // 5. Stale lead accumulation (tagged stale_lead)
+    const [staleLds]: any = await this.ds.query(`
+      SELECT COUNT(*) AS cnt,
+             ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0)::numeric, 1) AS avg_hours
+      FROM leads l
+      WHERE COALESCE(l.tags,'[]'::jsonb) @> '["stale_lead"]'
+        AND l.status NOT IN ('CONVERTED', 'LOST')
+        AND l.is_active = true AND ${qualFilter} ${assignFilter}
+    `, params);
+    if (+staleLds.cnt > 0) leaks.push({
+      stage: 'PIPELINE', leakReason: 'Leads stagnating with no call activity',
+      affectedCount: +staleLds.cnt, avgAgingHours: staleLds.avg_hours !== null ? +staleLds.avg_hours : null,
+      operationalCause: 'Telecaller inactivity — missed SLA×2 call window, leads going cold',
+      severity: +staleLds.cnt >= 10 ? 'HIGH' : +staleLds.cnt >= 5 ? 'MEDIUM' : 'LOW',
+    });
+
+    // 6. NEGOTIATING stall >96h
+    const [negStale]: any = await this.ds.query(`
+      SELECT COUNT(*) AS cnt,
+             ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0)::numeric, 1) AS avg_hours
+      FROM leads l
+      WHERE l.workflow_state = 'NEGOTIATING'
+        AND COALESCE(l.workflow_state_entered_at, l.created_at) < NOW() - INTERVAL '96 hours'
+        AND l.is_active = true AND ${qualFilter} ${assignFilter}
+    `, params);
+    if (+negStale.cnt > 0) leaks.push({
+      stage: 'NEGOTIATING', leakReason: 'Negotiation stall >96h',
+      affectedCount: +negStale.cnt, avgAgingHours: negStale.avg_hours !== null ? +negStale.avg_hours : null,
+      operationalCause: 'Negotiation stall — involve senior, offer alternative pricing, set hard close date',
+      severity: +negStale.cnt >= 3 ? 'HIGH' : +negStale.cnt >= 1 ? 'MEDIUM' : 'LOW',
+    });
+
+    // 7. Callback abuse risk — leads looping through LATER outcomes
+    const [cbAbuse]: any = await this.ds.query(`
+      SELECT COUNT(*) AS cnt
+      FROM leads l
+      WHERE COALESCE(l.tags,'[]'::jsonb) @> '["callback_abuse_risk"]'
+        AND l.status NOT IN ('CONVERTED', 'LOST')
+        AND l.is_active = true AND ${qualFilter} ${assignFilter}
+    `, params);
+    if (+cbAbuse.cnt > 0) leaks.push({
+      stage: 'CALLBACK_WAIT', leakReason: 'Callback abuse — repeated deferrals',
+      affectedCount: +cbAbuse.cnt, avgAgingHours: null,
+      operationalCause: 'Leads being pushed repeatedly without qualification — review and close or disqualify',
+      severity: +cbAbuse.cnt >= 5 ? 'HIGH' : +cbAbuse.cnt >= 2 ? 'MEDIUM' : 'LOW',
+    });
+
+    return leaks.sort((a, b) => {
+      const rank = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+      return (rank[a.severity] - rank[b.severity]) || (b.affectedCount - a.affectedCount);
+    });
+  }
+
+  async getTelecallerMetrics(user: any) {
+    const rows: any[] = await this.ds.query(`
+      SELECT
+        u.id                          AS user_id,
+        u.name                        AS user_name,
+
+        -- Leads with next_action_due_at in the past (active pipeline only)
+        (SELECT COUNT(*) FROM leads l
+         WHERE l.assigned_to = u.id
+           AND l.next_action_due_at < NOW()
+           AND l.status NOT IN ('CONVERTED', 'LOST')
+           AND l.is_active = true
+        )                             AS overdue_lead_count,
+
+        -- Leads tagged stale_lead (no call in SLA×2 window)
+        (SELECT COUNT(*) FROM leads l
+         WHERE l.assigned_to = u.id
+           AND COALESCE(l.tags, '[]'::jsonb) @> '["stale_lead"]'
+           AND l.is_active = true
+        )                             AS stale_lead_count,
+
+        -- Leads tagged callback_abuse_risk
+        (SELECT COUNT(*) FROM leads l
+         WHERE l.assigned_to = u.id
+           AND COALESCE(l.tags, '[]'::jsonb) @> '["callback_abuse_risk"]'
+           AND l.is_active = true
+        )                             AS callback_abuse_count,
+
+        -- Leads with no_answer_count >= 5 (operationally blocked)
+        (SELECT COUNT(*) FROM leads l
+         WHERE l.assigned_to = u.id
+           AND l.no_answer_count >= 5
+           AND l.is_active = true
+        )                             AS no_answer_escalations,
+
+        -- Avg minutes from lead creation to first CALL audit entry (response speed)
+        (SELECT AVG(EXTRACT(EPOCH FROM (lal.first_call - l.created_at)) / 60)
+         FROM leads l
+         JOIN (
+           SELECT lead_id, MIN(created_at) AS first_call
+           FROM lead_audit_logs
+           WHERE action = 'CALLED'
+           GROUP BY lead_id
+         ) lal ON lal.lead_id = l.id
+         WHERE l.assigned_to = u.id
+           AND l.is_active = true
+        )                             AS avg_first_response_minutes,
+
+        -- Leads auto-reassigned away from this user in last 30 days
+        (SELECT COUNT(DISTINCT l.id) FROM leads l
+         WHERE l.assigned_to != u.id
+           AND EXISTS (
+             SELECT 1 FROM lead_audit_logs lal
+             WHERE lal.lead_id = l.id
+               AND lal.action = 'ESCALATED'
+               AND lal.detail LIKE '%AUTO_REASSIGN%'
+               AND lal.created_at > NOW() - INTERVAL '30 days'
+           )
+           AND EXISTS (
+             SELECT 1 FROM lead_audit_logs lal2
+             WHERE lal2.lead_id = l.id
+               AND lal2.user_id = u.id
+               AND lal2.action = 'VIEWED'
+               AND lal2.created_at < NOW() - INTERVAL '72 hours'
+           )
+        )                             AS reassignment_count,
+
+        -- Leads with 3+ snoozes in 30 days assigned to this user
+        (SELECT COUNT(*) FROM (
+           SELECT lead_id FROM lead_audit_logs lal
+           JOIN leads l ON l.id = lal.lead_id AND l.assigned_to = u.id
+           WHERE lal.action = 'UPDATED'
+             AND lal.detail LIKE 'Automation snoozed%'
+             AND lal.created_at > NOW() - INTERVAL '30 days'
+           GROUP BY lal.lead_id
+           HAVING COUNT(*) >= 3
+         ) snooze_abused
+        )                             AS snooze_abuse_count
+
+      FROM "user" u
+      WHERE u.role IN ('Tele calling Executive', 'Territory Manager', 'Field Executive')
+        AND u.is_active = true
+      ORDER BY overdue_lead_count DESC NULLS LAST
+    `);
+
+    return rows.map((r: any) => ({
+      userId:                  +r.user_id,
+      userName:                r.user_name,
+      overdueLeadCount:        +r.overdue_lead_count,
+      staleLeadCount:          +r.stale_lead_count,
+      callbackAbuseCount:      +r.callback_abuse_count,
+      noAnswerEscalations:     +r.no_answer_escalations,
+      avgFirstResponseMinutes: r.avg_first_response_minutes !== null ? Math.round(+r.avg_first_response_minutes) : null,
+      reassignmentCount:       +r.reassignment_count,
+      snoozeAbuseCount:        +r.snooze_abuse_count,
+    }));
+  }
 }

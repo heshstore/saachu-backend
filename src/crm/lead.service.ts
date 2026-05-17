@@ -13,7 +13,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Lead, LeadSource, LeadStatus, LeadPriority, LeadStage, LeadQuality } from './entities/lead.entity';
+import { Lead, LeadSource, LeadStatus, LeadPriority, LeadStage, LeadQuality, WorkflowState, OutcomeType } from './entities/lead.entity';
 
 /**
  * Manual / high-trust sources where phone is optional.
@@ -41,7 +41,8 @@ import { User } from '../users/entities/user.entity';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import { UpdateLeadDto } from './dto/update-lead.dto';
 import { LeadAssignmentService } from './lead-assignment.service';
-import { DecisionEngineService, DecisionContext } from './decision-engine.service';
+import { DecisionEngineService, DecisionContext, OutcomeHistory, computeNextActionDue, computeSlaStatus, computeQueueTier, isValidWorkflowTransition, WORKFLOW_RANK } from './decision-engine.service';
+import { IsNull } from 'typeorm';
 import { LeadAuditService } from './lead-audit.service';
 import { QuotationService } from '../quotation/quotation.service';
 import { DEDUP } from '../config/config';
@@ -58,6 +59,16 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 };
 
 const WORKFLOW_BYPASS_ROLES = ['Admin', 'COO'];
+
+// Workflow states that must not be rolled back by a status change.
+// If the lead is already in one of these states and the target rank is lower,
+// the workflow_state update is skipped (status change still goes through).
+const PROTECTED_WORKFLOW_STATES = new Set<WorkflowState>([
+  WorkflowState.SEND_QUOTATION,
+  WorkflowState.CHASE_QUOTATION,
+  WorkflowState.NEGOTIATING,
+  WorkflowState.CONVERTED,
+]);
 
 /**
  * Deterministic idempotency key for a lead.
@@ -114,6 +125,33 @@ export class LeadService implements OnModuleInit {
   // Tracks WhatsApp connectivity via event bus — set/cleared by whatsapp.down / whatsapp.up.
   // No direct import of WhatsAppService needed (avoids CrmModule ↔ WhatsappModule coupling).
   private _whatsappDown = false;
+
+  // ── Lead lock map (memory-only, 15-min TTL, Admin/COO bypass) ─────────────────
+  private readonly leadLockMap = new Map<number, { userId: number; userName: string; lockedUntil: number }>();
+
+  acquireLock(leadId: number, user: any): void {
+    this.leadLockMap.set(leadId, {
+      userId:      user.id,
+      userName:    user.name ?? 'Unknown',
+      lockedUntil: Date.now() + 15 * 60_000,
+    });
+  }
+
+  getLockInfo(leadId: number): { userId: number; userName: string; lockedUntil: number } | null {
+    const entry = this.leadLockMap.get(leadId);
+    if (!entry) return null;
+    if (Date.now() > entry.lockedUntil) { this.leadLockMap.delete(leadId); return null; }
+    return entry;
+  }
+
+  releaseLock(leadId: number, user: any): boolean {
+    const lock = this.leadLockMap.get(leadId);
+    if (!lock) return true;
+    const isBypass = ['Admin', 'COO', 'Sales Manager'].includes(user?.role);
+    if (lock.userId !== user?.id && !isBypass) return false;
+    this.leadLockMap.delete(leadId);
+    return true;
+  }
 
   constructor(
     @InjectRepository(Lead)
@@ -259,6 +297,160 @@ export class LeadService implements OnModuleInit {
       this.logger.log('[LeadService] automation snooze columns ensured');
     } catch (e) {
       this.logger.error('Failed to ensure automation snooze columns', e);
+    }
+
+    // ── Structured workflow memory columns ──────────────────────────────────────
+    try {
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS workflow_state      VARCHAR(30)`);
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_outcome_type   VARCHAR(20)`);
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_objection_type VARCHAR(30)`);
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS call_attempt_count  INT NOT NULL DEFAULT 0`);
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS no_answer_count     INT NOT NULL DEFAULT 0`);
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS last_contacted_at   TIMESTAMPTZ`);
+      await this.ds.query(`CREATE INDEX IF NOT EXISTS idx_leads_workflow_state ON leads(workflow_state)`);
+      this.logger.log('[LeadService] Workflow memory columns ensured');
+    } catch (e) {
+      this.logger.error('Failed to ensure workflow memory columns', e);
+    }
+
+    // Backfill workflow_state from status for existing leads (runs once — WHERE NULL guard)
+    try {
+      await this.ds.query(`
+        UPDATE leads SET workflow_state = CASE
+          WHEN status = 'NEW'        THEN 'FIRST_CALL'
+          WHEN status = 'CONTACTED'  THEN 'FOLLOW_UP'
+          WHEN status = 'INTERESTED' THEN 'SEND_QUOTATION'
+          WHEN status = 'QUOTATION'  THEN 'CHASE_QUOTATION'
+          WHEN status = 'CONVERTED'  THEN 'CONVERTED'
+          WHEN status = 'LOST'       THEN 'LOST'
+          ELSE 'FIRST_CALL'
+        END
+        WHERE workflow_state IS NULL
+      `);
+      this.logger.log('[LeadService] workflow_state backfill complete');
+    } catch (e) {
+      this.logger.error('Failed to backfill workflow_state', e);
+    }
+
+    // Backfill call/no-answer counters from existing lead_notes (one-time, WHERE 0 guard)
+    try {
+      await this.ds.query(`
+        UPDATE leads l SET
+          call_attempt_count = sub.total_calls,
+          no_answer_count    = sub.no_answers,
+          last_contacted_at  = sub.last_call_at
+        FROM (
+          SELECT
+            lead_id,
+            COUNT(*)                                              AS total_calls,
+            COUNT(*) FILTER (WHERE note LIKE '📵%')             AS no_answers,
+            MAX(created_at)                                       AS last_call_at
+          FROM lead_notes
+          WHERE type = 'CALL'
+          GROUP BY lead_id
+        ) sub
+        WHERE l.id = sub.lead_id
+          AND l.call_attempt_count = 0
+      `);
+      this.logger.log('[LeadService] call_attempt_count / no_answer_count backfill complete');
+    } catch (e) {
+      this.logger.error('Failed to backfill call attempt counters', e);
+    }
+
+    // Backfill last_outcome_type from the most recent CALL note emoji prefix (one-time)
+    try {
+      await this.ds.query(`
+        UPDATE leads l SET last_outcome_type = sub.otype
+        FROM (
+          SELECT DISTINCT ON (lead_id)
+            lead_id,
+            CASE
+              WHEN note LIKE '✅%' THEN 'INTERESTED'
+              WHEN note LIKE '📵%' THEN 'NO_ANSWER'
+              WHEN note LIKE '⏰%' THEN 'LATER'
+              WHEN note LIKE '❌%' THEN 'NOT_INTERESTED'
+              ELSE NULL
+            END AS otype
+          FROM lead_notes
+          WHERE type = 'CALL'
+          ORDER BY lead_id, created_at DESC
+        ) sub
+        WHERE l.id = sub.lead_id
+          AND l.last_outcome_type IS NULL
+          AND sub.otype IS NOT NULL
+      `);
+      this.logger.log('[LeadService] last_outcome_type backfill complete');
+    } catch (e) {
+      this.logger.error('Failed to backfill last_outcome_type', e);
+    }
+
+    // ── SLA orchestration columns ───────────────────────────────────────────────
+    try {
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS next_action_due_at       TIMESTAMPTZ`);
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS workflow_state_entered_at TIMESTAMPTZ`);
+      await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS automation_manually_paused BOOLEAN NOT NULL DEFAULT false`);
+      await this.ds.query(`CREATE INDEX IF NOT EXISTS idx_leads_next_action_due ON leads(next_action_due_at) WHERE next_action_due_at IS NOT NULL`);
+      this.logger.log('[LeadService] SLA orchestration columns ensured');
+    } catch (e) {
+      this.logger.error('Failed to ensure SLA orchestration columns', e);
+    }
+
+    // Backfill workflow_state_entered_at: best-effort from existing timestamps
+    try {
+      await this.ds.query(`
+        UPDATE leads
+        SET workflow_state_entered_at = COALESCE(last_contacted_at, updated_at, created_at)
+        WHERE workflow_state_entered_at IS NULL
+      `);
+      this.logger.log('[LeadService] workflow_state_entered_at backfill complete');
+    } catch (e) {
+      this.logger.error('Failed to backfill workflow_state_entered_at', e);
+    }
+
+    // Backfill next_action_due_at from workflow_state + SLA intervals (one-time, WHERE NULL guard)
+    // Mirrors computeNextActionDue() exactly — any change to SLA values must update both.
+    try {
+      await this.ds.query(`
+        UPDATE leads SET next_action_due_at = CASE
+          WHEN workflow_state = 'FIRST_CALL' AND source IN ('META', 'GOOGLE', 'WHATSAPP', 'SHOPIFY')
+            THEN COALESCE(workflow_state_entered_at, created_at) + INTERVAL '1 hour'
+          WHEN workflow_state = 'FIRST_CALL'
+            THEN COALESCE(workflow_state_entered_at, created_at) + INTERVAL '4 hours'
+          WHEN workflow_state = 'FOLLOW_UP'
+            THEN COALESCE(
+              NULLIF(follow_up_date, '1970-01-01'::timestamptz),
+              COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '24 hours'
+            )
+          WHEN workflow_state = 'NO_ANSWER_1'
+            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '8 hours'
+          WHEN workflow_state = 'NO_ANSWER_2'
+            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '24 hours'
+          WHEN workflow_state = 'NO_ANSWER_ESC'
+            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '48 hours'
+          WHEN workflow_state = 'CALLBACK_WAIT'
+            THEN COALESCE(
+              NULLIF(follow_up_date, '1970-01-01'::timestamptz),
+              COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '24 hours'
+            )
+          WHEN workflow_state = 'SEND_QUOTATION'
+            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '2 hours'
+          WHEN workflow_state = 'CHASE_QUOTATION'
+            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '72 hours'
+          WHEN workflow_state = 'NEGOTIATING'
+            THEN COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '48 hours'
+          WHEN workflow_state = 'NURTURE'
+            THEN COALESCE(
+              NULLIF(follow_up_date, '1970-01-01'::timestamptz),
+              COALESCE(workflow_state_entered_at, NOW()) + INTERVAL '30 days'
+            )
+          ELSE NULL
+        END
+        WHERE next_action_due_at IS NULL
+          AND workflow_state NOT IN ('CONVERTED', 'LOST')
+      `);
+      this.logger.log('[LeadService] next_action_due_at backfill complete');
+    } catch (e) {
+      this.logger.error('Failed to backfill next_action_due_at', e);
     }
 
   }
@@ -449,6 +641,12 @@ export class LeadService implements OnModuleInit {
       hasSerializedId: dto.hasSerializedId ?? false,
       lead_quality: quality,
       quality_score: score,
+      workflow_state: WorkflowState.FIRST_CALL,
+      workflow_state_entered_at: new Date(),
+      next_action_due_at: computeNextActionDue(WorkflowState.FIRST_CALL, dto.source, null),
+      call_attempt_count: 0,
+      no_answer_count: 0,
+      automation_manually_paused: false,
     });
 
     console.log('Saving lead with messageId:', lead.whatsappMessageId);
@@ -539,6 +737,25 @@ export class LeadService implements OnModuleInit {
       );
     }
 
+    // Manager review queue — surfaces all leads needing human intervention
+    if (filters.filter === 'manager-review') {
+      const managerRoles = ['Admin', 'COO', 'Sales Manager'];
+      if (!managerRoles.includes(user?.role)) throw new ForbiddenException('Manager review requires elevated access');
+      q.andWhere(
+        `(
+          l.tags @> '["needs_manager_review"]'
+          OR l.tags @> '["stale_lead"]'
+          OR l.tags @> '["callback_abuse_risk"]'
+          OR l.tags @> '["esc_final_warning"]'
+          OR l.no_answer_count >= 5
+          OR (l.next_action_due_at < NOW() - INTERVAL '72 hours' AND l.status NOT IN ('CONVERTED', 'LOST'))
+        )`,
+      );
+      q.andWhere('l.status NOT IN (:...terminalStates)', { terminalStates: ['CONVERTED', 'LOST'] });
+      q.orderBy('l.next_action_due_at', 'ASC');
+      return q.getMany();
+    }
+
     if (filters.status) q.andWhere('l.status = :status', { status: filters.status });
     if (filters.source) q.andWhere('l.source = :source', { source: filters.source });
     if (filters.assigned_to) q.andWhere('l.assigned_to = :at', { at: filters.assigned_to });
@@ -569,11 +786,14 @@ export class LeadService implements OnModuleInit {
     id: number,
     user: any,
     ip?: string,
-  ): Promise<Lead & { activityNotes: LeadNote[]; followups: LeadFollowUp[]; journey: any }> {
+  ): Promise<Lead & { activityNotes: LeadNote[]; followups: LeadFollowUp[]; journey: any; lockInfo: any }> {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
+    // Acquire 15-min view lock — warns other users that someone is actively working this lead
+    this.acquireLock(id, user);
+    const lockInfo = this.getLockInfo(id);
     void this.auditService.log(id, user.id, 'VIEWED', undefined, ip);
 
     const [notes, followups, quotationRows, orderRows, prevLeadRows] = await Promise.all([
@@ -605,68 +825,214 @@ export class LeadService implements OnModuleInit {
       previousLeadsCount: prevLeadRows.length,
     };
 
-    return { ...lead, activityNotes: notes, followups, journey };
+    return { ...lead, activityNotes: notes, followups, journey, lockInfo };
+  }
+
+  // ── Workflow state mutation helper ──────────────────────────────────────────
+
+  /**
+   * Atomically writes workflow_state + both SLA timestamps in one SQL round-trip.
+   * Validates the transition first — throws if invalid for non-bypass roles.
+   * Called from update() for status-driven transitions; logAction() uses its own
+   * atomic SQL block to avoid race conditions on counter increments.
+   */
+  private async transitionWorkflowState(
+    lead: Lead,
+    to: WorkflowState,
+    user: any,
+    ip?: string,
+    callbackDate?: Date | null,
+  ): Promise<{ nextDue: Date | null }> {
+    const from = lead.workflow_state as WorkflowState | null;
+    const isBypass = WORKFLOW_BYPASS_ROLES.includes(user?.role);
+    if (!isValidWorkflowTransition(from, to, isBypass)) {
+      throw new BadRequestException(`Invalid workflow transition: ${from ?? 'none'} → ${to}`);
+    }
+    const nextDue = computeNextActionDue(to, lead.source, callbackDate ?? lead.follow_up_date ?? null, new Date());
+    await this.ds.query(
+      `UPDATE leads SET workflow_state = $1, workflow_state_entered_at = NOW(), next_action_due_at = $3 WHERE id = $2`,
+      [to, lead.id, nextDue],
+    );
+    void this.auditService.log(lead.id, user.id, 'UPDATED', `Workflow: ${from ?? 'none'} → ${to}`, ip);
+    return { nextDue };
   }
 
   // ── Decision Engine endpoints ────────────────────────────────────────────────
 
-  /** Prioritised queue for the telecaller — active leads sorted by score + overdue flag */
+  /** Deterministic operational queue — leads sorted by 6-tier SLA priority engine.
+   *
+   *  Tier 1  CALLBACK_WAIT  due within 30 min (promised callback imminent / overdue)
+   *  Tier 2  SEND_QUOTATION                   (hot commercial intent, always beats generic overdue)
+   *  Tier 3  SLA breach     any standard state where next_action_due_at < NOW()
+   *  Tier 4  Escalation     NO_ANSWER_ESC or needs_manager_review tag
+   *  Tier 5  Active         FIRST_CALL / FOLLOW_UP / CHASE_QUOTATION / NEGOTIATING within SLA
+   *  Tier 6  Nurture        NURTURE re-engagement window open
+   *  Tier 0  Excluded       CONVERTED, LOST, future CALLBACK_WAIT, future NURTURE
+   *
+   *  Single DB query + in-memory tier computation — no N+1 queries.
+   *  Preserves existing item shape { lead, score, nextAction, isOverdue, ageHours }
+   *  and enriches with { queueTier, overdueMins, slaStatus }. */
   async getQueue(user: any): Promise<any[]> {
     const q = this.leadRepo.createQueryBuilder('l');
     q.where('l.is_active = true');
-    q.andWhere('l.status NOT IN (:...done)', { done: ['CONVERTED'] });
+    // CONVERTED and LOST are excluded from the operational queue.
+    // LOST leads can be surfaced via explicit re-engagement filters in future.
+    q.andWhere('l.status NOT IN (:...done)', { done: ['CONVERTED', 'LOST'] });
 
     const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
     if (!fullAccessRoles.includes(user?.role)) {
       q.andWhere('(l.assigned_to = :uid OR l.created_by = :uid)', { uid: user.id });
     }
 
-    // Exclude non-actionable quality tiers — telecallers cannot work TRACKING_ONLY/JUNK/DUPLICATE leads.
-    // NULL quality (pre-backfill rows) are treated as operational.
+    // Non-actionable quality tiers excluded — NULL quality rows treated as operational.
     q.andWhere(
       '(l.lead_quality IS NULL OR l.lead_quality NOT IN (:...nonOp))',
       { nonOp: ['TRACKING_ONLY', 'JUNK', 'DUPLICATE'] },
     );
 
-    q.orderBy('l.created_at', 'DESC');
+    // No DB ordering — tier engine produces the final sorted output
     const leads = await q.getMany();
+    const now    = Date.now();
+    const nowDate = new Date(now);
 
-    const now = Date.now();
-    const scored = leads.map((lead) => {
-      const score = this.decisionEngine.scoreLead(lead);
-      const nextAction = this.decisionEngine.getNextAction(lead);
-      const isOverdue = !!(lead.follow_up_date && new Date(lead.follow_up_date).getTime() < now);
-      const ageHours = Math.round((now - new Date(lead.created_at).getTime()) / 3_600_000);
-      return { lead, score, nextAction, isOverdue, ageHours };
+    const items = leads.map(lead => {
+      const score     = this.decisionEngine.scoreLead(lead);
+      const queueTier = computeQueueTier(lead, now);
+
+      // For CALLBACK_WAIT: pass next_action_due_at as callbackPromisedAt so the
+      // decision engine renders the correct countdown label in the queue card.
+      // All other history fields read from entity — no follow-up repo query needed.
+      const minHistory: OutcomeHistory = {
+        callAttempts:      lead.call_attempt_count ?? 0,
+        noAnswerCount:     lead.no_answer_count ?? 0,
+        laterCount:        0,
+        lastOutcomeType:   (lead.last_outcome_type as OutcomeHistory['lastOutcomeType']) ?? null,
+        lastCallAt:        lead.last_contacted_at ?? null,
+        lastObjectionType: lead.last_objection_type ?? null,
+        callbackPromisedAt: lead.workflow_state === WorkflowState.CALLBACK_WAIT
+          ? (lead.next_action_due_at ?? null)
+          : null,
+        workflowState: lead.workflow_state ?? null,
+      };
+
+      const nextAction  = this.decisionEngine.getNextAction(lead, minHistory);
+      const ageHours    = Math.round((now - new Date(lead.created_at).getTime()) / 3_600_000);
+      const dueMs       = lead.next_action_due_at ? new Date(lead.next_action_due_at).getTime() : null;
+      const isOverdue   = dueMs !== null && dueMs < now;
+      const overdueMins = dueMs !== null ? Math.round((now - dueMs) / 60_000) : 0;
+      const slaStatus   = computeSlaStatus(lead.next_action_due_at, nowDate);
+
+      const isBlocked = LeadService.isOperationallyBlocked(lead);
+      return { lead, score, nextAction, isOverdue, ageHours, queueTier, overdueMins, slaStatus, isBlocked };
     });
 
-    // Overdue leads first, then by score desc
-    scored.sort((a, b) => {
-      if (a.isOverdue !== b.isOverdue) return a.isOverdue ? -1 : 1;
-      return b.score - a.score;
+    // Exclude tier-0 leads (future wait states, terminals — no action needed now)
+    const operational = items.filter(i => i.queueTier > 0);
+
+    const urgencyRank: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
+
+    operational.sort((a, b) => {
+      // Primary: tier (1 = highest priority)
+      if (a.queueTier !== b.queueTier) return a.queueTier - b.queueTier;
+
+      // Secondary: tier-specific ordering
+      const aDue = a.lead.next_action_due_at ? +new Date(a.lead.next_action_due_at) : 0;
+      const bDue = b.lead.next_action_due_at ? +new Date(b.lead.next_action_due_at) : 0;
+
+      switch (a.queueTier) {
+        case 1: // CALLBACK_WAIT — soonest due / most recently overdue first (ASC)
+          return aDue - bDue;
+
+        case 2: // SEND_QUOTATION — oldest SLA first (most at risk of going cold)
+          return aDue - bDue;
+
+        case 3: // SLA BREACH — most overdue first (MAX overdueMins)
+          return b.overdueMins - a.overdueMins;
+
+        case 4: { // ESCALATION — highest no_answer_count, then score
+          const naDiff = (b.lead.no_answer_count ?? 0) - (a.lead.no_answer_count ?? 0);
+          return naDiff !== 0 ? naDiff : b.score - a.score;
+        }
+
+        case 5: { // ACTIVE PIPELINE — urgency → score → newest activity
+          const ua = urgencyRank[a.nextAction?.urgency] ?? 1;
+          const ub = urgencyRank[b.nextAction?.urgency] ?? 1;
+          if (ua !== ub) return ua - ub;
+          if (a.score !== b.score) return b.score - a.score;
+          const actA = +(a.lead.last_contacted_at ?? a.lead.created_at);
+          const actB = +(b.lead.last_contacted_at ?? b.lead.created_at);
+          return actB - actA;
+        }
+
+        case 6: // NURTURE — most overdue first
+          return b.overdueMins - a.overdueMins;
+
+        default:
+          return b.score - a.score;
+      }
     });
 
-    return scored;
+    return operational;
   }
 
-  /** Full decision context for a single lead */
+  /** Full decision context for a single lead.
+   *  Reads structured workflow memory directly from the lead entity — no note queries. */
   async getDecision(id: number, user: any): Promise<DecisionContext> {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
-    return this.decisionEngine.getDecisionContext(lead);
+
+    // Only fetch the next pending follow-up for callback countdown
+    const pendingFu = await this.followUpRepo.findOne({
+      where: { lead_id: id, is_completed: false },
+      order: { due_date: 'ASC' },
+    });
+
+    const history: OutcomeHistory = {
+      callAttempts:       lead.call_attempt_count ?? 0,
+      noAnswerCount:      lead.no_answer_count ?? 0,
+      laterCount:         0,  // not tracked separately; use workflowState instead
+      lastOutcomeType:    (lead.last_outcome_type as OutcomeHistory['lastOutcomeType']) ?? null,
+      lastCallAt:         lead.last_contacted_at ?? null,
+      lastObjectionType:  lead.last_objection_type ?? null,
+      callbackPromisedAt: pendingFu?.due_date ?? null,
+      workflowState:      lead.workflow_state ?? null,
+    };
+
+    return this.decisionEngine.getDecisionContext(lead, history);
   }
 
-  /** Log a call outcome note and optionally advance stage */
+  /** Log a call outcome note and optionally advance stage.
+   *  When outcomeType is provided, atomically updates all workflow memory fields
+   *  (workflow_state, last_outcome_type, counters, last_contacted_at) via SQL so
+   *  no counter drift can occur from concurrent requests. */
   async logAction(
     id: number,
-    body: { note: string; noteType?: NoteType; newStatus?: string },
+    body: {
+      note: string;
+      noteType?: NoteType;
+      newStatus?: string;
+      outcomeType?: OutcomeType;
+      objectionType?: string;
+      /** ISO datetime of promised callback — sent by frontend for LATER outcomes.
+       *  Used to set next_action_due_at = exact promised time for CALLBACK_WAIT state. */
+      callbackDate?: string;
+    },
     user: any,
     ip?: string,
   ): Promise<Lead> {
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
+
+    // Lock enforcement: reject if another user holds an active view lock (Admin/COO bypass)
+    const isBypass = ['Admin', 'COO'].includes(user?.role);
+    if (!isBypass) {
+      const lock = this.getLockInfo(id);
+      if (lock && lock.userId !== user.id) {
+        throw new ForbiddenException(`Lead is being worked by ${lock.userName}. Try again in a few minutes.`);
+      }
+    }
 
     const noteType = body.noteType ?? NoteType.CALL;
     await this.noteRepo.save(
@@ -686,6 +1052,136 @@ export class LeadService implements OnModuleInit {
         user_id:   user?.id ?? null,
         user_name: user?.name ?? null,
       });
+      // Auto-complete any pending AUTO follow-ups — workflow advances via call outcome,
+      // not via manual "Done" clicks, so orphaned AUTO reminders should be cleared.
+      await this.followUpRepo.update(
+        { lead_id: id, is_completed: false, created_by: IsNull() as any },
+        { is_completed: true, completed_at: new Date() },
+      );
+
+      // ── Atomic workflow memory mutation ────────────────────────────────────
+      // All counter increments use SQL so concurrent calls don't race.
+      if (body.outcomeType) {
+        const outcome = body.outcomeType;
+        let newWorkflowState: WorkflowState;
+        let resetNoAnswer = false;
+
+        if (outcome === OutcomeType.INTERESTED) {
+          newWorkflowState = WorkflowState.SEND_QUOTATION;
+          resetNoAnswer = true;
+        } else if (outcome === OutcomeType.LATER) {
+          // CHASE_QUOTATION + LATER = customer is still in discussion — advance to NEGOTIATING
+          newWorkflowState = lead.workflow_state === WorkflowState.CHASE_QUOTATION
+            ? WorkflowState.NEGOTIATING
+            : WorkflowState.CALLBACK_WAIT;
+          resetNoAnswer = true;
+        } else if (outcome === OutcomeType.NOT_INTERESTED) {
+          newWorkflowState = WorkflowState.NURTURE;
+        } else {
+          // NO_ANSWER — state depends on the new count after increment
+          // Computed in SQL CASE below (avoids read-then-write race)
+          newWorkflowState = WorkflowState.NO_ANSWER_1; // placeholder; overridden in SQL
+        }
+
+        const now = new Date();
+        const callbackDate = body.callbackDate ? new Date(body.callbackDate) : null;
+
+        if (outcome === OutcomeType.NO_ANSWER) {
+          // Increment no_answer_count and derive workflow_state + SLA timestamps atomically.
+          // next_action_due_at mirrors computeNextActionDue() for each NO_ANSWER state.
+          await this.ds.query(`
+            UPDATE leads SET
+              call_attempt_count        = COALESCE(call_attempt_count, 0) + 1,
+              no_answer_count           = COALESCE(no_answer_count, 0) + 1,
+              last_outcome_type         = $1,
+              last_contacted_at         = NOW(),
+              workflow_state_entered_at = NOW(),
+              workflow_state            = CASE
+                WHEN COALESCE(no_answer_count, 0) + 1 = 1 THEN 'NO_ANSWER_1'
+                WHEN COALESCE(no_answer_count, 0) + 1 = 2 THEN 'NO_ANSWER_2'
+                ELSE 'NO_ANSWER_ESC'
+              END,
+              next_action_due_at        = CASE
+                WHEN COALESCE(no_answer_count, 0) + 1 = 1 THEN NOW() + INTERVAL '8 hours'
+                WHEN COALESCE(no_answer_count, 0) + 1 = 2 THEN NOW() + INTERVAL '24 hours'
+                ELSE NOW() + INTERVAL '48 hours'
+              END
+            WHERE id = $2
+          `, [outcome, id]);
+
+          // Circuit breaker: 5+ unanswered calls → tag + escalate to manager
+          const newNoAnswerCount = (lead.no_answer_count ?? 0) + 1;
+          if (newNoAnswerCount >= 5) {
+            await this.ds.query(`
+              UPDATE leads
+              SET tags = CASE
+                WHEN NOT (COALESCE(tags, '[]'::jsonb) ? 'needs_manager_review')
+                  THEN COALESCE(tags, '[]'::jsonb) || '["needs_manager_review"]'::jsonb
+                ELSE tags
+              END
+              WHERE id = $1
+            `, [id]);
+            this.eventEmitter.emit('crm.lead.escalated', {
+              id,
+              name:             lead.name,
+              phone:            lead.phone ?? null,
+              assigned_to:      lead.assigned_to ?? null,
+              product_interest: lead.product_interest ?? null,
+              reason:           `NO_ANSWER circuit breaker: ${newNoAnswerCount} unanswered calls`,
+              no_answer_count:  newNoAnswerCount,
+            });
+          }
+        } else {
+          // All other outcomes — compute SLA deadline via single source of truth function
+          const nextDue = computeNextActionDue(newWorkflowState, lead.source, callbackDate, now);
+          await this.ds.query(`
+            UPDATE leads SET
+              call_attempt_count        = COALESCE(call_attempt_count, 0) + 1,
+              no_answer_count           = COALESCE($1, no_answer_count),
+              last_outcome_type         = $2,
+              last_objection_type       = COALESCE($3, last_objection_type),
+              last_contacted_at         = NOW(),
+              workflow_state            = $4,
+              workflow_state_entered_at = NOW(),
+              next_action_due_at        = $6
+            WHERE id = $5
+          `, [
+            resetNoAnswer ? 0 : null,
+            outcome,
+            body.objectionType ?? null,
+            newWorkflowState,
+            id,
+            nextDue,
+          ]);
+        }
+      } else {
+        // Unstructured CALL note (free-text, no outcomeType) — only increment attempt count
+        await this.ds.query(`
+          UPDATE leads SET
+            call_attempt_count = COALESCE(call_attempt_count, 0) + 1,
+            last_contacted_at  = NOW()
+          WHERE id = $1
+        `, [id]);
+
+        // Warn in critical states where structured outcomes are required for pipeline accuracy
+        const criticalStates = new Set<WorkflowState>([
+          WorkflowState.CALLBACK_WAIT,
+          WorkflowState.SEND_QUOTATION,
+          WorkflowState.CHASE_QUOTATION,
+          WorkflowState.NEGOTIATING,
+        ]);
+        if (lead.workflow_state && criticalStates.has(lead.workflow_state as WorkflowState)) {
+          await this.noteRepo.save(
+            this.noteRepo.create({
+              lead_id: id,
+              note:    `⚠️ Call logged without an outcome in ${lead.workflow_state} state. Select an outcome (Interested / Later / No Answer) to keep the pipeline accurate.`,
+              type:    NoteType.SYSTEM,
+              created_by: user.id,
+            }),
+          );
+          void this.auditService.log(id, user.id, 'UPDATED', `Unstructured call in critical state: ${lead.workflow_state}`, ip);
+        }
+      }
     }
 
     if (noteType === NoteType.SYSTEM) {
@@ -701,7 +1197,8 @@ export class LeadService implements OnModuleInit {
       return this.update(id, { status: body.newStatus as LeadStatus } as UpdateLeadDto, user, ip);
     }
 
-    return lead;
+    // Return the fresh lead so callers see the updated workflow state
+    return (await this.leadRepo.findOne({ where: { id } }))!;
   }
 
   // ── Update (with workflow enforcement) ──────────────────────────────────────
@@ -749,6 +1246,43 @@ export class LeadService implements OnModuleInit {
         const targetStage = this.computeTargetStageForStatus(saved.stage, saved.status as LeadStatus);
         if (targetStage) {
           saved = await this.updateStage(saved.id, targetStage, user);
+        }
+
+        // Sync workflow_state to match new status — status change always overrides
+        // any outcome-derived state because a manual stage advance is intentional.
+        const statusToWorkflowState: Partial<Record<LeadStatus, WorkflowState>> = {
+          [LeadStatus.NEW]:        WorkflowState.FIRST_CALL,
+          [LeadStatus.CONTACTED]:  WorkflowState.FOLLOW_UP,
+          [LeadStatus.INTERESTED]: WorkflowState.SEND_QUOTATION,
+          [LeadStatus.QUOTATION]:  WorkflowState.CHASE_QUOTATION,
+          [LeadStatus.CONVERTED]:  WorkflowState.CONVERTED,
+          [LeadStatus.LOST]:       WorkflowState.LOST,
+        };
+        const targetWfState = statusToWorkflowState[saved.status as LeadStatus];
+        if (targetWfState) {
+          // Regression protection: if the lead is already in a protected state
+          // at a higher rank, skip the workflow_state update for non-bypass roles.
+          // The status change is still persisted — only the workflow_state is guarded.
+          const currentWfState = saved.workflow_state as WorkflowState | null;
+          const currentRank    = currentWfState ? (WORKFLOW_RANK[currentWfState] ?? 0) : 0;
+          const targetRank     = WORKFLOW_RANK[targetWfState] ?? 0;
+          const isBypass       = WORKFLOW_BYPASS_ROLES.includes(user?.role);
+          const isRegression   = !isBypass && currentWfState && PROTECTED_WORKFLOW_STATES.has(currentWfState) && targetRank < currentRank;
+
+          if (isRegression) {
+            this.logger.warn(
+              `[update] Workflow regression blocked for lead ${id}: ${currentWfState}(rank ${currentRank}) → ${targetWfState}(rank ${targetRank})`,
+            );
+          } else {
+            const nextDue = computeNextActionDue(targetWfState, saved.source, saved.follow_up_date, new Date());
+            await this.ds.query(
+              `UPDATE leads SET workflow_state = $1, workflow_state_entered_at = NOW(), next_action_due_at = $3 WHERE id = $2`,
+              [targetWfState, id, nextDue],
+            );
+            saved.workflow_state = targetWfState;
+            saved.workflow_state_entered_at = new Date();
+            saved.next_action_due_at = nextDue!;
+          }
         }
       }
 
@@ -823,10 +1357,26 @@ export class LeadService implements OnModuleInit {
     return this.noteRepo.find({ where: { lead_id: leadId }, order: { created_at: 'DESC' } });
   }
 
+  private static isOperationallyBlocked(lead: Lead): boolean {
+    return (lead.no_answer_count ?? 0) >= 5;
+  }
+
   async addFollowUp(leadId: number, body: { due_date: string; note?: string }, user: any, ip?: string): Promise<LeadFollowUp> {
     const lead = await this.leadRepo.findOne({ where: { id: leadId, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
+
+    // Write an audit signal when scheduling a callback on an operationally blocked lead
+    if (LeadService.isOperationallyBlocked(lead)) {
+      await this.noteRepo.save(
+        this.noteRepo.create({
+          lead_id: leadId,
+          note: `⚠️ [NO ANSWER ESC] Scheduling callback on operationally blocked lead (${lead.no_answer_count} unanswered calls).`,
+          type: NoteType.SYSTEM,
+          created_by: user.id,
+        }),
+      );
+    }
 
     const fu = this.followUpRepo.create({
       lead_id: leadId,
@@ -963,7 +1513,8 @@ export class LeadService implements OnModuleInit {
     // 3. Parallel intelligence queries — all touch indexed columns
     let customerRows: any[], ordersRows: any[], recentProductsRows: any[],
         financeRows: any[], ticketsRows: any[], amcRows: any[], pendingQuotesRows: any[],
-        channelsRows: any[], salesmenRows: any[], ownershipRows: any[], recentLeadsRows: any[];
+        channelsRows: any[], salesmenRows: any[], ownershipRows: any[], recentLeadsRows: any[],
+        conversionTimelineRows: any[], topObjectionRows: any[];
     try {
       [
         customerRows,
@@ -977,6 +1528,8 @@ export class LeadService implements OnModuleInit {
         salesmenRows,
         ownershipRows,
         recentLeadsRows,
+        conversionTimelineRows,
+        topObjectionRows,
       ] = await Promise.all([
         em.query(
           `SELECT id, "companyName", "contactName", mobile1, email, city, "createdAt", "creditLimit" FROM customer WHERE id = $1`,
@@ -1058,6 +1611,31 @@ export class LeadService implements OnModuleInit {
           `SELECT id, status, stage, source, created_at FROM leads
            WHERE customer_id = $1 AND is_active = true
            ORDER BY created_at DESC LIMIT 5`,
+          [customerId],
+        ),
+        // conversion timeline intelligence
+        em.query(
+          `SELECT
+             COUNT(*) AS total_leads,
+             COUNT(*) FILTER (WHERE status = 'CONVERTED') AS converted_leads,
+             ROUND(AVG(
+               EXTRACT(EPOCH FROM (updated_at - created_at)) / 86400.0
+             ) FILTER (WHERE status = 'CONVERTED')::numeric, 1) AS avg_sales_cycle_days,
+             ROUND(EXTRACT(EPOCH FROM (
+               MAX(updated_at) FILTER (WHERE status = 'CONVERTED')
+               - MIN(created_at) FILTER (WHERE status = 'CONVERTED')
+             )) / 86400.0, 1) AS last_cycle_span_days
+           FROM leads
+           WHERE customer_id = $1 AND is_active = true`,
+          [customerId],
+        ),
+        // most common objection this customer gave
+        em.query(
+          `SELECT last_objection_type, COUNT(*) AS cnt
+           FROM leads
+           WHERE customer_id = $1 AND last_objection_type IS NOT NULL AND is_active = true
+           GROUP BY last_objection_type
+           ORDER BY cnt DESC LIMIT 1`,
           [customerId],
         ),
       ]);
@@ -1192,6 +1770,17 @@ export class LeadService implements OnModuleInit {
         source: r.source,
         createdAt: r.created_at,
       })),
+      conversionTimeline: (() => {
+        const t = conversionTimelineRows[0] ?? {};
+        return {
+          totalLeads:         +t.total_leads || 0,
+          convertedLeads:     +t.converted_leads || 0,
+          avgSalesCycleDays:  t.avg_sales_cycle_days !== null ? +t.avg_sales_cycle_days : null,
+          lastCycleSpanDays:  t.last_cycle_span_days !== null ? +t.last_cycle_span_days : null,
+          repeatLeadFrequency: +t.total_leads > 1 ? +t.total_leads : 0,
+          mostCommonObjection: topObjectionRows[0]?.last_objection_type ?? null,
+        };
+      })(),
     };
   }
 
@@ -1978,6 +2567,9 @@ export class LeadService implements OnModuleInit {
     } else {
       lead.tags = tags.filter(t => t !== 'automation_off');
     }
+    // Track whether this is a deliberate manager pause (vs a temporary snooze).
+    // resumeExpiredSnoozes() only auto-clears automation_off when this is false.
+    lead.automation_manually_paused = paused;
     // Always clear snooze state when manually pausing or resuming
     lead.automation_snooze_until = null;
     lead.automation_snooze_reason = null;
@@ -2016,6 +2608,7 @@ export class LeadService implements OnModuleInit {
   ): Promise<Lead> {
     if (!reason?.trim()) throw new BadRequestException('Reason is required to snooze automation');
     if (!durationMins || durationMins <= 0) throw new BadRequestException('Duration must be a positive number of minutes');
+    if (durationMins > 10_080) throw new BadRequestException('Automation snooze cannot exceed 7 days (10,080 minutes)');
 
     const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
     if (!lead) throw new NotFoundException('Lead not found');
@@ -2026,6 +2619,63 @@ export class LeadService implements OnModuleInit {
     const snoozeUntil = new Date(Date.now() + durationMins * 60 * 1000);
     lead.automation_snooze_until = snoozeUntil;
     lead.automation_snooze_reason = reason.trim();
+    // A snooze is temporary — it must NOT override a manager's deliberate manual pause flag.
+    // Only set to false here; setAutomationPaused sets it to true when manager acts.
+    lead.automation_manually_paused = false;
+
+    // Snooze / callback abuse detection
+    const snoozeCountRows: Array<{ count: string }> = await this.ds.query(`
+      SELECT COUNT(*) AS count
+      FROM lead_audit_logs
+      WHERE lead_id = $1
+        AND action = 'UPDATED'
+        AND detail LIKE 'Automation snoozed%'
+        AND created_at > NOW() - INTERVAL '30 days'
+    `, [id]);
+    const recentSnoozeCount = parseInt(snoozeCountRows[0]?.count ?? '0', 10);
+    const currentTags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
+    const hasAbuseTag = currentTags.includes('callback_abuse_risk');
+
+    // Block further snoozing when abuse threshold is reached and tag is already set
+    if (hasAbuseTag && recentSnoozeCount >= 3) {
+      await this.noteRepo.save(
+        this.noteRepo.create({
+          lead_id: id,
+          note: `[CALLBACK MOVED] Snooze blocked — callback pushed ${recentSnoozeCount + 1} times in 30 days.`,
+          type: NoteType.SYSTEM,
+          created_by: user.id,
+        }),
+      );
+      void this.auditService.log(id, user.id, 'UPDATED', `[CALLBACK MOVED] snooze blocked (${recentSnoozeCount + 1} attempts)`, ip);
+      return lead; // abort without saving the snooze
+    }
+
+    // Tag callback abuse risk at 2+ snoozes (proxy for consecutive LATER outcomes)
+    if (recentSnoozeCount >= 2 && !hasAbuseTag) {
+      lead.tags = [...currentTags, 'callback_abuse_risk'];
+      await this.noteRepo.save(
+        this.noteRepo.create({
+          lead_id: id,
+          note: `[CALLBACK MOVED] Callback pushed ${recentSnoozeCount + 1} times — flagged for manager review.`,
+          type: NoteType.SYSTEM,
+          created_by: user.id,
+        }),
+      );
+    }
+
+    // Escalate to manager at 3+ snoozes
+    if (recentSnoozeCount >= 3) {
+      this.eventEmitter.emit('crm.lead.escalated', {
+        id,
+        name:             lead.name,
+        phone:            lead.phone ?? null,
+        assigned_to:      lead.assigned_to ?? null,
+        product_interest: lead.product_interest ?? null,
+        reason:           `Callback abuse: ${recentSnoozeCount + 1} automation snoozes in the last 30 days`,
+        no_answer_count:  lead.no_answer_count ?? 0,
+      });
+    }
+
     const saved = await this.leadRepo.save(lead);
 
     // Audit trail
