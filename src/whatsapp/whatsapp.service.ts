@@ -77,6 +77,11 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   // and stop the infinite regeneration loop. Manual reconnect required after this.
   private readonly MAX_QR_RETRIES = 5;
   private _qrPaused = false;
+  /** True when persisted LocalAuth data existed before the current init cycle. */
+  private _authExistedBeforeInit = false;
+  /** True if a QR was emitted during the current init cycle (not a silent restore). */
+  private _qrShownThisInit = false;
+  private _instanceLockHeld = false;
 
   constructor(
     @InjectRepository(WhatsAppSession)
@@ -87,21 +92,29 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   async onModuleInit() {
-    this.logger.log('WhatsApp module init — starting Chromium in background');
+    this.logger.log('[WA_INIT] Module init — scheduling client bootstrap');
     this.qrSubject.next(JSON.stringify({ type: 'initializing' }));
     setImmediate(() => this.initClient().catch((e) => {
-      this.logger.error('WhatsApp init failed', e?.stack ?? e?.message);
+      this.logger.error('[WA_INIT] Bootstrap failed', e?.stack ?? e?.message);
       this.qrSubject.next(JSON.stringify({ type: 'error', message: e?.message }));
     }));
   }
 
   async onModuleDestroy() {
+    this.logger.log('[WA_DESTROY] Module shutting down');
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer);
+      this._retryTimer = null;
+    }
     this.stopHealthMonitor();
     this._ready = false;
+    this._manualDisconnect = true;
     if (this.client) {
       try { await this.client.destroy(); } catch { /* ignore */ }
       this.client = null;
     }
+    this._manualDisconnect = false;
+    this.releaseInstanceLock();
   }
 
   // ── Core init ────────────────────────────────────────────────────────────────
@@ -110,15 +123,23 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     // Guard: prevent two Chromium instances racing on the same LocalAuth directory.
     // This is the root cause of "browser is already running for session ..." errors.
     if (this._initializing) {
-      this.logger.warn('[WhatsApp] initClient() called while already initializing — skipping duplicate');
+      this.logger.warn('[WA_INIT] initClient() skipped — already initializing');
       return;
     }
     if (this.client) {
-      this.logger.warn('[WhatsApp] initClient() called but client already exists — skipping');
+      this.logger.warn('[WA_INIT] initClient() skipped — client already exists');
+      return;
+    }
+    if (!this.tryAcquireInstanceLock()) {
+      this.qrSubject.next(JSON.stringify({
+        type: 'error',
+        message: 'Another backend instance is already running WhatsApp. Stop the duplicate process and refresh.',
+      }));
       return;
     }
 
     this._initializing = true;
+    this.logger.log(`[WA_INIT] Starting client (session=${this.sessionName}, pid=${process.pid}, authDir=${this.getSessionDir()})`);
     const MAX_ATTEMPTS = 3;
 
     try {
@@ -208,6 +229,11 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`WA Web version URL: ${waVersionUrl}`);
 
     this.qrCount = 0;
+    this._qrShownThisInit = false;
+    this._authExistedBeforeInit = this.hasPersistedAuth();
+    if (this._authExistedBeforeInit) {
+      this.logger.log('[WA_INIT] Persisted auth found — expecting session restore without QR');
+    }
 
     this.client = new Client({
       authStrategy: new LocalAuth({ clientId: this.sessionName }),
@@ -273,7 +299,8 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`[WhatsApp] QR expired before scan — regenerating (was #${this.qrCount - 1})`);
       }
       this.qrGenerated = true;
-      this.logger.log(`[WhatsApp] QR #${this.qrCount} generated — awaiting scan`);
+      this._qrShownThisInit = true;
+      this.logger.log(`[WA_QR] QR #${this.qrCount} generated — awaiting scan (~60s expiry per WA Web)`);
 
       let QRCode: any;
       try { QRCode = (await import('qrcode')).default; } catch { return; }
@@ -307,8 +334,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     // flow we are — if we see 'authenticated' but never 'ready', the issue is
     // in session loading (likely a WA version mismatch or network timeout).
     this.client.on('authenticated', () => {
-      this.logger.log('[WhatsApp] QR scanned — device pairing approved');
-      this.logger.log('[WhatsApp] Authentication successful — waiting for session to load');
+      this.logger.log('[WA_AUTH] Device pairing approved — waiting for session load');
       this.qrSubject.next(JSON.stringify({ type: 'authenticated' }));
       this._adminEventSubject.next(JSON.stringify({ type: 'authenticated', timestamp: new Date().toISOString() }));
     });
@@ -336,7 +362,10 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       }
       await this.updateSession({ status: 'CONNECTED', qr_code: null, phone_number: phone, connected_at: new Date(), disconnected_at: null });
       this.qrSubject.next(JSON.stringify({ type: 'ready', phone }));
-      this.logger.log(`[WhatsApp] Connected as +${phone}`);
+      if (this._authExistedBeforeInit && !this._qrShownThisInit) {
+        this.logger.log(`[WA_SESSION_RESTORED] Session restored from disk as +${phone} (no QR required)`);
+      }
+      this.logger.log(`[WA_READY] Connected as +${phone}`);
       this._lastReadyAt = new Date();
       this._qrDataUrl = null;
       this._qrGeneratedAt = null;
@@ -412,6 +441,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         await this.clearAuthFiles();
       }
 
+      this.logger.log(`[WA_RECONNECT] Scheduling reconnect in 10s (reason=${reason})`);
       this.scheduleReinit(10_000);
     });
 
@@ -430,6 +460,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       }));
       this.eventEmitter.emit('whatsapp.down', { reason: 'AUTH_FAILURE' });
       await this.clearSessionFiles();
+      this.logger.log('[WA_RECONNECT] Auth failure — scheduling reconnect in 10s');
       this.scheduleReinit(10_000);
     });
 
@@ -609,12 +640,103 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     if (this._retryTimer) {
       clearTimeout(this._retryTimer);
       this._retryTimer = null;
-      this.logger.debug('[WhatsApp] Cancelled pending retry timer — scheduling fresh one');
+      this.logger.debug('[WA_RECONNECT] Cancelled pending retry timer');
     }
     this._retryTimer = setTimeout(() => {
       this._retryTimer = null;
-      this.reinitClient().catch((e) => this.logger.error('[WhatsApp] Reinit failed', e?.message));
+      this.reinitClient().catch((e) => this.logger.error('[WA_RECONNECT] Reinit failed', e?.message));
     }, delayMs);
+  }
+
+  // ── Instance lock + auth paths ──────────────────────────────────────────────
+
+  private getAuthRootDir(): string {
+    return path.join(process.cwd(), '.wwebjs_auth');
+  }
+
+  private getSessionDir(): string {
+    return path.join(this.getAuthRootDir(), `session-${this.sessionName}`);
+  }
+
+  private getInstanceLockPath(): string {
+    return path.join(this.getAuthRootDir(), '.wa-instance.lock');
+  }
+
+  /** Returns true if another live process already owns the WhatsApp instance lock. */
+  private tryAcquireInstanceLock(): boolean {
+    const lockPath = this.getInstanceLockPath();
+    fs.mkdirSync(this.getAuthRootDir(), { recursive: true });
+    const myPid = process.pid;
+
+    if (fs.existsSync(lockPath)) {
+      try {
+        const existing = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as {
+          pid?: number;
+          startedAt?: string;
+          sessionName?: string;
+        };
+        if (existing.pid === myPid) {
+          this._instanceLockHeld = true;
+          return true;
+        }
+        if (existing.pid && this.isProcessAlive(existing.pid)) {
+          this.logger.error(
+            `[WA_DUPLICATE_INSTANCE] Blocked init — pid=${existing.pid} started=${existing.startedAt ?? '?'} session=${existing.sessionName ?? '?'}`,
+          );
+          return false;
+        }
+        this.logger.warn(`[WA_INIT] Stale lock from dead pid=${existing.pid} — reclaiming`);
+      } catch {
+        this.logger.warn('[WA_INIT] Corrupt instance lock — overwriting');
+      }
+    }
+
+    fs.writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: myPid,
+        startedAt: new Date().toISOString(),
+        sessionName: this.sessionName,
+      }),
+    );
+    this._instanceLockHeld = true;
+    return true;
+  }
+
+  private releaseInstanceLock(): void {
+    if (!this._instanceLockHeld) return;
+    const lockPath = this.getInstanceLockPath();
+    try {
+      if (fs.existsSync(lockPath)) {
+        const existing = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as { pid?: number };
+        if (existing.pid === process.pid) {
+          fs.unlinkSync(lockPath);
+        }
+      }
+    } catch { /* non-fatal on shutdown */ }
+    this._instanceLockHeld = false;
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** True when LocalAuth credentials exist on disk (not just Chromium lock files). */
+  private hasPersistedAuth(): boolean {
+    const sessionDir = this.getSessionDir();
+    if (!fs.existsSync(sessionDir)) return false;
+    try {
+      return fs.readdirSync(sessionDir).some(
+        (name) => !CHROMIUM_LOCK_FILES.includes(name as typeof CHROMIUM_LOCK_FILES[number]),
+      );
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -694,7 +816,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     if (this.client) {
       try { await this.client.destroy(); } catch { /* already gone */ }
       this.client = null;
-      this.logger.log('[WhatsApp] Destroyed existing client');
+      this.logger.log('[WA_DESTROY] Destroyed existing client before lock cleanup');
     }
 
     // 2. Kill any orphaned Chromium process that survived client.destroy().
@@ -834,7 +956,8 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         // Raise a WHATSAPP_DOWN alert — this path bypasses the 'disconnected' event handler
         this.eventEmitter.emit('whatsapp.down', { reason: 'SILENT' });
         this.stopHealthMonitor();
-        this.reinitClient().catch((e) => this.logger.error('[WhatsApp] Health reinit failed', e?.message));
+        this.logger.log('[WA_RECONNECT] Health monitor detected silent disconnect');
+        this.reinitClient().catch((e) => this.logger.error('[WA_RECONNECT] Health reinit failed', e?.message));
         return;
       }
 
@@ -859,7 +982,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    this.logger.log('[WhatsApp] Reinitializing client...');
+    this.logger.log('[WA_RECONNECT] Reinitializing client');
     this.qrSubject.next(JSON.stringify({ type: 'initializing' }));
 
     if (this.client) {

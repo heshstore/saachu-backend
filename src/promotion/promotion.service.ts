@@ -4,6 +4,10 @@ import { DataSource, Repository } from 'typeorm';
 import { PromotionContact } from './entities/promotion-contact.entity';
 import { PromotionCaptureDto } from './dto/promotion-capture.dto';
 import { LogsService, LogAction } from '../logs/logs.service';
+import { LeadService } from '../crm/lead.service';
+import { LeadSource } from '../crm/entities/lead.entity';
+import { LeadContext, contextToLabel } from '../crm/enums/lead-context.enum';
+import { normalizePhoneForIdentity } from '../crm/normalizers/lead-normalizer';
 
 @Injectable()
 export class PromotionService {
@@ -14,6 +18,7 @@ export class PromotionService {
     private readonly repo: Repository<PromotionContact>,
     private readonly dataSource: DataSource,
     private readonly logsService: LogsService,
+    private readonly leadService: LeadService,
   ) {}
 
   private async ensureTable(): Promise<void> {
@@ -40,18 +45,11 @@ export class PromotionService {
    * against the leads table. Returns empty string if input is unusable.
    */
   private normalizePhone(raw: string): string {
-    if (!raw) return '';
-    const digits = raw.replace(/\D/g, '');
-    if (digits.length === 10) return '+91' + digits;
-    if (digits.length === 12 && digits.startsWith('91')) return '+' + digits;
-    if (raw.startsWith('+') && digits.length >= 10) return '+' + digits;
-    return '';
+    return normalizePhoneForIdentity(raw) ?? '';
   }
 
   /**
    * Returns true if any active lead in the CRM already owns this phone number.
-   * Compares both the E.164 form and the bare 10-digit form to cover both storage
-   * conventions (older leads may be stored without the country prefix).
    */
   private async phoneExistsInLeads(rawPhone: string): Promise<boolean> {
     const normalized = this.normalizePhone(rawPhone);
@@ -70,9 +68,8 @@ export class PromotionService {
   }
 
   /**
-   * Inserts a minimal lead row for a name+phone submission that arrived via the
-   * promotion endpoint. Uses raw SQL to avoid importing LeadService (circular dep).
-   * Phone is normalised to E.164 before insert. Returns the new lead id.
+   * Routes name+phone promotion captures through LeadService.create()
+   * (identity gate, quality scoring, assignment, dedup).
    */
   private async saveAsLead(
     name: string,
@@ -82,37 +79,28 @@ export class PromotionService {
     pageUrl: string | undefined,
   ): Promise<number> {
     const normalized = this.normalizePhone(phone);
-
-    const rows: { id: number }[] = await this.dataSource.query(
-      `INSERT INTO leads
-         (name, phone, email, source, status, lead_priority, lead_source_label,
-          landing_page, tags, is_active, duplicate_flag, created_at, updated_at)
-       VALUES
-         ($1, $2, $3, 'SHOPIFY', 'NEW', 'MEDIUM', $4, $5, '[]', true, false, now(), now())
-       ON CONFLICT DO NOTHING
-       RETURNING id`,
-      [
+    const result = await this.leadService.create(
+      {
         name,
-        normalized || phone,
-        email ?? null,
-        source ?? 'SHOPIFY – Promotion Form',
-        pageUrl ?? null,
-      ],
+        phone: normalized || undefined,
+        email: email || undefined,
+        source: LeadSource.SHOPIFY,
+        lead_source_label: source ?? 'SHOPIFY – Promotion Form',
+        landing_page: pageUrl ?? '',
+        context: contextToLabel(LeadContext.SHOPIFY_PRODUCT_FORM),
+      },
+      { id: null, role: 'Admin' },
     );
 
-    // ON CONFLICT DO NOTHING returns 0 rows — fetch the existing one
-    if (rows.length === 0) {
-      const existing: { id: number }[] = await this.dataSource.query(
-        `SELECT id FROM leads WHERE phone = $1 AND is_active = true ORDER BY created_at DESC LIMIT 1`,
-        [normalized || phone],
+    if (result.analyticsOnly || !result.lead) {
+      this.logger.warn(
+        `[LEAD_BLOCKED] source=promotion_capture reason=${result.reason ?? 'no_identity'}`,
       );
-      return existing[0]?.id ?? 0;
+      return 0;
     }
 
-    return rows[0].id;
+    return result.lead.id;
   }
-
-  // ─────────────────────────────────────────────────────────────────────────────
 
   async create(dto: PromotionCaptureDto): Promise<{
     success: boolean;
@@ -122,7 +110,6 @@ export class PromotionService {
   }> {
     await this.ensureTable();
 
-    // Normalise empty strings to undefined
     const name    = (dto.name            || '').trim() || undefined;
     const phone   = (dto.whatsapp_number || '').trim() || undefined;
     const email   = (dto.email           || '').trim() || undefined;
@@ -131,11 +118,12 @@ export class PromotionService {
       throw new BadRequestException('At least one of whatsapp_number or email is required.');
     }
 
-    console.log('Promotion Capture:', { name, phone, email });
-
     // ── Rule 1: name + phone → save as CRM lead, not promotion ───────────────
     if (name && phone) {
       const leadId = await this.saveAsLead(name, phone, email, dto.source, dto.page_url);
+      if (!leadId) {
+        return { success: true, message: 'Tracked as analytics (no CRM identity)', routed_to: 'skipped' };
+      }
       this.logger.log(`Promotion routed to lead id=${leadId} (name+phone present)`);
       this.logsService.log(LogAction.LEAD_CREATED, { leadId, phone, routed_from: 'promotion', name });
       return { success: true, message: 'Saved as lead', routed_to: 'lead', id: leadId };

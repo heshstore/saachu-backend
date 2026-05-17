@@ -7,6 +7,7 @@ import { WhatsAppService } from '../whatsapp/whatsapp.service';
 import { NotificationService } from '../notifications/notification.service';
 import { NotificationType, NotificationPriority } from '../notifications/notification.entity';
 import { LeadSource, LeadStatus, WorkflowState } from './entities/lead.entity';
+import { LeadAuditService } from './lead-audit.service';
 
 export interface LeadCreatedEvent {
   id:              number;
@@ -54,6 +55,7 @@ export class LeadAutomationService {
     @InjectDataSource() private readonly ds: DataSource,
     private readonly waService: WhatsAppService,
     private readonly notifService: NotificationService,
+    private readonly auditService: LeadAuditService,
   ) {}
 
   // ── WA Circuit Breaker (memory-only, no DB) ───────────────────────────────────
@@ -106,15 +108,13 @@ export class LeadAutomationService {
   }
 
   private async markEscalated(leadId: number, escalationType: string): Promise<void> {
-    try {
-      await this.ds.query(
-        `INSERT INTO lead_audit_logs (lead_id, action, detail, created_at)
-         VALUES ($1, 'ESCALATED', $2, NOW())`,
-        [leadId, `${escalationType}: automated escalation`],
-      );
-    } catch (e: any) {
-      this.logger.warn(`markEscalated failed for lead ${leadId}: ${e?.message}`);
-    }
+    // Route through LeadAuditService — DO NOT insert into lead_audit_logs directly.
+    await this.auditService.log(
+      leadId,
+      this.auditService.getSystemUserId(),
+      'ESCALATED',
+      `${escalationType}: automated escalation`,
+    );
   }
 
   // ── Escalation tag helper ─────────────────────────────────────────────────────

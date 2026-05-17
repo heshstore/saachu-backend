@@ -7,7 +7,6 @@ import { Public } from '../auth/public.decorator';
 import { LeadService } from './lead.service';
 import { normalizeIndiaMart } from './normalizers/indiamart.normalizer';
 import { normalizeMetaLead } from './normalizers/meta.normalizer';
-import { normalizeShopify } from './normalizers/shopify.normalizer';
 import { appConfig } from '../config/config';
 import { Lead } from './entities/lead.entity';
 import axios from 'axios';
@@ -45,7 +44,8 @@ export class WebhookController {
       try {
         const dto = normalizeIndiaMart(body);
         if (!dto.phone || dto.phone === 'unknown') return;
-        await this.leadService.create(dto as any, { id: null, role: 'Admin' });
+        const created = await this.leadService.create(dto as any, { id: null, role: 'Admin' });
+        if (created.analyticsOnly) return;
       } catch (e) {
         this.logger.error('[IndiaMart] processing failed', e?.message);
       }
@@ -146,9 +146,13 @@ export class WebhookController {
               continue;
             }
 
-            const { lead } = await this.leadService.create(dto as any, { id: null, role: 'Admin' });
-            this.logger.log(`Meta: lead created id=${lead.id} for leadgen_id=${leadgenId}`);
-            this.notifyNewLead(lead);
+            const created = await this.leadService.create(dto as any, { id: null, role: 'Admin' });
+            if (created.analyticsOnly || !created.lead) {
+              this.logger.warn(`Meta: leadgen_id=${leadgenId} blocked — no valid identity`);
+              continue;
+            }
+            this.logger.log(`Meta: lead created id=${created.lead.id} for leadgen_id=${leadgenId}`);
+            this.notifyNewLead(created.lead);
           }
         }
       } catch (e: any) {
@@ -159,7 +163,10 @@ export class WebhookController {
     return { ok: true };
   }
 
-  // ─── Shopify contact form ─────────────────────────────────────────────────
+  /**
+   * @deprecated Use POST /api/leads/shopify (theme JS). Kept for legacy Shopify admin webhooks.
+   * Routes through createFromShopifyClick() for the same identity rules as the primary path.
+   */
   @Public()
   @Post('shopify')
   @HttpCode(200)
@@ -168,6 +175,10 @@ export class WebhookController {
     @Headers('x-shopify-hmac-sha256') sig: string,
     @Req() req: Request & { rawBody?: Buffer },
   ) {
+    this.logger.warn(
+      '[DEPRECATED_INGEST] route=POST /leads/webhook/shopify reason=migrate_to_api_leads_shopify',
+    );
+
     // Fail closed: require webhook secret configured; Shopify signs with base64, not hex.
     if (!appConfig.shopifyWebhookSecret) {
       this.logger.warn('Shopify webhook: shopifyWebhookSecret not configured — rejecting all requests');
@@ -184,17 +195,25 @@ export class WebhookController {
       return { ok: true };
     }
 
-    this.logger.log('Shopify webhook received');
-
     setImmediate(async () => {
       try {
-        const dto = normalizeShopify(body);
-        if (!dto.phone && !dto.email) {
-          this.logger.warn('Shopify webhook: no phone or email — skipping');
-          return;
+        const result = await this.leadService.createFromShopifyClick({
+          name: body.name || body.contact_name,
+          phone: body.phone || body.mobile,
+          email: body.email,
+          city: body.city,
+          country: body.country,
+          message: body.message || body.body,
+          product: body.product,
+          product_title: body.product_title,
+          page_url: body.page_url,
+          action: body.type || body.action,
+          context: body.context,
+          lead_type: body.lead_type,
+        });
+        if (result.leadId) {
+          this.logger.log(`Shopify webhook (deprecated): lead id=${result.leadId}`);
         }
-        const { lead } = await this.leadService.create(dto as any, { id: null, role: 'Admin' });
-        this.logger.log(`Shopify webhook: lead id=${lead.id} phone="${dto.phone}"`);
       } catch (e: any) {
         this.logger.error(`Shopify webhook processing failed: ${e?.message}`, e?.stack);
       }

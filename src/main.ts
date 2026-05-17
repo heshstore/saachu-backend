@@ -1079,7 +1079,28 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule, { rawBody: true });
   console.log('🚀 PROMOTION ROUTE READY');
 
-  // Triggers onModuleDestroy() on every module (WhatsApp client, DB) when the process exits
+  // Idempotent close — must be installed before enableShutdownHooks() wires signal handlers.
+  let isShuttingDown = false;
+  const nestClose = app.close.bind(app);
+  app.close = async () => {
+    if (isShuttingDown) {
+      logger.warn('[Bootstrap] app.close() skipped — shutdown already in progress');
+      return;
+    }
+    isShuttingDown = true;
+    logger.log('[Bootstrap] Closing application…');
+    try {
+      await nestClose();
+    } catch (e: any) {
+      logger.error('[Bootstrap] Error during shutdown', e?.stack);
+    } finally {
+      logger.log('[Bootstrap] Shutdown complete');
+      setImmediate(() => process.exit(0));
+    }
+  };
+
+  // Single shutdown owner: Nest listens for SIGTERM/SIGINT/SIGHUP and calls app.close() once.
+  // Do NOT add separate process.on('SIGTERM') handlers — that double-closes the TypeORM pool.
   app.enableShutdownHooks();
 
   app.useGlobalInterceptors(new LoggingInterceptor());
@@ -1136,24 +1157,6 @@ async function bootstrap() {
       `To reclaim ${preferred}: lsof -ti :${preferred} | xargs kill -9`,
     );
   }
-
-  // ── Graceful shutdown ──────────────────────────────────────────────────────
-  // app.close() triggers onModuleDestroy on all modules — WhatsApp client
-  // is destroyed and TypeORM closes the DB pool automatically.
-  const shutdown = async (signal: string) => {
-    logger.log(`[Bootstrap] ${signal} received — shutting down gracefully`);
-    try {
-      await app.close();
-      logger.log('[Bootstrap] Shutdown complete');
-    } catch (e: any) {
-      logger.error('[Bootstrap] Error during shutdown', e?.stack);
-    } finally {
-      process.exit(0);
-    }
-  };
-
-  process.on('SIGINT',  () => { void shutdown('SIGINT');  });
-  process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
 
   // Surface unhandled promise rejections so they appear in logs instead of disappearing silently
   process.on('unhandledRejection', (reason: unknown) => {

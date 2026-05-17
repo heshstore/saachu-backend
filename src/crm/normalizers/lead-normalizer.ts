@@ -80,6 +80,29 @@ export function isShopifyPhoneReal(raw: string): boolean {
   return true;
 }
 
+const IDENTITY_SENTINELS = new Set(['unknown', 'null', 'undefined', 'n/a', 'na', 'none']);
+
+/** Strip empty strings and sentinel text → null (email, name fragments, raw phone input). */
+export function normalizeIdentityField(value: string | null | undefined): string | null {
+  if (value == null) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  if (IDENTITY_SENTINELS.has(trimmed.toLowerCase())) return null;
+  return trimmed;
+}
+
+/**
+ * CRM-safe phone: null when missing, sentinel, or not valid E.164.
+ * Does not return the legacy 'unknown' sentinel.
+ */
+export function normalizePhoneForIdentity(raw: string | null | undefined): string | null {
+  const cleaned = normalizeIdentityField(raw);
+  if (!cleaned) return null;
+  const e164 = normalizePhone(cleaned);
+  if (!e164 || e164 === 'unknown' || !/^\+\d{10,15}$/.test(e164)) return null;
+  return e164;
+}
+
 // ─── Text utilities ──────────────────────────────────────────────────────────
 
 export function toSentenceCase(s: string): string {

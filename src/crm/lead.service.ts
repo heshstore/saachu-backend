@@ -4,8 +4,9 @@ import { DataSource } from 'typeorm';
 import * as crypto from 'crypto';
 import {
   normalizePhone,
-  isValidPhone,
   isShopifyPhoneReal,
+  normalizeIdentityField,
+  normalizePhoneForIdentity,
   toSentenceCase,
   sentenceCaseWords,
 } from './normalizers/lead-normalizer';
@@ -59,6 +60,15 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 };
 
 const WORKFLOW_BYPASS_ROLES = ['Admin', 'COO'];
+
+/** Result of LeadService.create() — CRM row or analytics-only routing. */
+export type LeadCreateResult = {
+  lead?: Lead;
+  warning?: string;
+  analyticsOnly?: boolean;
+  blocked?: boolean;
+  reason?: string;
+};
 
 // Workflow states that must not be rolled back by a status change.
 // If the lead is already in one of these states and the target rank is lower,
@@ -277,6 +287,15 @@ export class LeadService implements OnModuleInit {
     }
 
     try {
+      const archived = await this.archiveOrphanTrackingLeads();
+      if (archived > 0) {
+        this.logger.log(`[LeadService] Archived ${archived} tracking-only lead(s) without contact identity`);
+      }
+    } catch (e) {
+      this.logger.error('Failed to archive orphan tracking-only leads', e);
+    }
+
+    try {
       await this.ds.query(`ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_ref VARCHAR(20)`);
       await this.ds.query(
         `CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_lead_ref ON leads(lead_ref) WHERE lead_ref IS NOT NULL`,
@@ -467,21 +486,27 @@ export class LeadService implements OnModuleInit {
 
   // ── Create ──────────────────────────────────────────────────────────────────
 
-  async create(dto: CreateLeadDto, user: any): Promise<{ lead: Lead; warning?: string }> {
+  async create(dto: CreateLeadDto, user: any): Promise<LeadCreateResult> {
     console.log(`[DEBUG] Creating lead in DB — source=${dto.source} phone=${dto.phone} user_id=${user?.id ?? 'null'}`);
 
     // Coerce legacy 'MANUAL' source values from older clients / DB rows
     if ((dto.source as string) === 'MANUAL') (dto as any).source = LeadSource.DIRECT;
 
-    // Normalize to E.164 (+91XXXXXXXXXX) before any dedup or DB operation.
-    // Anonymous leads (no phone) are allowed — stored as NULL.
-    if (dto.phone) {
-      dto.phone = normalizePhone(dto.phone);
-      if (!dto.phone || dto.phone === 'unknown' || !isValidPhone(dto.phone)) {
-        throw new BadRequestException('A valid phone number is required (e.g. 9876543210 or +919876543210).');
-      }
+    const identityNorm = this.applyIdentityNormalization(dto);
+    const storedPhone = identityNorm.phone;
+    const storedEmail = identityNorm.email;
+    (dto as any).phone = storedPhone ?? undefined;
+    (dto as any).email = storedEmail ?? undefined;
+
+    // Global identity gate — no CRM row without phone or email
+    if (!storedPhone && !storedEmail) {
+      const reason = 'no_phone_no_email';
+      this.logger.warn(
+        `[LEAD_BLOCKED] source=${dto.source} reason=${reason} context=${dto.context ?? dto.lead_source_label ?? 'n/a'}`,
+      );
+      await this.storeAsAnalyticsEventFromDto(dto, reason);
+      return { analyticsOnly: true, blocked: true, reason };
     }
-    const storedPhone = dto.phone || null;
 
     if (dto.external_id) {
       const existing = await this.findByExternalId(dto.external_id);
@@ -1999,7 +2024,7 @@ export class LeadService implements OnModuleInit {
     const externalId = generateShopifyExternalId(payload);
 
     const rawName    = (payload.name || '').trim();
-    const rawEmail   = (payload.email || '').trim();
+    const rawEmail   = normalizeIdentityField(payload.email) ?? '';
     const rawCity    = (payload.city || '').trim();
     const rawCountry = (payload.country || '').trim();
     const rawContext = (payload.context || '').trim();
@@ -2008,15 +2033,6 @@ export class LeadService implements OnModuleInit {
     const phoneIsReal     = isShopifyPhoneReal(payload.phone ?? '');
     const normalizedPhone = phoneIsReal ? normalizePhone(payload.phone ?? '') : 'unknown';
     const resolvedPhone   = phoneIsReal && normalizedPhone !== 'unknown' ? normalizedPhone : undefined;
-
-    // ── Quality firewall: no contact info → analytics only, not CRM ──────────────
-    if (!resolvedPhone && !rawEmail) {
-      this.logger.log(
-        `[LeadQuality] Anonymous Shopify click (no phone, no email) → analytics only. action=${payload.action ?? 'unknown'}`,
-      );
-      await this.storeAsAnalyticsEvent(payload);
-      return { ok: true }; // no leadId — not a CRM lead
-    }
 
     const leadData: CreateLeadDto = {
       name:              rawName    || undefined,
@@ -2075,7 +2091,11 @@ export class LeadService implements OnModuleInit {
     }
 
     try {
-      const { lead } = await this.create(leadData, { id: null, role: 'Admin' });
+      const created = await this.create(leadData, { id: null, role: 'Admin' });
+      if (created.analyticsOnly || !created.lead) {
+        return { ok: true };
+      }
+      const lead = created.lead;
       console.log('LEAD CREATED:', { id: lead.id, phone: lead.phone, source: lead.source });
       this.logger.log(`Shopify lead id=${lead.id} external_id=${externalId}`);
       if (!phoneIsReal) {
@@ -2226,7 +2246,16 @@ export class LeadService implements OnModuleInit {
       console.log('Saving lead with messageId:', dto.whatsappMessageId);
 
       try {
-        const { lead: savedLead } = await this.create(dto, { id: null, role: 'Admin' });
+        const created = await this.create(dto, { id: null, role: 'Admin' });
+        if (created.analyticsOnly || !created.lead) {
+          this.logger.log({
+            action: 'WHATSAPP_LEAD_BLOCKED',
+            reason: created.reason ?? 'no_identity',
+            messageId: messageId ?? null,
+          });
+          return;
+        }
+        const savedLead = created.lead;
 
         if (!savedLead.phone && inboundBody) {
           const extracted = extractPhoneFromText(inboundBody);
@@ -2407,6 +2436,77 @@ export class LeadService implements OnModuleInit {
     // Digital tracking sources: TRACKING_ONLY or JUNK
     if (hasProduct) return { quality: LeadQuality.TRACKING_ONLY, score: 10 };
     return             { quality: LeadQuality.JUNK,           score: 5 };
+  }
+
+  /**
+   * Mark active TRACKING_ONLY leads with no phone/email as operationally inactive.
+   * Uses existing is_active + tags only — no schema changes.
+   */
+  async archiveOrphanTrackingLeads(): Promise<number> {
+    const rows: { id: number }[] = await this.ds.query(`
+      UPDATE leads
+      SET
+        is_active = false,
+        tags = CASE
+          WHEN COALESCE(tags, '[]'::jsonb) ? 'archived_tracking_only' THEN tags
+          ELSE COALESCE(tags, '[]'::jsonb) || '["archived_tracking_only"]'::jsonb
+        END,
+        notes = CASE
+          WHEN notes IS NULL OR notes = '' THEN '[System] Archived: tracking-only record without contact identity.'
+          WHEN notes NOT LIKE '%Archived: tracking-only%' THEN notes || E'\\n[System] Archived: tracking-only record without contact identity.'
+          ELSE notes
+        END,
+        updated_at = NOW()
+      WHERE is_active = true
+        AND lead_quality = 'TRACKING_ONLY'
+        AND (phone IS NULL OR TRIM(phone) = '' OR LOWER(TRIM(phone)) = 'unknown')
+        AND (email IS NULL OR TRIM(email) = '')
+      RETURNING id
+    `);
+    const count = rows?.length ?? 0;
+    if (count > 0) {
+      this.logger.log(`[LeadService] archiveOrphanTrackingLeads: deactivated ${count} row(s)`);
+    }
+    return count;
+  }
+
+  private applyIdentityNormalization(dto: CreateLeadDto): {
+    phone: string | null;
+    email: string | null;
+  } {
+    const rawPhone = dto.phone;
+    const rawEmail = dto.email;
+    const phone = normalizePhoneForIdentity(rawPhone);
+    const email = normalizeIdentityField(rawEmail)?.toLowerCase() ?? null;
+
+    const phoneSentinelCleared =
+      rawPhone != null &&
+      String(rawPhone).trim() !== '' &&
+      phone === null;
+    const emailSentinelCleared =
+      rawEmail != null &&
+      String(rawEmail).trim() !== '' &&
+      email === null;
+
+    if (phoneSentinelCleared || emailSentinelCleared) {
+      this.logger.log(
+        `[IDENTITY_NORMALIZED] source=${dto.source} phone_cleared=${phoneSentinelCleared} email_cleared=${emailSentinelCleared}`,
+      );
+    }
+
+    return { phone, email };
+  }
+
+  private async storeAsAnalyticsEventFromDto(dto: CreateLeadDto, reason: string): Promise<void> {
+    await this.storeAsAnalyticsEvent({
+      action: dto.lead_source_label ?? dto.context ?? dto.source,
+      event: 'lead_blocked',
+      product: dto.product_interest,
+      page_url: dto.landing_page ?? '',
+      source: dto.source,
+      reason,
+      raw_payload: dto.raw_payload ?? dto,
+    });
   }
 
   /** Store an anonymous Shopify event in analytics_events without creating a CRM lead. */

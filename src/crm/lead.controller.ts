@@ -1,5 +1,5 @@
 import {
-  Controller, Get, Post, Put, Patch, Delete, ForbiddenException,
+  Controller, Get, Post, Put, Patch, Delete, ForbiddenException, BadRequestException,
   Param, Body, Query, Request, ParseIntPipe,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
@@ -29,8 +29,14 @@ export class LeadController {
   @Post()
   @RequirePermission('lead.create')
   @Throttle({ default: { ttl: 60_000, limit: 10 } })
-  create(@Body() dto: CreateManualLeadDto, @Request() req) {
-    return this.leadService.create(dto as unknown as CreateLeadDto, req.user);
+  async create(@Body() dto: CreateManualLeadDto, @Request() req) {
+    const result = await this.leadService.create(dto as unknown as CreateLeadDto, req.user);
+    if (result.analyticsOnly || !result.lead) {
+      throw new BadRequestException(
+        'A valid phone number or email is required to create a lead.',
+      );
+    }
+    return result.lead;
   }
 
   @Get('queue')

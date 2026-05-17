@@ -55,6 +55,7 @@ import { ManufacturingAnalyticsModule } from './manufacturing-analytics/manufact
 import { AfterSalesModule } from './after-sales/after-sales.module';
 import { FinanceOpsModule } from './finance-ops/finance-ops.module';
 import { WorkforceOpsModule } from './workforce-ops/workforce-ops.module';
+import { AppShutdownService } from './common/app-shutdown.service';
 
 const _rawDbUrl      = process.env.DATABASE_URL || '';
 const databaseUrl    = sanitizeDatabaseUrl(_rawDbUrl);
@@ -132,6 +133,7 @@ new Logger('AppModule').log(
     WorkforceOpsModule,
   ],
   providers: [
+    AppShutdownService,
     AppService,
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },

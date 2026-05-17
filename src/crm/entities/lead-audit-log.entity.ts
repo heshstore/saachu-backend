@@ -11,8 +11,10 @@ export type AuditAction =
   | 'FOLLOWUP_CREATED'
   | 'FOLLOWUP_COMPLETED'
   | 'CONVERTED'
-  | 'QUOTATION_CREATED';
+  | 'QUOTATION_CREATED'
+  | 'ESCALATED';  // written by automation cron — user_id = SYSTEM_USER_ID (0)
 
+// AUTOMATION AUDITS MUST USE LeadAuditService.log() — DO NOT INSERT INTO lead_audit_logs DIRECTLY.
 @Entity('lead_audit_logs')
 export class LeadAuditLog {
   @PrimaryGeneratedColumn()

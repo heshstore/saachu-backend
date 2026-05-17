@@ -40,6 +40,7 @@
     "migrate:lead-alerts-patch": "node scripts/migrate-lead-alerts-patch.js",
     "migrate:lead-stage": "node scripts/migrate-lead-stage.js",
     "migrate:backfill-lead-quality": "node scripts/migrate-backfill-lead-quality.js",
+    "archive:tracking-only-leads": "node scripts/archive-tracking-only-leads.js",
     "migrate:permission-key": "node scripts/migrate-permission-key.js",
     "migrate:dedup-idempotency": "node scripts/migrate-dedup-idempotency.js",
     "migrate:idempotency-safe": "node scripts/migrate-idempotency-safe.js",

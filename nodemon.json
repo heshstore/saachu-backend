@@ -1,7 +1,17 @@
 {
   "watch": ["src"],
   "ext": "ts,json",
-  "ignore": ["src/**/*.spec.ts", "node_modules"],
+  "ignore": [
+    "src/**/*.spec.ts",
+    "node_modules",
+    ".wwebjs_auth/**",
+    ".wwebjs_cache/**",
+    ".puppeteer-cache/**",
+    ".temp/**",
+    ".tmp/**",
+    "uploads/**",
+    "logs/**"
+  ],
   "exec": "ts-node -r tsconfig-paths/register src/main.ts",
   "signal": "SIGTERM",
   "delay": "500"
