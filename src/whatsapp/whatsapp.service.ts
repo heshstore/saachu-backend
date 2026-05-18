@@ -4,7 +4,6 @@ import { Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as https from 'https';
 import { execSync } from 'child_process';
 import * as crypto from 'crypto';
 import { ReplaySubject, Observable, interval, merge } from 'rxjs';
@@ -15,10 +14,22 @@ import { appConfig } from '../config/config';
 import { LeadSource } from '../crm/entities/lead.entity';
 import { normalizePhone } from '../crm/normalizers/lead-normalizer';
 
-// Fallback: a known-good stable (non-alpha) WA Web version used when the dynamic
-// fetch is unreachable. Alpha builds can fail pairing mid-handshake.
-const WA_VERSION_FALLBACK =
-  'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html';
+/** Pinned stable WA Web build — never fetch alpha/latest from GitHub. */
+const PINNED_WA_WEB_VERSION = '2.2412.54';
+
+/** Fixed LocalAuth identity — must not change between restarts. */
+const WA_LOCAL_AUTH_CLIENT_ID = 'saachu-main';
+
+/** Persistent auth root (relative to process.cwd()). */
+const WA_AUTH_DATA_PATH = '.wwebjs_auth';
+
+/** Minimum interval between published QR SSE events (WA Web expires ~60s). */
+const QR_MIN_INTERVAL_MS = 55_000;
+
+/** Max wait for session restore from disk before declaring auth invalid. */
+const RESTORE_TIMEOUT_MS = 120_000;
+
+const POST_RESET_DELAY_MS = 2_000;
 
 // All Chromium profile lock files that block a second browser instance from starting.
 // These are transient runtime artefacts — safe to delete before every init attempt.
@@ -82,6 +93,9 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   /** True if a QR was emitted during the current init cycle (not a silent restore). */
   private _qrShownThisInit = false;
   private _instanceLockHeld = false;
+  private _lastQrPublishedAt: number | null = null;
+  private _authInvalid = false;
+  private _restoreWatchdog: NodeJS.Timeout | null = null;
 
   constructor(
     @InjectRepository(WhatsAppSession)
@@ -106,6 +120,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       clearTimeout(this._retryTimer);
       this._retryTimer = null;
     }
+    this.clearRestoreWatchdog();
     this.stopHealthMonitor();
     this._ready = false;
     this._manualDisconnect = true;
@@ -130,6 +145,8 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn('[WA_INIT] initClient() skipped — client already exists');
       return;
     }
+    await this.ensureNoOrphanChromium();
+
     if (!this.tryAcquireInstanceLock()) {
       this.qrSubject.next(JSON.stringify({
         type: 'error',
@@ -138,8 +155,17 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    if (this.sessionName !== WA_LOCAL_AUTH_CLIENT_ID) {
+      this.logger.warn(
+        `[WA_INIT] WHATSAPP_SESSION=${this.sessionName} differs from pinned clientId ${WA_LOCAL_AUTH_CLIENT_ID}`,
+      );
+    }
+
     this._initializing = true;
-    this.logger.log(`[WA_INIT] Starting client (session=${this.sessionName}, pid=${process.pid}, authDir=${this.getSessionDir()})`);
+    this._authInvalid = false;
+    this.logger.log(
+      `[WA_INIT] Starting client (clientId=${WA_LOCAL_AUTH_CLIENT_ID}, webVersion=${PINNED_WA_WEB_VERSION}, pid=${process.pid}, authDir=${this.getSessionDir()})`,
+    );
     const MAX_ATTEMPTS = 3;
 
     try {
@@ -187,7 +213,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
             // Final attempt failed — remove only lock files so the next initClient()
             // can reuse the saved auth session (avoids forced QR re-login on transient failures).
             this.logger.warn('[WhatsApp] All attempts exhausted — removing lock files only (preserving auth session)');
-            const sessionDir = path.join(process.cwd(), `.wwebjs_auth/session-${this.sessionName}`);
+            const sessionDir = this.getSessionDir();
             const lockFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
             for (const f of lockFiles) {
               const p = path.join(sessionDir, f);
@@ -221,26 +247,23 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     }
 
     const executablePath = this.findChrome();
-    this.logger.log(`Launching Chromium${executablePath ? ` at ${executablePath}` : ' (bundled/auto)'}`);
-
-    // Fetch the latest WA Web version dynamically — prevents "Couldn't link device"
-    // caused by running an outdated version that WhatsApp has deprecated.
-    const waVersionUrl = await this.fetchLatestWaVersionUrl();
-    this.logger.log(`WA Web version URL: ${waVersionUrl}`);
+    this.logger.log(`[WA_INIT] Launching Chromium${executablePath ? ` at ${executablePath}` : ' (bundled/auto)'}`);
 
     this.qrCount = 0;
     this._qrShownThisInit = false;
+    this._lastQrPublishedAt = null;
     this._authExistedBeforeInit = this.hasPersistedAuth();
     if (this._authExistedBeforeInit) {
       this.logger.log('[WA_INIT] Persisted auth found — expecting session restore without QR');
+      this.startRestoreWatchdog();
     }
 
     this.client = new Client({
-      authStrategy: new LocalAuth({ clientId: this.sessionName }),
-      webVersionCache: {
-        type: 'remote',
-        remotePath: waVersionUrl,
-      },
+      authStrategy: new LocalAuth({
+        clientId: WA_LOCAL_AUTH_CLIENT_ID,
+        dataPath: WA_AUTH_DATA_PATH,
+      }),
+      webVersion: PINNED_WA_WEB_VERSION,
       puppeteer: {
         headless: true,
         ...(executablePath ? { executablePath } : {}),
@@ -267,22 +290,35 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     // ── Event handlers ──────────────────────────────────────────────────────────
 
     this.client.on('qr', async (qr: string) => {
+      this.clearRestoreWatchdog();
+
+      const now = Date.now();
+      if (this._lastQrPublishedAt && now - this._lastQrPublishedAt < QR_MIN_INTERVAL_MS) {
+        return;
+      }
+
+      if (this._authExistedBeforeInit) {
+        await this.handleAuthInvalid('persisted session rejected — QR required after restart');
+        return;
+      }
+
+      if (this.qrCount > 0) {
+        this.logger.log(`[WA_QR_EXPIRED] QR #${this.qrCount} expired without scan`);
+      }
+
       this.qrCount++;
 
-      // Hard stop after MAX_QR_RETRIES without a scan — breaks the infinite loop.
-      // The library auto-regenerates QRs every ~60 s; this guard prevents runaway CPU/memory growth.
       if (this.qrCount > this.MAX_QR_RETRIES) {
-        this.logger.warn(`[WhatsApp] QR retry limit reached — waiting for manual reconnect (shown ${this.qrCount - 1} QRs without pairing)`);
+        this.logger.warn(`[WA_QR_SCAN_TIMEOUT] ${this.MAX_QR_RETRIES} QR cycles without pairing — manual reset required`);
         this._qrPaused = true;
         this._qrDataUrl = null;
         this._qrGeneratedAt = null;
         this.qrSubject.next(JSON.stringify({
           type: 'paused',
-          message: 'WhatsApp disconnected — QR retry limit reached. Click "Reconnect" to try again.',
+          message: 'WhatsApp disconnected — QR retry limit reached. Click "Reset Session" to try again.',
         }));
         this._adminEventSubject.next(JSON.stringify({ type: 'paused', qrCount: this.qrCount, timestamp: new Date().toISOString() }));
         await this.updateSession({ status: 'DISCONNECTED' });
-        // Defer destroy so we exit the event handler cleanly before tearing down the client
         setImmediate(async () => {
           this._manualDisconnect = true;
           if (this.client) {
@@ -294,13 +330,10 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      // A second (or later) QR means the previous one expired before the user scanned it
-      if (this.qrCount > 1) {
-        this.logger.warn(`[WhatsApp] QR expired before scan — regenerating (was #${this.qrCount - 1})`);
-      }
       this.qrGenerated = true;
       this._qrShownThisInit = true;
-      this.logger.log(`[WA_QR] QR #${this.qrCount} generated — awaiting scan (~60s expiry per WA Web)`);
+      this._lastQrPublishedAt = now;
+      this.logger.log(`[WA_QR_GENERATED] QR #${this.qrCount} published (~60s WA Web expiry)`);
 
       let QRCode: any;
       try { QRCode = (await import('qrcode')).default; } catch { return; }
@@ -313,13 +346,11 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         expired:  this.qrCount > 1,
       };
 
-      // After 3 consecutive QRs without a scan suggest reset — but still show the QR
       if (this.qrCount >= 3) {
         payload.warning =
           'QR has expired multiple times without a successful scan. ' +
           'Click "Reset Session" to start fresh, or wait for auto-pause after ' +
           `${this.MAX_QR_RETRIES} attempts.`;
-        this.logger.warn(`[WhatsApp] QR failure streak: ${this.qrCount} codes shown without pairing`);
       }
 
       this._qrDataUrl = dataUrl;
@@ -334,7 +365,9 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     // flow we are — if we see 'authenticated' but never 'ready', the issue is
     // in session loading (likely a WA version mismatch or network timeout).
     this.client.on('authenticated', () => {
-      this.logger.log('[WA_AUTH] Device pairing approved — waiting for session load');
+      this.clearRestoreWatchdog();
+      this.logger.log('[WA_QR_SCAN_SUCCESS] QR scanned — cryptographic pairing approved');
+      this.logger.log('[WA_AUTH] Waiting for session load');
       this.qrSubject.next(JSON.stringify({ type: 'authenticated' }));
       this._adminEventSubject.next(JSON.stringify({ type: 'authenticated', timestamp: new Date().toISOString() }));
     });
@@ -349,10 +382,12 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.client.on('ready', async () => {
+      this.clearRestoreWatchdog();
       this._ready = true;
       this.qrCount = 0;
       this.qrGenerated = false;
       this._qrPaused = false;
+      this._lastQrPublishedAt = null;
       const info = this.client.info;
       const phone = info?.wid?.user ?? null;
       if (this._disconnectedAt) {
@@ -441,27 +476,26 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
         await this.clearAuthFiles();
       }
 
-      this.logger.log(`[WA_RECONNECT] Scheduling reconnect in 10s (reason=${reason})`);
-      this.scheduleReinit(10_000);
+      if (!this._authInvalid) {
+        this.logger.log(`[WA_RECONNECT] Scheduling reconnect in 10s (reason=${reason})`);
+        this.scheduleReinit(10_000);
+      }
     });
 
     this.client.on('auth_failure', async (msg: string) => {
       this._ready = false;
       this._adminEventSubject.next(JSON.stringify({ type: 'auth_failure', message: msg, timestamp: new Date().toISOString() }));
-      this.logger.error(`[WhatsApp] Auth failure: ${msg} — clearing session and restarting`);
+      this.logger.error(`[WA_AUTH_FAILURE] ${msg}`);
       if (!this._disconnectedAt) {
         this._disconnectedAt = new Date();
-        this.logger.log('[WhatsApp] Session downtime started');
       }
       await this.updateSession({ status: 'DISCONNECTED', disconnected_at: this._disconnectedAt });
       this.qrSubject.next(JSON.stringify({
         type: 'error',
-        message: 'Authentication failed. Clearing session — a fresh QR will appear shortly.',
+        message: 'Authentication failed. Use "Reset Session" to pair again.',
       }));
       this.eventEmitter.emit('whatsapp.down', { reason: 'AUTH_FAILURE' });
-      await this.clearSessionFiles();
-      this.logger.log('[WA_RECONNECT] Auth failure — scheduling reconnect in 10s');
-      this.scheduleReinit(10_000);
+      await this.handleAuthInvalid(`auth_failure: ${msg}`);
     });
 
     // ── Inbound message handler ─────────────────────────────────────────────────
@@ -491,7 +525,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     // ── Pre-init diagnostics ────────────────────────────────────────────────────
     // Log session directory state and lock file presence so startup failures
     // leave an auditable trail without requiring a second run to diagnose.
-    const _diagSessionDir = path.join(process.cwd(), `.wwebjs_auth/session-${this.sessionName}`);
+    const _diagSessionDir = this.getSessionDir();
     const _diagDirExists  = fs.existsSync(_diagSessionDir);
     this.logger.log(`[WhatsApp] Pre-init: sessionDir=${_diagSessionDir} exists=${_diagDirExists}`);
     if (_diagDirExists) {
@@ -510,7 +544,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     }
     // ───────────────────────────────────────────────────────────────────────────
 
-    this.logger.log('[WhatsApp] Calling client.initialize()...');
+    this.logger.log('[WA_INIT] Calling client.initialize()…');
     await this.client.initialize();
   }
 
@@ -603,30 +637,9 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   /** Logout, clear auth files, and restart — generates a fresh QR. */
   async disconnectAndReset(): Promise<void> {
-    this.logger.log('[WhatsApp] Manual disconnect requested — clearing session');
-    this._ready = false;
-    this.qrCount = 0;
-    this.qrGenerated = false;
-    this._qrPaused = false;
-
-    // Suppress the 'disconnected' event handler's auto-reinit: logout() will fire it,
-    // but we're already managing the reinit below via setTimeout.
-    this._manualDisconnect = true;
-
-    if (this.client) {
-      try { await this.client.logout(); } catch { /* already disconnected */ }
-      try { await this.client.destroy(); } catch { /* ignore */ }
-      this.client = null;
-    }
-
-    this._manualDisconnect = false;
-
-    // Only clear auth credentials — keep the version cache to avoid re-fetching WA Web
-    await this.clearAuthFiles();
+    await this.resetSession(true);
     await this.updateSession({ status: 'DISCONNECTED', phone_number: null, connected_at: null });
     this.qrSubject.next(JSON.stringify({ type: 'disconnected' }));
-
-    // Single reinit — not racing with the disconnected event handler
     this.scheduleReinit(5_000);
   }
 
@@ -637,6 +650,10 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
    * first so rapid disconnect/reconnect cycles never stack multiple reinits.
    */
   private scheduleReinit(delayMs: number): void {
+    if (this._authInvalid || this._qrPaused) {
+      this.logger.warn('[WA_RECONNECT] Skipped — auth invalid or QR paused (manual reset required)');
+      return;
+    }
     if (this._retryTimer) {
       clearTimeout(this._retryTimer);
       this._retryTimer = null;
@@ -651,11 +668,11 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   // ── Instance lock + auth paths ──────────────────────────────────────────────
 
   private getAuthRootDir(): string {
-    return path.join(process.cwd(), '.wwebjs_auth');
+    return path.join(process.cwd(), WA_AUTH_DATA_PATH);
   }
 
   private getSessionDir(): string {
-    return path.join(this.getAuthRootDir(), `session-${this.sessionName}`);
+    return path.join(this.getAuthRootDir(), `session-${WA_LOCAL_AUTH_CLIENT_ID}`);
   }
 
   private getInstanceLockPath(): string {
@@ -739,60 +756,100 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /** Kill orphan Puppeteer Chromium before init to prevent profile lock races. */
+  private async ensureNoOrphanChromium(): Promise<void> {
+    try {
+      const count = execSync("pgrep -c -f 'remote-debugging-port' 2>/dev/null || echo 0", { encoding: 'utf8' }).trim();
+      const n = parseInt(count, 10) || 0;
+      if (n > 0) {
+        this.logger.warn(`[WA_DUPLICATE_INSTANCE] Orphan Chromium (${n}) — terminating before init`);
+        await this.killChromeProcesses();
+      }
+    } catch { /* non-critical */ }
+  }
+
+  private startRestoreWatchdog(): void {
+    this.clearRestoreWatchdog();
+    this._restoreWatchdog = setTimeout(() => {
+      this._restoreWatchdog = null;
+      if (!this._ready && this._authExistedBeforeInit && !this._qrShownThisInit) {
+        void this.handleAuthInvalid('session restore timed out');
+      }
+    }, RESTORE_TIMEOUT_MS);
+  }
+
+  private clearRestoreWatchdog(): void {
+    if (this._restoreWatchdog) {
+      clearTimeout(this._restoreWatchdog);
+      this._restoreWatchdog = null;
+    }
+  }
+
   /**
-   * Fetches the latest WhatsApp Web version HTML URL from the wppconnect-team repo.
-   * Using an outdated version is the primary cause of "Couldn't link device" — WhatsApp
-   * enforces a minimum version and rejects deprecated clients after QR scan completes.
-   *
-   * Falls back to WA_VERSION_FALLBACK if the GitHub API is unreachable.
+   * Persisted auth is unusable — stop auto-reconnect; user must call Reset Session.
    */
-  private async fetchLatestWaVersionUrl(): Promise<string> {
-    return new Promise((resolve) => {
-      const req = https.get(
-        'https://api.github.com/repos/wppconnect-team/wa-version/contents/html',
-        {
-          headers: {
-            'User-Agent': 'saachu-crm/1.0',
-            'Accept': 'application/vnd.github+json',
-          },
-        },
-        (res) => {
-          let body = '';
-          res.on('data', (chunk: Buffer) => { body += chunk.toString(); });
-          res.on('end', () => {
-            try {
-              const files: any[] = JSON.parse(body);
-              const names = files
-                .filter((f: any) => typeof f.name === 'string' && f.name.endsWith('.html'))
-                .map((f: any) => f.name as string)
-                .sort();
-              // Prefer stable (non-alpha) versions — alpha builds can fail the
-              // post-QR authentication handshake unpredictably.
-              const stableNames = names.filter((n) => !n.includes('alpha'));
-              const candidates  = stableNames.length > 0 ? stableNames : names;
-              const latest      = candidates[candidates.length - 1];
-              if (latest) {
-                const url = `https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/${latest}`;
-                const tag = stableNames.length > 0 ? 'stable' : 'alpha (no stable found)';
-                this.logger.log(`[WhatsApp] WA Web version selected: ${latest} (${tag})`);
-                return resolve(url);
-              }
-            } catch { /* fall through */ }
-            this.logger.warn('[WhatsApp] Could not parse version list — using stable fallback');
-            resolve(WA_VERSION_FALLBACK);
-          });
-        },
-      );
-      req.on('error', (e: Error) => {
-        this.logger.warn(`Version fetch failed: ${e.message} — using fallback`);
-        resolve(WA_VERSION_FALLBACK);
-      });
-      req.setTimeout(6_000, () => {
-        req.destroy();
-        this.logger.warn('Version fetch timed out — using fallback');
-        resolve(WA_VERSION_FALLBACK);
-      });
-    });
+  private async handleAuthInvalid(reason: string): Promise<void> {
+    if (this._authInvalid) return;
+    this._authInvalid = true;
+    this._qrPaused = true;
+    this.clearRestoreWatchdog();
+    this.stopHealthMonitor();
+    this.logger.error(`[WA_AUTH_INVALID] ${reason} — manual Reset Session required`);
+    this.qrSubject.next(JSON.stringify({
+      type: 'error',
+      message: 'Saved WhatsApp session is invalid. Click "Reset Session" to pair again.',
+    }));
+    this._adminEventSubject.next(JSON.stringify({ type: 'auth_invalid', reason, timestamp: new Date().toISOString() }));
+    await this.updateSession({ status: 'DISCONNECTED' });
+    this._manualDisconnect = true;
+    if (this.client) {
+      try { await this.client.destroy(); } catch { /* ignore */ }
+      this.client = null;
+    }
+    this._manualDisconnect = false;
+    this._ready = false;
+  }
+
+  /**
+   * Controlled teardown: destroy client, kill browser, clear locks, optionally wipe auth.
+   */
+  private async resetSession(clearAuth: boolean): Promise<void> {
+    this.logger.log('[WA_RESET_BEGIN]');
+    this._ready = false;
+    this._authInvalid = false;
+    this.qrCount = 0;
+    this.qrGenerated = false;
+    this._qrPaused = false;
+    this._lastQrPublishedAt = null;
+    this.clearRestoreWatchdog();
+    this.stopHealthMonitor();
+    if (this._retryTimer) {
+      clearTimeout(this._retryTimer);
+      this._retryTimer = null;
+    }
+
+    this._manualDisconnect = true;
+    if (this.client) {
+      try { await this.client.logout(); } catch { /* already disconnected */ }
+      try { await this.client.destroy(); } catch { /* ignore */ }
+      this.client = null;
+    }
+    this._manualDisconnect = false;
+
+    this.logger.log('[WA_RESET_CLEANUP] Killing browser, clearing lock files');
+    await this.killChromeProcesses();
+    await this.removeSingletonFiles(this.getSessionDir());
+
+    if (clearAuth) {
+      await this.clearAuthFiles();
+      const versionCacheDir = path.join(process.cwd(), '.wwebjs_cache');
+      if (fs.existsSync(versionCacheDir)) {
+        await this.rmWithRetry(versionCacheDir);
+      }
+    }
+
+    await new Promise<void>((r) => setTimeout(r, POST_RESET_DELAY_MS));
+    this.logger.log('[WA_RESET_COMPLETE]');
   }
 
   /**
@@ -810,7 +867,7 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
    * the running process will immediately recreate them.
    */
   private async cleanSessionLocks(): Promise<void> {
-    const sessionDir = path.join(process.cwd(), `.wwebjs_auth/session-${this.sessionName}`);
+    const sessionDir = this.getSessionDir();
 
     // 1. Gracefully destroy the NestJS client object — releases Puppeteer's handle.
     if (this.client) {
@@ -910,24 +967,10 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
    * Preserves the version cache so the next init doesn't need to re-fetch WA Web.
    */
   private async clearAuthFiles(): Promise<void> {
-    const sessionDir = path.join(process.cwd(), `.wwebjs_auth/session-${this.sessionName}`);
+    const sessionDir = this.getSessionDir();
     if (fs.existsSync(sessionDir)) {
-      this.logger.log('[WhatsApp] Cleaning auth directory...');
+      this.logger.log('[WA_RESET_CLEANUP] Removing auth directory');
       await this.rmWithRetry(sessionDir);
-    }
-  }
-
-  /**
-   * Full wipe: auth credentials + version cache.
-   * Only used after auth_failure where stale credentials + a stale WA version
-   * could both be causing the problem.
-   */
-  private async clearSessionFiles(): Promise<void> {
-    await this.clearAuthFiles();
-    const versionCacheDir = path.join(process.cwd(), '.wwebjs_cache');
-    if (fs.existsSync(versionCacheDir)) {
-      await this.rmWithRetry(versionCacheDir);
-      this.logger.log('[WhatsApp] Version cache cleared');
     }
   }
 
@@ -976,9 +1019,12 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async reinitClient(): Promise<void> {
-    // Don't start a new reinit if one is already in progress
     if (this._initializing) {
-      this.logger.warn('[WhatsApp] reinitClient() skipped — already initializing');
+      this.logger.warn('[WA_RECONNECT] reinitClient() skipped — already initializing');
+      return;
+    }
+    if (this._authInvalid) {
+      this.logger.warn('[WA_RECONNECT] reinitClient() skipped — auth invalid');
       return;
     }
 
@@ -1228,13 +1274,15 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
    */
   async manualReconnect(): Promise<void> {
     if (this._initializing) {
-      this.logger.warn('[WhatsApp] manualReconnect() skipped — already initializing');
+      this.logger.warn('[WA_RECONNECT] manualReconnect() skipped — already initializing');
       return;
     }
-    this.logger.log('[WhatsApp] Manual reconnect initiated — resetting QR retry counters');
+    this.logger.log('[WA_RECONNECT] Manual reconnect — resetting QR counters');
+    this._authInvalid = false;
     this._qrPaused   = false;
     this.qrCount     = 0;
     this.qrGenerated = false;
+    this._lastQrPublishedAt = null;
     this.stopHealthMonitor();
     this._adminEventSubject.next(JSON.stringify({ type: 'reconnect_initiated', timestamp: new Date().toISOString() }));
     this.qrSubject.next(JSON.stringify({ type: 'initializing' }));
@@ -1259,41 +1307,17 @@ export class WhatsAppService implements OnModuleInit, OnModuleDestroy {
    */
   async resetWhatsAppSession(): Promise<void> {
     if (this._initializing) {
-      this.logger.warn('[WhatsApp] resetWhatsAppSession() skipped — already initializing');
+      this.logger.warn('[WA_RESET_BEGIN] resetWhatsAppSession() skipped — already initializing');
       return;
     }
-    this.logger.log('[WhatsApp] Full session reset initiated');
     this._adminEventSubject.next(JSON.stringify({ type: 'reset_initiated', timestamp: new Date().toISOString() }));
-
-    this._ready        = false;
-    this.qrCount       = 0;
-    this.qrGenerated   = false;
-    this._qrPaused     = false;
-    this.stopHealthMonitor();
-
-    // Suppress the disconnected event's auto-reinit — we manage it below.
-    this._manualDisconnect = true;
-    if (this.client) {
-      try { await this.client.logout(); } catch { /* already gone */ }
-      try { await this.client.destroy(); } catch { /* ignore */ }
-      this.client = null;
-    }
-    this._manualDisconnect = false;
-
-    this.logger.log('[WhatsApp] Killing browser processes...');
-    await this.killChromeProcesses();
-
-    this.logger.log('[WhatsApp] Clearing auth files...');
-    await this.clearAuthFiles();
-
+    await this.resetSession(true);
     await this.updateSession({ status: 'DISCONNECTED', phone_number: null, connected_at: null });
     this.qrSubject.next(JSON.stringify({ type: 'initializing' }));
     this._adminEventSubject.next(JSON.stringify({ type: 'reset_complete', timestamp: new Date().toISOString() }));
-
-    this.logger.log('[WhatsApp] Session reset complete — reinitializing for fresh QR');
-    setTimeout(() => this.initClient().catch((e) =>
-      this.logger.error('[WhatsApp] Post-reset reinit failed', e?.message),
-    ), 1_000);
+    setImmediate(() => this.initClient().catch((e) =>
+      this.logger.error('[WA_INIT] Post-reset init failed', e?.message),
+    ));
   }
 
   private async recoverMissedMessages(): Promise<void> {
