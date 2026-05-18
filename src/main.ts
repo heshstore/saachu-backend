@@ -1,6 +1,7 @@
 import * as dotenv from 'dotenv';
 dotenv.config();
 import * as net from 'net';
+import * as dnsPromises from 'dns/promises';
 import { Client } from 'pg';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
@@ -83,6 +84,47 @@ async function listenWithFallback(app: any, preferred: number): Promise<number> 
     `[Bootstrap] No free port found in range ${preferred}–${preferred + 15}. ` +
     `Kill stale processes: lsof -ti :${preferred} | xargs kill -9`,
   );
+}
+
+/**
+ * Logs DB connection parameters (no password) and runs a DNS probe on the
+ * DB host before TypeORM attempts to connect. An ENOTFOUND here means the
+ * Neon compute is cold-starting — TypeORM's retryAttempts will handle it.
+ */
+async function runDbStartupDiagnostics(rawUrl: string): Promise<void> {
+  const cleanUrl = sanitizeDatabaseUrl(rawUrl);
+  let host = 'localhost';
+  let database = '?';
+  let ssl = false;
+  let poolMax = Number(process.env.DB_POOL_MAX) || 10;
+
+  try {
+    const u = new URL(cleanUrl);
+    host     = u.hostname;
+    database = u.pathname.replace(/^\//, '') || '?';
+    ssl      = /neon\.tech|sslmode=require/i.test(cleanUrl);
+  } catch { /* unparseable URL — logged below */ }
+
+  logger.log(
+    `[DB_INIT] host=${host} database=${database} ssl=${ssl} pool_max=${poolMax}`,
+  );
+
+  if (host === 'localhost' || host === '127.0.0.1') {
+    logger.log('[DB_DNS_SKIP] local host — skipping DNS probe');
+    return;
+  }
+
+  try {
+    const result = await (dnsPromises as any).lookup(host);
+    logger.log(`[DB_DNS_OK] ${host} → ${result.address}`);
+  } catch (e: any) {
+    // Non-fatal: TypeORM retries on its own schedule. Log clearly so the
+    // exact freeze point is visible if TypeORM exhausts all retries.
+    logger.error(
+      `[DB_DNS_FAILURE] Cannot resolve DB host: ${host} — ${e?.message}. ` +
+      `TypeORM will retry. Check network / Neon project status if this persists.`,
+    );
+  }
 }
 
 async function ensurePromotionTable(): Promise<void> {
@@ -917,6 +959,8 @@ async function bootstrap() {
 
   logger.log(`DB (sanitized): ${redactDatabaseUrl(dbUrl) || '(not set)'}`);
 
+  await runDbStartupDiagnostics(rawDbUrl);
+
   try {
     await ensurePromotionTable();
     console.log('✅ PROMOTION TABLE READY');
@@ -1158,14 +1202,18 @@ async function bootstrap() {
     );
   }
 
-  // Surface unhandled promise rejections so they appear in logs instead of disappearing silently
+  // Surface unhandled rejections and uncaught exceptions so they appear in logs.
+  // Do NOT call process.exit() here — a WhatsApp/Puppeteer crash must not take
+  // down the entire backend (orders, CRM, quotations must stay live).
   process.on('unhandledRejection', (reason: unknown) => {
-    logger.error('[Bootstrap] Unhandled rejection', String((reason as any)?.stack ?? reason));
+    logger.error(
+      '[PROCESS_UNHANDLED_REJECTION]',
+      String((reason as any)?.stack ?? reason),
+    );
   });
 
   process.on('uncaughtException', (err: Error) => {
-    logger.error('[Bootstrap] Uncaught exception', err.stack);
-    // Don't exit — let the process recover unless it's truly fatal
+    logger.error('[PROCESS_UNCAUGHT_EXCEPTION]', err.stack ?? err.message);
   });
 }
 

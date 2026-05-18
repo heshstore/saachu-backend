@@ -15,20 +15,26 @@ export class HealthController {
   async getHealth() {
     const dbOk = await this.ds.query('SELECT 1').then(() => true).catch(() => false);
 
-    let waStatus = 'UNKNOWN';
+    let waDbStatus = 'UNKNOWN';
     try {
       const rows = await this.ds.query(
         `SELECT status FROM whatsapp_sessions ORDER BY last_active_at DESC LIMIT 1`,
       );
-      waStatus = rows[0]?.status ?? 'NO_SESSION';
+      waDbStatus = rows[0]?.status ?? 'NO_SESSION';
     } catch {
-      waStatus = 'DB_ERROR';
+      waDbStatus = 'DB_ERROR';
     }
 
-    const mem = process.memoryUsage();
+    const waReady   = waDbStatus === 'CONNECTED';
+    const mem       = process.memoryUsage();
     const uptimeSec = Math.floor(process.uptime());
 
     return {
+      // ── Simplified status contract ─────────────────────────────────────────
+      db:       dbOk   ? 'up'       : 'down',
+      whatsapp: waReady ? 'ready'   : 'connecting',
+      auth:     dbOk   ? 'up'       : 'degraded',
+      // ── Detailed fields ───────────────────────────────────────────────────
       status:          dbOk ? 'ok' : 'degraded',
       app_version:     process.env.APP_VERSION  ?? 'dev',
       deployed_at:     process.env.DEPLOYED_AT  ?? null,
@@ -36,7 +42,7 @@ export class HealthController {
       boot_time:       BOOT_TIME.toISOString(),
       uptime_seconds:  uptimeSec,
       database:        dbOk ? 'connected' : 'error',
-      whatsapp_status: waStatus,
+      whatsapp_status: waDbStatus,
       memory: {
         rss_mb:        Math.round(mem.rss         / 1_048_576),
         heap_used_mb:  Math.round(mem.heapUsed    / 1_048_576),
