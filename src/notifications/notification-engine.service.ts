@@ -19,6 +19,7 @@ const PRODUCTION_ROLES = new Set([
 @Injectable()
 export class NotificationEngineService {
   private readonly logger = new Logger(NotificationEngineService.name);
+  private _running = false;
 
   constructor(
     private readonly notifService: NotificationService,
@@ -245,6 +246,8 @@ export class NotificationEngineService {
 
   @Cron('*/10 * * * *')
   async checkDelayedJobs(): Promise<void> {
+    if (this._running) return;
+    this._running = true;
     try {
       const delayed = await this.jobRepo
         .createQueryBuilder('job')
@@ -299,6 +302,8 @@ export class NotificationEngineService {
       }
     } catch (err: any) {
       this.dbHealth.handleError(err, 'NotificationEngine.checkDelayedJobs');
+    } finally {
+      this._running = false;
     }
   }
 
@@ -306,6 +311,8 @@ export class NotificationEngineService {
 
   @Cron('0 */4 8-20 * * *')
   async checkHotLeads(): Promise<void> {
+    if (this._running) return;
+    this._running = true;
     try {
       // Raw SQL to avoid hard-coupling Lead entity into this module.
       // Fails silently if table/column structure differs.
@@ -348,6 +355,8 @@ export class NotificationEngineService {
       }
     } catch (err: any) {
       this.dbHealth.handleError(err, 'NotificationEngine.checkHotLeads');
+    } finally {
+      this._running = false;
     }
   }
 
@@ -355,6 +364,8 @@ export class NotificationEngineService {
 
   @Cron('0 */2 * * *')
   async checkIdleUsers(): Promise<void> {
+    if (this._running) return;
+    this._running = true;
     try {
       const twoHoursAgo = new Date(Date.now() - 2 * 3_600_000);
       const staleJobs   = await this.jobRepo
@@ -388,6 +399,8 @@ export class NotificationEngineService {
       }
     } catch (err: any) {
       this.dbHealth.handleError(err, 'NotificationEngine.checkIdleUsers');
+    } finally {
+      this._running = false;
     }
   }
 
@@ -395,6 +408,8 @@ export class NotificationEngineService {
 
   @Cron('0 19 * * *')
   async endOfDaySummary(): Promise<void> {
+    if (this._running) return;
+    this._running = true;
     try {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -431,6 +446,8 @@ export class NotificationEngineService {
       }
     } catch (err: any) {
       this.dbHealth.handleError(err, 'NotificationEngine.endOfDaySummary');
+    } finally {
+      this._running = false;
     }
   }
 
@@ -438,11 +455,15 @@ export class NotificationEngineService {
 
   @Cron('0 2 * * *')
   async cleanupNotifications(): Promise<void> {
+    if (this._running) return;
+    this._running = true;
     try {
       const removed = await this.notifService.deleteExpiredAndInactive();
       this.logger.log(`Cleanup: removed ${removed} expired/inactive notifications`);
     } catch (err: any) {
       this.dbHealth.handleError(err, 'NotificationEngine.cleanupNotifications');
+    } finally {
+      this._running = false;
     }
   }
 

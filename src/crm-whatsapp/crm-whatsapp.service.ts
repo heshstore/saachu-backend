@@ -5,6 +5,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { execSync } from 'child_process';
 import { WhatsAppSession } from '../whatsapp/entities/whatsapp-session.entity';
 import { WhatsAppMessage } from '../whatsapp/entities/whatsapp-message.entity';
 import { LeadSource } from '../crm/entities/lead.entity';
@@ -101,7 +102,23 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       puppeteer: {
         headless: true,
         ...(executablePath ? { executablePath } : {}),
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-accelerated-2d-canvas',
+          '--disable-gpu',
+          '--disable-extensions',
+          '--disable-background-networking',
+          '--disable-background-timer-throttling',
+          '--disable-renderer-backgrounding',
+          '--disable-sync',
+          '--disable-translate',
+          '--mute-audio',
+          '--no-first-run',
+          '--no-zygote',
+          '--single-process',
+        ],
       },
       webVersionCache: { type: 'none' },
     });
@@ -225,6 +242,8 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       try { await this.client.logout(); } catch { /* already gone */ }
       try { await this.client.destroy(); } catch { /* ignore */ }
     }
+    try { execSync('pkill -f chromium || true'); } catch {}
+    try { execSync('pkill -f chrome || true'); } catch {}
     this.client            = null;
     this._ready            = false;
     this._initializing     = false;
@@ -250,6 +269,8 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       try { await this.client.logout(); } catch { /* already gone */ }
       try { await this.client.destroy(); } catch { /* ignore */ }
     }
+    try { execSync('pkill -f chromium || true'); } catch {}
+    try { execSync('pkill -f chrome || true'); } catch {}
     this.client            = null;
     this._ready            = false;
     this._initializing     = false;

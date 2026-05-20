@@ -14,6 +14,7 @@ import { EngineAuditService, AuditEvent } from './engine-audit.service';
 @Injectable()
 export class AutonomousEngineService {
   private readonly logger = new Logger(AutonomousEngineService.name);
+  private _running = false;
 
   constructor(
     private readonly audienceAi: AudienceAiService,

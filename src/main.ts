@@ -1120,7 +1120,11 @@ async function bootstrap() {
     logger.error('Schema validation failed (non-fatal) — app will start anyway:', err?.message);
   }
 
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  const isProd = (process.env.NODE_ENV ?? 'development') === 'production';
+  const app = await NestFactory.create(AppModule, {
+    rawBody: true,
+    logger: isProd ? ['error', 'warn'] : ['error', 'warn', 'log'],
+  });
   console.log('🚀 PROMOTION ROUTE READY');
 
   // Idempotent close — must be installed before enableShutdownHooks() wires signal handlers.
@@ -1201,6 +1205,15 @@ async function bootstrap() {
       `To reclaim ${preferred}: lsof -ti :${preferred} | xargs kill -9`,
     );
   }
+
+  // Memory heartbeat — logs RSS + heap every 5 minutes for Render log visibility.
+  setInterval(() => {
+    const used = process.memoryUsage();
+    console.log('[MEMORY]', {
+      rss:      Math.round(used.rss      / 1024 / 1024) + 'MB',
+      heapUsed: Math.round(used.heapUsed / 1024 / 1024) + 'MB',
+    });
+  }, 300_000);
 
   // Surface unhandled rejections and uncaught exceptions so they appear in logs.
   // Do NOT call process.exit() here — a WhatsApp/Puppeteer crash must not take

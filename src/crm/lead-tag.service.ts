@@ -15,17 +15,22 @@ import { Cron } from '@nestjs/schedule';
 @Injectable()
 export class LeadTagService {
   private readonly logger = new Logger(LeadTagService.name);
+  private _running = false;
 
   constructor(@InjectDataSource() private ds: DataSource) {}
 
   @Cron('0 2 * * *') // daily at 02:00 server time — low-traffic window
   async computeTags(): Promise<void> {
     this.logger.log('[Cron] LeadTagService: computing tags...');
+    if (this._running) return;
+    this._running = true;
     try {
       await this._computeTagsInner();
     } catch (e: any) {
       this.logger.error('[Cron] LeadTagService: tag computation failed', e?.stack ?? e?.message);
       // Do NOT rethrow — a single failure must never prevent the next scheduled run
+    } finally {
+      this._running = false;
     }
   }
 

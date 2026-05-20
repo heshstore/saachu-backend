@@ -20,6 +20,7 @@ const RECOVERY_MIN_LIMIT = 10;
 @Injectable()
 export class NumberRecoveryService {
   private readonly logger = new Logger(NumberRecoveryService.name);
+  private _running = false;
 
   constructor(
     @InjectRepository(WhatsappNumber)

@@ -41,6 +41,8 @@ const ESCALATION_HOURS    = 24;
 
 @Injectable()
 export class ProductionService {
+  private _running = false;
+
   constructor(
     @InjectRepository(ProductionJob)
     private repo: Repository<ProductionJob>,

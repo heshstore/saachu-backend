@@ -43,6 +43,7 @@ const ENTITY_ROUTES: Record<string, (id: number) => string> = {
 @Injectable()
 export class SlaEngineService {
   private readonly logger = new Logger(SlaEngineService.name);
+  private _running = false;
 
   constructor(
     @InjectRepository(SlaEvent)
@@ -157,6 +158,8 @@ export class SlaEngineService {
 
   @Cron('0 */5 * * * *')
   async evaluateSlaEvents(): Promise<void> {
+    if (this._running) return;
+    this._running = true;
     const now = new Date();
     try {
       const events = await this.slaRepo.find({
@@ -169,6 +172,8 @@ export class SlaEngineService {
       }
     } catch (e: any) {
       this.dbHealth.handleError(e, 'SlaEngine.evaluateSlaEvents');
+    } finally {
+      this._running = false;
     }
   }
 
@@ -329,6 +334,8 @@ export class SlaEngineService {
 
   @Cron('0 */30 8-20 * * *')
   async scanOverdueFollowups(): Promise<void> {
+    if (this._running) return;
+    this._running = true;
     try {
       const rows: Array<{ id: number; lead_id: number; due_date: string; assigned_to: number | null }> =
         await this.slaRepo.manager.query(`
@@ -356,6 +363,8 @@ export class SlaEngineService {
       }
     } catch (e: any) {
       this.dbHealth.handleError(e, 'SlaEngine.scanOverdueFollowups');
+    } finally {
+      this._running = false;
     }
   }
 

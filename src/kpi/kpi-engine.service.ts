@@ -110,6 +110,7 @@ export interface KpiSummary {
 @Injectable()
 export class KpiEngineService {
   private readonly logger = new Logger(KpiEngineService.name);
+  private _running = false;
 
   constructor(
     @InjectRepository(KpiSnapshot)
@@ -527,6 +528,8 @@ export class KpiEngineService {
   @Cron('0 0 2 * * *') // 02:00 every night
   async nightlySnapshot(): Promise<void> {
     this.logger.log('KPI nightly snapshot starting…');
+    if (this._running) return;
+    this._running = true;
     try {
       const yesterday = new Date(Date.now() - 86_400_000);
       const from      = startOfDay(yesterday);
@@ -549,6 +552,8 @@ export class KpiEngineService {
       this.logger.log('KPI nightly snapshot complete');
     } catch (e: any) {
       this.dbHealth.handleError(e, 'KpiEngine.nightlySnapshot');
+    } finally {
+      this._running = false;
     }
   }
 

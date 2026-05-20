@@ -9,6 +9,7 @@ import { DbHealthService } from '../shared/db-health.service';
 @Injectable()
 export class LeadAlertService {
   private readonly logger = new Logger(LeadAlertService.name);
+  private _running = false;
 
   constructor(
     @InjectRepository(LeadAlert)
@@ -39,6 +40,8 @@ export class LeadAlertService {
 
   @Cron('*/15 * * * *')
   async runAlertChecks(): Promise<void> {
+    if (this._running) return;
+    this._running = true;
     try {
       // Run all three checks in parallel — independent queries, no shared state
       const results = await Promise.allSettled([
@@ -54,6 +57,8 @@ export class LeadAlertService {
       }
     } catch (e: any) {
       this.dbHealth.handleError(e, 'LeadAlertService.runAlertChecks');
+    } finally {
+      this._running = false;
     }
   }
 
