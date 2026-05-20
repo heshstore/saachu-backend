@@ -4,6 +4,7 @@ import { Repository, DataSource } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
 import { KpiSnapshot } from './entities/kpi-snapshot.entity';
 import { NotificationService } from '../notifications/notification.service';
+import { DbHealthService } from '../shared/db-health.service';
 import { NotificationType, NotificationPriority, NotificationCategory } from '../notifications/notification.entity';
 
 // ── Alert thresholds ─────────────────────────────────────────────────────────
@@ -115,6 +116,7 @@ export class KpiEngineService {
     private readonly snapshotRepo: Repository<KpiSnapshot>,
     private readonly dataSource: DataSource,
     private readonly notifService: NotificationService,
+    private readonly dbHealth: DbHealthService,
   ) {}
 
   private q<T = any>(sql: string, params: any[] = []): Promise<T[]> {
@@ -546,7 +548,7 @@ export class KpiEngineService {
 
       this.logger.log('KPI nightly snapshot complete');
     } catch (e: any) {
-      this.logger.error(`KPI nightly snapshot failed: ${e?.message}`);
+      this.dbHealth.handleError(e, 'KpiEngine.nightlySnapshot');
     }
   }
 

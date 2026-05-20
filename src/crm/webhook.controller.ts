@@ -4,9 +4,11 @@ import {
 import { Response, Request } from 'express';
 import * as crypto from 'crypto';
 import { Public } from '../auth/public.decorator';
+import { RequirePermission } from '../auth/require-permission.decorator';
 import { LeadService } from './lead.service';
 import { normalizeIndiaMart } from './normalizers/indiamart.normalizer';
 import { normalizeMetaLead } from './normalizers/meta.normalizer';
+import { normalizeGoogleLead } from './normalizers/google.normalizer';
 import { appConfig } from '../config/config';
 import { Lead } from './entities/lead.entity';
 import axios from 'axios';
@@ -23,9 +25,16 @@ type MetaLeadResponse = {
   campaign_name?: string;
 };
 
+// Healthy threshold: consider a source stale if no webhook received in this many hours.
+const HEALTHY_THRESHOLD_HOURS = 24;
+
 @Controller('leads/webhook')
 export class WebhookController {
   private readonly logger = new Logger(WebhookController.name);
+
+  // In-memory last-received timestamps. Process-local only — resets on restart.
+  // Good enough for operator visibility; no persistence needed.
+  private readonly lastReceived: Record<string, Date> = {};
 
   constructor(private readonly leadService: LeadService) {}
 
@@ -39,6 +48,8 @@ export class WebhookController {
       this.logger.warn('IndiaMart webhook: missing or invalid secret — ignoring');
       return { ok: true };
     }
+
+    this.lastReceived['INDIAMART'] = new Date();
 
     setImmediate(async () => {
       try {
@@ -63,6 +74,11 @@ export class WebhookController {
     @Query('hub.challenge') challenge: string,
     @Res() res: Response,
   ) {
+    // Fail closed: require the verify token to be configured — rejects if env var is missing
+    if (!appConfig.metaVerifyToken) {
+      this.logger.warn('Meta webhook: META_VERIFY_TOKEN not configured — rejecting verification');
+      return res.status(403).send('Forbidden');
+    }
     if (mode === 'subscribe' && token === appConfig.metaVerifyToken) {
       this.logger.log('Meta webhook verified successfully');
       return res.status(200).send(challenge);
@@ -101,6 +117,8 @@ export class WebhookController {
       return { ok: true };
     }
 
+    this.lastReceived['META'] = new Date();
+
     // Respond 200 immediately; Meta retries if we take too long
     setImmediate(async () => {
       try {
@@ -121,6 +139,9 @@ export class WebhookController {
             }
 
             // Fetch full lead data from Meta Graph API
+            if (!appConfig.metaAccessToken) {
+              this.logger.warn(`Meta: META_ACCESS_TOKEN not configured — cannot fetch lead data for ${leadgenId}`);
+            }
             let graphData: MetaLeadResponse = {};
             try {
               const resp = await axios.get<MetaLeadResponse>(
@@ -141,7 +162,7 @@ export class WebhookController {
             const dto = normalizeMetaLead(graphData, leadgenId);
             this.logger.log(`Meta: normalized — name="${dto.name}" phone="${dto.phone}" email="${dto.email ?? ''}"`);
 
-            if (!dto.phone) {
+            if (!dto.phone || dto.phone === 'unknown') {
               this.logger.warn(`Meta: leadgen_id=${leadgenId} has no phone — skipping`);
               continue;
             }
@@ -157,6 +178,68 @@ export class WebhookController {
         }
       } catch (e: any) {
         this.logger.error(`Meta: webhook processing failed — ${e?.message}`, e?.stack);
+      }
+    });
+
+    return { ok: true };
+  }
+
+  // ─── Google Ads Lead Form Extension ─────────────────────────────────────
+  @Public()
+  @Post('google')
+  @HttpCode(200)
+  googleLead(@Body() body: any) {
+    this.logger.log('Google Ads webhook received');
+
+    // Fail closed: require the webhook key to be configured AND match
+    if (!appConfig.googleAdsWebhookKey) {
+      this.logger.warn('Google Ads webhook: GOOGLE_ADS_WEBHOOK_KEY not configured — rejecting all requests');
+      return { ok: true };
+    }
+    if (body?.google_key !== appConfig.googleAdsWebhookKey) {
+      this.logger.warn('Google Ads webhook: invalid google_key — ignoring');
+      return { ok: true };
+    }
+
+    // Skip test submissions from Google's "Test" button in the UI
+    if (body?.is_test === true) {
+      this.logger.log(`Google Ads webhook: test submission lead_id=${body?.lead_id} — skipping`);
+      return { ok: true };
+    }
+
+    const leadId = body?.lead_id ? String(body.lead_id) : null;
+    if (!leadId) {
+      this.logger.warn('Google Ads webhook: missing lead_id — ignoring');
+      return { ok: true };
+    }
+
+    this.lastReceived['GOOGLE'] = new Date();
+
+    setImmediate(async () => {
+      try {
+        // Idempotency — skip if already imported
+        const existing = await this.leadService.findByExternalId(leadId);
+        if (existing) {
+          this.logger.log(`Google Ads: lead_id=${leadId} already exists (id=${existing.id}) — skipping`);
+          return;
+        }
+
+        const dto = normalizeGoogleLead(body);
+        this.logger.log(`Google Ads: normalized — name="${dto.name}" phone="${dto.phone}" campaign="${dto.utm_campaign ?? ''}"`);
+
+        if (!dto.phone || dto.phone === 'unknown') {
+          this.logger.warn(`Google Ads: lead_id=${leadId} has no phone — skipping`);
+          return;
+        }
+
+        const created = await this.leadService.create(dto as any, { id: null, role: 'Admin' });
+        if (created.analyticsOnly || !created.lead) {
+          this.logger.warn(`Google Ads: lead_id=${leadId} blocked by identity gate`);
+          return;
+        }
+        this.logger.log(`Google Ads: lead created id=${created.lead.id} for lead_id=${leadId}`);
+      } catch (e: any) {
+        this.logger.error(`Google Ads: webhook processing failed — ${e?.message}`, e?.stack);
       }
     });
 
@@ -195,6 +278,8 @@ export class WebhookController {
       return { ok: true };
     }
 
+    this.lastReceived['SHOPIFY'] = new Date();
+
     setImmediate(async () => {
       try {
         const result = await this.leadService.createFromShopifyClick({
@@ -220,6 +305,30 @@ export class WebhookController {
     });
 
     return { ok: true };
+  }
+
+  // ─── Webhook health — manager visibility ─────────────────────────────────
+  @Get('health')
+  @RequirePermission('crm.analytics.team')
+  getWebhookHealth() {
+    const SOURCES = ['META', 'GOOGLE', 'INDIAMART', 'SHOPIFY'] as const;
+    const now = Date.now();
+
+    return SOURCES.reduce<Record<string, { last_received_at: string | null; minutes_ago: number | null; healthy: boolean }>>(
+      (acc, src) => {
+        const ts = this.lastReceived[src];
+        const minutesAgo = ts ? Math.floor((now - ts.getTime()) / 60_000) : null;
+        acc[src] = {
+          last_received_at: ts ? ts.toISOString() : null,
+          minutes_ago: minutesAgo,
+          // healthy = received at least once AND within the threshold.
+          // null (never received this session) is shown as unknown, not unhealthy.
+          healthy: minutesAgo !== null && minutesAgo < HEALTHY_THRESHOLD_HOURS * 60,
+        };
+        return acc;
+      },
+      {},
+    );
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────────

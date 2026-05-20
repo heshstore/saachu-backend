@@ -1,5 +1,4 @@
-import { Controller, Get, Post, Sse, HttpCode, MessageEvent } from '@nestjs/common';
-import { Observable } from 'rxjs';
+import { Controller, Get, Post, HttpCode } from '@nestjs/common';
 import { WhatsAppService } from './whatsapp.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
@@ -17,12 +16,6 @@ export class WhatsAppAdminController {
   @RequirePermission('whatsapp.manage')
   getQr() {
     return this.waService.getQrData();
-  }
-
-  @Sse('events')
-  @RequirePermission('whatsapp.manage')
-  events(): Observable<MessageEvent> {
-    return this.waService.getAdminEventObservable() as Observable<MessageEvent>;
   }
 
   @Post('restart')

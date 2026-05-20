@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { QuotationModule } from '../quotation/quotation.module';
-import { WhatsappModule } from '../whatsapp/whatsapp.module';
+import { CrmWhatsAppModule } from '../crm-whatsapp/crm-whatsapp.module';
 import { NotificationsModule } from '../notifications/notification.module';
 import { Lead } from './entities/lead.entity';
 import { LeadNote } from './entities/lead-note.entity';
@@ -31,7 +31,7 @@ import { AnalyticsController } from './analytics.controller';
       User,
     ]),
     QuotationModule,
-    WhatsappModule,
+    CrmWhatsAppModule,
     NotificationsModule,
   ],
   controllers: [LeadController, WebhookController, ShopifyApiController, AnalyticsController],

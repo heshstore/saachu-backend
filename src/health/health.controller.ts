@@ -1,19 +1,47 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Public } from '../auth/public.decorator';
+import { DbHealthService } from '../shared/db-health.service';
 
 const BOOT_TIME = new Date();
 
 @Controller('health')
-export class HealthController {
-  constructor(@InjectDataSource() private readonly ds: DataSource) {}
+export class HealthController implements OnApplicationBootstrap {
+  private readonly logger = new Logger(HealthController.name);
+
+  constructor(
+    @InjectDataSource() private readonly ds: DataSource,
+    private readonly dbHealth: DbHealthService,
+  ) {}
+
+  async onApplicationBootstrap(): Promise<void> {
+    try {
+      const rows: Record<string, string>[] = await this.ds.query(
+        `SELECT current_database() AS db, current_schema() AS schema`,
+      );
+      const r = rows[0] ?? {};
+      const opts = (this.ds.driver as any)?.options ?? {};
+      this.logger.log(
+        `[DB] Connected — db=${r['db'] ?? opts.database ?? '?'} ` +
+        `host=${opts.host ?? '?'} ` +
+        `pool_max=${opts.extra?.max ?? 10} ` +
+        `retryAttempts=${(this.ds as any)?.options?.retryAttempts ?? 20} ` +
+        `keepAlive=true`,
+      );
+      this.dbHealth.recordSuccess();
+    } catch (err: any) {
+      this.dbHealth.handleError(err, 'HealthController.startup');
+    }
+  }
 
   /** Full health check — db ping, uptime, memory, whatsapp state, version. */
   @Public()
   @Get()
   async getHealth() {
-    const dbOk = await this.ds.query('SELECT 1').then(() => true).catch(() => false);
+    const dbOk = await this.ds.query('SELECT 1')
+      .then(() => { this.dbHealth.recordSuccess(); return true; })
+      .catch(() => false);
 
     let waDbStatus = 'UNKNOWN';
     try {
@@ -49,6 +77,13 @@ export class HealthController {
         heap_total_mb: Math.round(mem.heapTotal   / 1_048_576),
       },
     };
+  }
+
+  /** DB connectivity health — reflects real-time status from scheduler observations. */
+  @Public()
+  @Get('db')
+  getDbHealth() {
+    return this.dbHealth.getStatus();
   }
 
   /** Lightweight version probe — safe to call from CI/deployment scripts. */

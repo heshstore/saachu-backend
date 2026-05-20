@@ -986,6 +986,39 @@ export class AnalyticsService {
     });
   }
 
+  // ── Source volume: today + last 7 days ───────────────────────────────────────
+  // Restricted to manager roles — operator-facing dashboard card.
+  // Returns flat { SOURCE: count } maps for direct consumption.
+
+  async getTodayBySource(): Promise<{ today: Record<string, number>; last7Days: Record<string, number> }> {
+    const [todayRows, weekRows] = await Promise.all([
+      this.ds.query(`
+        SELECT source, COUNT(*) AS cnt
+        FROM leads
+        WHERE created_at >= CURRENT_DATE
+          AND is_active = true
+        GROUP BY source
+        ORDER BY cnt DESC
+      `),
+      this.ds.query(`
+        SELECT source, COUNT(*) AS cnt
+        FROM leads
+        WHERE created_at >= NOW() - INTERVAL '7 days'
+          AND is_active = true
+        GROUP BY source
+        ORDER BY cnt DESC
+      `),
+    ]);
+
+    const toMap = (rows: any[]) =>
+      rows.reduce((acc: Record<string, number>, r: any) => {
+        acc[r.source] = +r.cnt;
+        return acc;
+      }, {});
+
+    return { today: toMap(todayRows), last7Days: toMap(weekRows) };
+  }
+
   // ── Part 7: Source Health Engine ─────────────────────────────────────────────
   // Covers ALL leads (no is_active filter) — full ingestion picture, not operational view.
   // Restricted to Admin/COO/Sales Manager at the controller layer.
@@ -1290,5 +1323,39 @@ export class AnalyticsService {
       reassignmentCount:       +r.reassignment_count,
       snoozeAbuseCount:        +r.snooze_abuse_count,
     }));
+  }
+
+  // ── Top campaigns by UTM ──────────────────────────────────────────────────────
+
+  async getTopCampaigns(days = 30): Promise<{ campaign: string; source: string; count: number }[]> {
+    const rows = await this.ds.query(`
+      SELECT
+        COALESCE(raw_payload->>'utm_campaign', '(direct)') AS campaign,
+        COALESCE(raw_payload->>'utm_source', source)       AS source,
+        COUNT(*)::int                                       AS count
+      FROM leads
+      WHERE is_active = true
+        AND created_at >= NOW() - ($1 || ' days')::interval
+      GROUP BY campaign, source
+      ORDER BY count DESC
+      LIMIT 20
+    `, [days]);
+    return rows.map((r: any) => ({ campaign: r.campaign, source: r.source, count: +r.count }));
+  }
+
+  // ── Conversion funnel: Leads → Quotations → Orders ───────────────────────────
+
+  async getConversionFunnel(): Promise<{ leads: number; quotations: number; orders: number }> {
+    const [r] = await this.ds.query(`
+      SELECT
+        (SELECT COUNT(*) FROM leads WHERE is_active = true)                     AS leads,
+        (SELECT COUNT(*) FROM quotation WHERE status != 'DRAFT')                AS quotations,
+        (SELECT COUNT(*) FROM orders  WHERE status NOT IN ('CANCELLED','DRAFT')) AS orders
+    `);
+    return {
+      leads:      +r.leads,
+      quotations: +r.quotations,
+      orders:     +r.orders,
+    };
   }
 }

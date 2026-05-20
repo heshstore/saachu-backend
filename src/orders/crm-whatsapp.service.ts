@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { WhatsAppService } from '../whatsapp/whatsapp.service';
+import { CrmWhatsAppService } from '../crm-whatsapp/crm-whatsapp.service';
 import { ProductionAlert } from './entities/production-alert.entity';
 import { ProductionJob } from './entities/production-job.entity';
 
@@ -12,7 +12,7 @@ export class CrmWhatsappService {
   private readonly logger = new Logger(CrmWhatsappService.name);
 
   constructor(
-    private readonly whatsapp: WhatsAppService,
+    private readonly whatsapp: CrmWhatsAppService,
     @InjectRepository(ProductionAlert)
     private readonly alertRepo: Repository<ProductionAlert>,
   ) {}

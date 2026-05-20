@@ -147,6 +147,45 @@ function generateShopifyExternalId(payload: {
   return 'sh_' + crypto.createHash('sha256').update(raw).digest('hex').slice(0, 24);
 }
 
+/**
+ * Resolve the context label for a Shopify click lead.
+ *
+ * Priority order:
+ *   1. Explicit context / action from the frontend form
+ *   2. Google click ID (gclid) → GOOGLE – Ads
+ *   3. Facebook click ID (fbclid) → META – Campaign
+ *   4. utm_source signal → platform-specific label
+ *   5. Default → SHOPIFY – Product Form
+ *
+ * UTM data is always stored verbatim in raw_payload regardless of this function.
+ */
+function resolveShopifyUtmContext(
+  rawContext: string,
+  payload: {
+    action?: string;
+    utm_source?: string; utm_medium?: string; utm_campaign?: string;
+    gclid?: string; fbclid?: string;
+  },
+): string {
+  // Explicit context from the form takes precedence over UTM signals
+  if (rawContext) return contextToLabel(rawContext);
+  if (payload.action) return contextToLabel(payload.action);
+
+  const src = (payload.utm_source || '').toLowerCase();
+  const med = (payload.utm_medium || '').toLowerCase();
+
+  if (payload.gclid || src.includes('google')) {
+    if (payload.gclid || med === 'cpc' || med === 'ppc')
+      return contextToLabel(LeadContext.GOOGLE_ADS);
+    return contextToLabel(LeadContext.GOOGLE_ORGANIC);
+  }
+  if (payload.fbclid || src.match(/meta|facebook|fb|instagram/)) {
+    return contextToLabel(LeadContext.META_LEAD_FORM);
+  }
+
+  return contextToLabel(LeadContext.SHOPIFY_PRODUCT_FORM);
+}
+
 @Injectable()
 export class LeadService implements OnModuleInit {
   private readonly logger = new Logger(LeadService.name);
@@ -368,6 +407,23 @@ export class LeadService implements OnModuleInit {
     // Normalize empty-string context to undefined so the DB stores NULL, not ''.
     if ((dto as any).context === '') (dto as any).context = undefined;
 
+    // UTM-signal context resolution: if context is still missing but UTM/click-id fields are
+    // present (e.g. a manually-created CRM lead from a tracked URL), infer from signals.
+    if (!dto.context && (dto.source === LeadSource.DIRECT || dto.source === LeadSource.SHOPIFY)) {
+      const rawPayload = (dto as any).raw_payload || {};
+      const gclid     = (dto as any).gclid || rawPayload.gclid;
+      const fbclid    = (dto as any).fbclid || rawPayload.fbclid;
+      const utmSrc    = ((dto as any).utm_source || rawPayload.utm_source || '').toLowerCase();
+      const utmMed    = ((dto as any).utm_medium || rawPayload.utm_medium || '').toLowerCase();
+      if (gclid || utmSrc.includes('google')) {
+        (dto as any).context = gclid || utmMed === 'cpc' || utmMed === 'ppc'
+          ? contextToLabel(LeadContext.GOOGLE_ADS)
+          : contextToLabel(LeadContext.GOOGLE_ORGANIC);
+      } else if (fbclid || utmSrc.match(/meta|facebook|fb|instagram/)) {
+        (dto as any).context = contextToLabel(LeadContext.META_LEAD_FORM);
+      }
+    }
+
     // Default context for manual (DIRECT) leads when not supplied by the client.
     if (!dto.context && dto.source === LeadSource.DIRECT) {
       (dto as any).context = contextToLabel(LeadContext.DIRECT_MANUAL);
@@ -587,6 +643,10 @@ export class LeadService implements OnModuleInit {
     }
     if (filters.from) q.andWhere('l.created_at >= :from', { from: filters.from });
     if (filters.to) q.andWhere('l.created_at <= :to', { to: filters.to });
+    // Attribution filters — stored as text columns or JSONB on raw_payload
+    if (filters.context) q.andWhere('l.context ILIKE :ctx', { ctx: `%${filters.context}%` });
+    if (filters.utm_source) q.andWhere(`l.raw_payload->>'utm_source' ILIKE :utmSrc`, { utmSrc: `%${filters.utm_source}%` });
+    if (filters.utm_campaign) q.andWhere(`l.raw_payload->>'utm_campaign' ILIKE :utmCmp`, { utmCmp: `%${filters.utm_campaign}%` });
 
     // Quality filter: exact tier when specified; operational-only excludes TRACKING_ONLY/JUNK/DUPLICATE.
     // NULL quality rows (pre-backfill) are treated as operational (included).
@@ -1915,6 +1975,9 @@ export class LeadService implements OnModuleInit {
     message?: string; product?: string; product_title?: string; product_url?: string;
     page_url?: string; lead_type?: string; priority?: string; timestamp?: string;
     tag?: string;
+    // UTM attribution
+    utm_source?: string; utm_medium?: string; utm_campaign?: string;
+    utm_term?: string; utm_content?: string; gclid?: string; fbclid?: string;
   }): Promise<{ ok: boolean; leadId?: number; error?: string }> {
     const externalId = generateShopifyExternalId(payload);
 
@@ -1929,6 +1992,8 @@ export class LeadService implements OnModuleInit {
     const normalizedPhone = phoneIsReal ? normalizePhone(payload.phone ?? '') : 'unknown';
     const resolvedPhone   = phoneIsReal && normalizedPhone !== 'unknown' ? normalizedPhone : undefined;
 
+    const resolvedContext = resolveShopifyUtmContext(rawContext, payload);
+
     const leadData: CreateLeadDto = {
       name:              rawName    || undefined,
       phone:             resolvedPhone,
@@ -1936,12 +2001,11 @@ export class LeadService implements OnModuleInit {
       email:             rawEmail   || undefined,
       city:              rawCity    || undefined,
       country:           rawCountry || undefined,
-      // Use a Shopify-specific fallback so leads with no action/context never get 'DIRECT – Manual Entry'.
-      context:           contextToLabel(rawContext || payload.action || LeadContext.SHOPIFY_PRODUCT_FORM),
+      context:           resolvedContext,
       product_interest:  payload.product || payload.product_title || payload.page_url || 'General Inquiry',
       notes:             payload.message ? payload.message : `Lead from ${payload.page_url || ''}`,
       source:            LeadSource.SHOPIFY,
-      lead_source_label: contextToLabel(rawContext || payload.action || LeadContext.SHOPIFY_PRODUCT_FORM),
+      lead_source_label: resolvedContext,
       landing_page:      payload.page_url || '',
       external_id:       externalId,
       raw_payload:       {

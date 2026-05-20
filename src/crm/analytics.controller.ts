@@ -137,6 +137,16 @@ export class AnalyticsController {
     return this.analyticsService.getPipelineLeaks(req.user);
   }
 
+  /** Today's lead count grouped by source + last-7-day count. Manager-level view. */
+  @Get('today-by-source')
+  @RequirePermission('crm.analytics.team')
+  getTodayBySource(@Request() req) {
+    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)) {
+      throw new ForbiddenException('Today by source requires manager-level access');
+    }
+    return this.analyticsService.getTodayBySource();
+  }
+
   // ── Source health / ingestion reliability ─────────────────────────────────────
   // Covers ALL leads (including archived/inactive) — full ingestion visibility.
   // Restricted to Admin/COO/Sales Manager only.
@@ -148,5 +158,19 @@ export class AnalyticsController {
       throw new ForbiddenException('Source health requires manager-level access');
     }
     return this.analyticsService.getSourceHealth();
+  }
+
+  /** Top UTM campaigns with lead counts. ?days=30 (default). */
+  @Get('top-campaigns')
+  @RequirePermission('crm.analytics.team')
+  getTopCampaigns(@Query('days') days: string, @Request() req) {
+    return this.analyticsService.getTopCampaigns(parseInt(days) || 30);
+  }
+
+  /** Funnel: active leads → non-draft quotations → live orders. */
+  @Get('conversion-funnel')
+  @RequirePermission('crm.analytics.team')
+  getConversionFunnel(@Request() req) {
+    return this.analyticsService.getConversionFunnel();
   }
 }

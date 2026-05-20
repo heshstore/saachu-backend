@@ -6,6 +6,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { SlaEvent, SlaModule, SlaPriority } from './entities/sla-event.entity';
 import { NotificationService } from '../notifications/notification.service';
+import { DbHealthService } from '../shared/db-health.service';
 import {
   NotificationType,
   NotificationPriority,
@@ -50,6 +51,7 @@ export class SlaEngineService {
     private readonly userRepo: Repository<User>,
     private readonly notifService: NotificationService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly dbHealth: DbHealthService,
   ) {}
 
   // ── SLA creation ─────────────────────────────────────────────────────────────
@@ -166,7 +168,7 @@ export class SlaEngineService {
         );
       }
     } catch (e: any) {
-      this.logger.warn(`SLA evaluation cron failed: ${e?.message}`);
+      this.dbHealth.handleError(e, 'SlaEngine.evaluateSlaEvents');
     }
   }
 
@@ -353,7 +355,7 @@ export class SlaEngineService {
         });
       }
     } catch (e: any) {
-      this.logger.warn(`scanOverdueFollowups failed: ${e?.message}`);
+      this.dbHealth.handleError(e, 'SlaEngine.scanOverdueFollowups');
     }
   }
 

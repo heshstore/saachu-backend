@@ -3,12 +3,13 @@ import { Cron } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
-import { WhatsAppService } from '../whatsapp/whatsapp.service';
+import { CrmWhatsAppService } from '../crm-whatsapp/crm-whatsapp.service';
 import { NotificationService } from '../notifications/notification.service';
 import { NotificationType, NotificationPriority } from '../notifications/notification.entity';
 import { LeadSource, LeadStatus, WorkflowState } from './entities/lead.entity';
 import { LeadAuditService } from './lead-audit.service';
 import { CRM_OPERATIONAL_QUALITY_SQL } from './crm.constants';
+import { DbHealthService } from '../shared/db-health.service';
 
 export interface LeadCreatedEvent {
   id:              number;
@@ -54,9 +55,10 @@ export class LeadAutomationService {
 
   constructor(
     @InjectDataSource() private readonly ds: DataSource,
-    private readonly waService: WhatsAppService,
+    private readonly waService: CrmWhatsAppService,
     private readonly notifService: NotificationService,
     private readonly auditService: LeadAuditService,
+    private readonly dbHealth: DbHealthService,
   ) {}
 
   // ── WA Circuit Breaker (memory-only, no DB) ───────────────────────────────────
@@ -340,6 +342,7 @@ export class LeadAutomationService {
 
   @Cron('*/30 * * * *')
   async remindOverdueFollowUps(): Promise<void> {
+    try {
     if (!await this.isSetting('automation.followup_reminders')) return;
 
     const COOLDOWNS = {
@@ -557,12 +560,16 @@ export class LeadAutomationService {
       );
     }
     await this.recordLastRun('cron.followup_reminders.last_run');
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.remindOverdueFollowUps');
+    }
   }
 
   // ── 4. Missed lead recovery (daily 9 AM) ──────────────────────────────────────
 
   @Cron('0 9 * * *')
   async recoverMissedLeads(): Promise<void> {
+    try {
     if (!await this.isSetting('automation.followup_reminders')) return;
     const leads: Array<{
       id: number; name: string; phone: string; product_interest: string;
@@ -609,12 +616,16 @@ export class LeadAutomationService {
 
     this.logger.log(`recoverMissedLeads: found ${leads.length} uncontacted lead(s)`);
     await this.recordLastRun('cron.missed_leads.last_run');
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.recoverMissedLeads');
+    }
   }
 
   // ── 5. SEND_QUOTATION leads with no quotation sent after 24h ────────────────
 
   @Cron('0 */3 * * *')
   async nudgeQuotationPending(): Promise<void> {
+    try {
     if (!await this.isSetting('automation.followup_reminders')) return;
 
     const leads: Array<{
@@ -700,12 +711,16 @@ export class LeadAutomationService {
     }
 
     this.logger.log(`[SLA] nudgeQuotationPending: ${quotationNudgeCount}/${leads.length} SEND_QUOTATION lead(s) nudged`);
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.nudgeQuotationPending');
+    }
   }
 
   // ── 6. Customer follow-up after quotation (daily 11 AM) ──────────────────────
 
   @Cron('0 11 * * *')
   async followUpWithCustomerOnQuotation(): Promise<void> {
+    try {
     if (!await this.isSetting('automation.followup_reminders')) return;
 
     const leads: Array<{
@@ -757,6 +772,9 @@ export class LeadAutomationService {
 
     this.logger.log(`followUpWithCustomerOnQuotation: sent follow-up to ${leads.length} customer(s)`);
     await this.recordLastRun('cron.customer_quotation_followup.last_run');
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.followUpWithCustomerOnQuotation');
+    }
   }
 
   // ── 7. Hot lead first-contact alert (every 15 min) ───────────────────────────
@@ -774,6 +792,7 @@ export class LeadAutomationService {
 
   @Cron('*/15 * * * *')
   async alertHotLeadNotContacted(): Promise<void> {
+    try {
     if (!await this.isSetting('automation.followup_reminders')) return;
 
     const leads: Array<{
@@ -832,12 +851,16 @@ export class LeadAutomationService {
     }
 
     this.logger.log(`alertHotLeadNotContacted: ${leads.length} hot lead(s) uncontacted`);
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.alertHotLeadNotContacted');
+    }
   }
 
   // ── 8. Unanswered customer reply — salesman hasn't responded in 30 min ────────
 
   @Cron('*/15 * * * *')
   async alertUnansweredCustomerReply(): Promise<void> {
+    try {
     const leads: Array<{
       id: number; assigned_to: number; name: string; product_interest: string;
     }> = await this.ds.query(
@@ -871,12 +894,16 @@ export class LeadAutomationService {
     }
 
     this.logger.log(`alertUnansweredCustomerReply: ${leads.length} unanswered reply/replies`);
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.alertUnansweredCustomerReply');
+    }
   }
 
   // ── 9. Auto-resume snoozed automation (every 30 min) ─────────────────────────
 
   @Cron('*/30 * * * *')
   async resumeExpiredSnoozes(): Promise<void> {
+    try {
     const result: Array<{ id: number }> = await this.ds.query(
       // Only auto-resume leads where automation was snoozed (automation_manually_paused = false).
       // Leads paused manually by a manager (automation_manually_paused = true) are not touched —
@@ -900,12 +927,16 @@ export class LeadAutomationService {
     if (result.length) {
       this.logger.log(`resumeExpiredSnoozes: resumed automation for ${result.length} lead(s)`);
     }
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.resumeExpiredSnoozes');
+    }
   }
 
   // ── 10. Payment follow-ups (daily 10 AM) ──────────────────────────────────────
 
   @Cron('0 10 * * *')
   async paymentFollowUps(): Promise<void> {
+    try {
     if (!await this.isSetting('automation.payment_followups')) return;
     const orders: Array<{
       id: number; order_no: string; customer_name: string;
@@ -954,6 +985,9 @@ export class LeadAutomationService {
 
     this.logger.log(`paymentFollowUps: found ${orders.length} order(s) with pending payment`);
     await this.recordLastRun('cron.payment_followups.last_run');
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.paymentFollowUps');
+    }
   }
 
   // ── 13. Stagnation detection (every 2 hours) ──────────────────────────────────
@@ -963,6 +997,7 @@ export class LeadAutomationService {
 
   @Cron('0 */2 * * *')
   async detectStagnantLeads(): Promise<void> {
+    try {
     if (!await this.isSetting('automation.followup_reminders')) return;
 
     // Leads with no CALLED audit entry within per-state SLA×2 window, not yet tagged stale
@@ -1077,6 +1112,9 @@ export class LeadAutomationService {
       this.logger.log(`detectStagnantLeads: ${staleCount} new stale, ${longStaleFiltered.length} long-stale escalated`);
     }
     await this.recordLastRun('cron.stagnation_detection.last_run');
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.detectStagnantLeads');
+    }
   }
 
   // ── Private helpers ───────────────────────────────────────────────────────────
@@ -1110,6 +1148,7 @@ export class LeadAutomationService {
 
   @Cron('0 */6 * * *')
   async autoPriorityElevation(): Promise<void> {
+    try {
     if (!await this.isSetting('automation.followup_reminders')) return;
 
     const lowToMedium: Array<{ id: number; name: string; assigned_to: number }> = await this.ds.query(`
@@ -1158,6 +1197,9 @@ export class LeadAutomationService {
       );
     }
     await this.recordLastRun('cron.priority_elevation.last_run');
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.autoPriorityElevation');
+    }
   }
 
   // ── 11. Auto-reassign stale leads (every 12 hours) ───────────────────────────
@@ -1165,6 +1207,7 @@ export class LeadAutomationService {
 
   @Cron('0 */12 * * *')
   async autoReassignStaleLeads(): Promise<void> {
+    try {
     if (!await this.isSetting('automation.followup_reminders')) return;
 
     const stale: Array<{ id: number; name: string; phone: string; assigned_to: number; source: string }> =
@@ -1267,6 +1310,9 @@ export class LeadAutomationService {
 
     this.logger.log(`[REASSIGN] autoReassignStaleLeads: processed ${stale.length} stale lead(s)`);
     await this.recordLastRun('cron.auto_reassign.last_run');
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.autoReassignStaleLeads');
+    }
   }
 
   // ── 12. Reactivation engine (daily 10:30 AM) ─────────────────────────────────
@@ -1276,6 +1322,7 @@ export class LeadAutomationService {
 
   @Cron('30 10 * * *')
   async reactivationEngine(): Promise<void> {
+    try {
     const candidates: Array<{ id: number; name: string; phone: string; product_interest: string; assigned_to: number }> =
       await this.ds.query(`
         SELECT id, name, phone, product_interest, assigned_to
@@ -1314,5 +1361,8 @@ export class LeadAutomationService {
 
     this.logger.log(`reactivationEngine: ${candidates.length} reactivation opportunity/ies surfaced`);
     await this.recordLastRun('cron.reactivation.last_run');
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'LeadAutomation.reactivationEngine');
+    }
   }
 }

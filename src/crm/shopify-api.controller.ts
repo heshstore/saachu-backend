@@ -23,6 +23,14 @@ export class ShopifyLeadDto {
   @IsOptional() @IsString() priority?: string;
   @IsOptional() @IsString() timestamp?: string;
   @IsOptional() @IsString() tag?: string;
+  // UTM attribution — stored in raw_payload, used to refine context label
+  @IsOptional() @IsString() utm_source?: string;
+  @IsOptional() @IsString() utm_medium?: string;
+  @IsOptional() @IsString() utm_campaign?: string;
+  @IsOptional() @IsString() utm_term?: string;
+  @IsOptional() @IsString() utm_content?: string;
+  @IsOptional() @IsString() gclid?: string;
+  @IsOptional() @IsString() fbclid?: string;
 }
 
 @Controller('api/leads')

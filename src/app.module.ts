@@ -32,7 +32,7 @@ import { QuotationModule } from './quotation/quotation.module';
 import { SharedModule } from './shared/shared.module';
 import { RbacModule } from './rbac/rbac.module';
 import { CrmModule } from './crm/crm.module';
-import { WhatsappModule } from './whatsapp/whatsapp.module';
+import { CrmWhatsAppModule } from './crm-whatsapp/crm-whatsapp.module';
 import { NotificationsModule } from './notifications/notification.module';
 import { PromotionModule } from './promotion/promotion.module';
 import { AnalyticsModule } from './analytics/analytics.module';
@@ -56,6 +56,7 @@ import { AfterSalesModule } from './after-sales/after-sales.module';
 import { FinanceOpsModule } from './finance-ops/finance-ops.module';
 import { WorkforceOpsModule } from './workforce-ops/workforce-ops.module';
 import { AppShutdownService } from './common/app-shutdown.service';
+import { MarketingModule } from './marketing/marketing.module';
 
 const _rawDbUrl      = process.env.DATABASE_URL || '';
 const databaseUrl    = sanitizeDatabaseUrl(_rawDbUrl);
@@ -90,7 +91,8 @@ new Logger('AppModule').log(
         max:                          Number(process.env.DB_POOL_MAX) || 10,
         min:                          0,
         idleTimeoutMillis:            30_000,
-        connectionTimeoutMillis:      15_000,
+        connectionTimeoutMillis:      15_000,  // fail fast when DNS is unreachable
+        acquireTimeoutMillis:         20_000,  // don't queue forever when pool exhausted
         keepAlive:                    true,
         keepAliveInitialDelayMillis:  10_000,
       },
@@ -113,7 +115,7 @@ new Logger('AppModule').log(
     CitiesModule,
     QuotationModule,
     CrmModule,
-    WhatsappModule,
+    CrmWhatsAppModule,
     NotificationsModule,
     PromotionModule,
     AnalyticsModule,
@@ -136,6 +138,7 @@ new Logger('AppModule').log(
     AfterSalesModule,
     FinanceOpsModule,
     WorkforceOpsModule,
+    MarketingModule,
   ],
   providers: [
     AppShutdownService,

@@ -1,19 +1,12 @@
 import {
-  Controller, Get, Post, Body, Param, Query, Request, Sse, MessageEvent, HttpCode,
+  Controller, Get, Post, Body, Param, Query, Request, HttpCode,
 } from '@nestjs/common';
-import { Observable } from 'rxjs';
 import { WhatsAppService } from './whatsapp.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
 @Controller('whatsapp')
 export class WhatsAppController {
   constructor(private readonly waService: WhatsAppService) {}
-
-  @Sse('sse')
-  @RequirePermission('whatsapp.manage')
-  qrStream(): Observable<MessageEvent> {
-    return this.waService.getQrObservable() as Observable<MessageEvent>;
-  }
 
   @Get('status')
   @RequirePermission('whatsapp.manage')

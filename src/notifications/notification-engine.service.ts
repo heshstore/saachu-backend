@@ -9,7 +9,8 @@ import { NotificationType, NotificationPriority, NotificationCategory } from './
 import { NOTIFICATION_RULES } from './notification-rules';
 import { ProductionJob, ProductionJobStatus, ACTIVE_STATUSES } from '../orders/entities/production-job.entity';
 import { User } from '../users/entities/user.entity';
-import { WhatsAppService } from '../whatsapp/whatsapp.service';
+import { CrmWhatsAppService } from '../crm-whatsapp/crm-whatsapp.service';
+import { DbHealthService } from '../shared/db-health.service';
 
 const PRODUCTION_ROLES = new Set([
   'DESIGNER', 'PRINTER', 'LASER_OPERATOR', 'ASSEMBLY_WORKER', 'Production Manager',
@@ -25,8 +26,9 @@ export class NotificationEngineService {
     private readonly jobRepo: Repository<ProductionJob>,
     @InjectRepository(User)
     private readonly userRepo: Repository<User>,
-    private readonly waService: WhatsAppService,
+    private readonly waService: CrmWhatsAppService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly dbHealth: DbHealthService,
   ) {}
 
   // ── System: WhatsApp down ────────────────────────────────────────────────────
@@ -296,7 +298,7 @@ export class NotificationEngineService {
         }
       }
     } catch (err: any) {
-      this.logger.error(`checkDelayedJobs failed: ${err?.message}`);
+      this.dbHealth.handleError(err, 'NotificationEngine.checkDelayedJobs');
     }
   }
 
@@ -345,7 +347,7 @@ export class NotificationEngineService {
         });
       }
     } catch (err: any) {
-      this.logger.warn(`checkHotLeads: ${err?.message}`);
+      this.dbHealth.handleError(err, 'NotificationEngine.checkHotLeads');
     }
   }
 
@@ -385,7 +387,7 @@ export class NotificationEngineService {
         });
       }
     } catch (err: any) {
-      this.logger.error(`checkIdleUsers failed: ${err?.message}`);
+      this.dbHealth.handleError(err, 'NotificationEngine.checkIdleUsers');
     }
   }
 
@@ -428,7 +430,7 @@ export class NotificationEngineService {
         }
       }
     } catch (err: any) {
-      this.logger.error(`endOfDaySummary failed: ${err?.message}`);
+      this.dbHealth.handleError(err, 'NotificationEngine.endOfDaySummary');
     }
   }
 
@@ -440,7 +442,7 @@ export class NotificationEngineService {
       const removed = await this.notifService.deleteExpiredAndInactive();
       this.logger.log(`Cleanup: removed ${removed} expired/inactive notifications`);
     } catch (err: any) {
-      this.logger.error(`cleanupNotifications failed: ${err?.message}`);
+      this.dbHealth.handleError(err, 'NotificationEngine.cleanupNotifications');
     }
   }
 

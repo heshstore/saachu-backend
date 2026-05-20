@@ -39,6 +39,7 @@ export interface AppConfig {
   metaAccessToken: string;
   metaAppSecret: string;
   metaPageId: string;
+  googleAdsWebhookKey: string;
   whatsappSessionName: string;
 }
 
@@ -74,5 +75,6 @@ export const appConfig: AppConfig = {
   metaAccessToken: process.env.META_ACCESS_TOKEN || '',
   metaAppSecret: process.env.META_APP_SECRET || '',
   metaPageId: process.env.META_PAGE_ID || '',
+  googleAdsWebhookKey: process.env.GOOGLE_ADS_WEBHOOK_KEY || '',
   whatsappSessionName: process.env.WHATSAPP_SESSION || 'saachu-main',
 };

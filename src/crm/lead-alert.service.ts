@@ -4,6 +4,7 @@ import { Repository, DataSource } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
 import { OnEvent } from '@nestjs/event-emitter';
 import { LeadAlert } from './entities/lead-alert.entity';
+import { DbHealthService } from '../shared/db-health.service';
 
 @Injectable()
 export class LeadAlertService {
@@ -14,6 +15,7 @@ export class LeadAlertService {
     private alertRepo: Repository<LeadAlert>,
     @InjectDataSource()
     private ds: DataSource,
+    private readonly dbHealth: DbHealthService,
   ) {}
 
   // ── Public query API ─────────────────────────────────────────────────────────
@@ -51,8 +53,7 @@ export class LeadAlertService {
         }
       }
     } catch (e: any) {
-      // Guard against missing table (migration not run yet) or DB connectivity issues
-      this.logger.warn(`Alert system skipped: ${e?.message}`);
+      this.dbHealth.handleError(e, 'LeadAlertService.runAlertChecks');
     }
   }
 
