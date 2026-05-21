@@ -9,7 +9,7 @@ import { ProductionEfficiency } from './entities/production-efficiency.entity';
 import { Order, OrderStatus } from './entities/order.entity';
 import { User } from '../users/entities/user.entity';
 import { AuditService } from '../logs/audit.service';
-import { CrmWhatsappService } from './crm-whatsapp.service';
+import { ProductionWhatsappService } from './production-whatsapp.service';
 
 const STAGE_CAPACITY: Record<string, number> = {
   DESIGNING: 1000,
@@ -53,7 +53,7 @@ export class ProductionService {
     @InjectRepository(User)
     private userRepo: Repository<User>,
     private readonly audit: AuditService,
-    private readonly crmWa: CrmWhatsappService,
+    private readonly crmWa: ProductionWhatsappService,
     private readonly eventEmitter: EventEmitter2,
   ) {}
 

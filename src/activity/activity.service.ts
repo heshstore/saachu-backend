@@ -636,7 +636,7 @@ export class ActivityService {
 
   // ── WhatsApp ──────────────────────────────────────────────────────────────────
 
-  @OnEvent('whatsapp.down')
+  @OnEvent('crm.whatsapp.down')
   onWhatsAppDown(e: { reason: string }): void {
     const isCritical = ['AUTH_FAILURE', 'CONFLICT'].includes(e.reason);
     void this.logActivity({
@@ -649,7 +649,7 @@ export class ActivityService {
     });
   }
 
-  @OnEvent('whatsapp.up')
+  @OnEvent('crm.whatsapp.up')
   onWhatsAppUp(_e: any): void {
     void this.logActivity({
       module:   'SYSTEM',

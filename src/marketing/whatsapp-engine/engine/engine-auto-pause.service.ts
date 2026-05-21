@@ -2,7 +2,6 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Interval } from '@nestjs/schedule';
-import { OnEvent } from '@nestjs/event-emitter';
 import { WhatsappMessageLog } from '../entities/whatsapp-message-log.entity';
 import { QueueStatus } from '../entities/enums';
 import { EngineAuditService, AuditEvent } from './engine-audit.service';
@@ -27,14 +26,15 @@ export class EngineAutoPauseService {
     private readonly auditService: EngineAuditService,
   ) {}
 
-  @OnEvent('whatsapp.down')
-  onWhatsAppDown(): void {
+  // Disconnect tracking is populated by MarketingWhatsAppService via recordDisconnect()
+  // when a marketing number disconnects. CRM events are not listened to here — event
+  // namespaces are isolated: CRM emits crm.whatsapp.down, Marketing tracks its own state.
+  recordDisconnect(): void {
     const now = Date.now();
     this._disconnectTs.push(now);
-    // Prune timestamps older than 1 hour
     const cutoff = now - 3_600_000;
     this._disconnectTs = this._disconnectTs.filter((t) => t >= cutoff);
-    this.logger.log(`[AutoPause] WA disconnect recorded (${this._disconnectTs.length}/hr)`);
+    this.logger.log(`[AutoPause] Marketing WA disconnect recorded (${this._disconnectTs.length}/hr)`);
   }
 
   @Interval(CHECK_INTERVAL_MS)

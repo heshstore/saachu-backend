@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { MarketingWhatsAppService } from './marketing-whatsapp.service';
-import { CrmModule } from '../../crm/crm.module';
 
 import { WhatsappNumber } from './entities/whatsapp-number.entity';
 import { MarketingCampaign } from './entities/marketing-campaign.entity';
@@ -60,7 +59,6 @@ import { SchemaValidatorService } from './engine/schema-validator.service';
       WhatsappMessageLog,
       WhatsappReply,
     ]),
-    CrmModule,
   ],
   controllers: [
     CampaignsController,

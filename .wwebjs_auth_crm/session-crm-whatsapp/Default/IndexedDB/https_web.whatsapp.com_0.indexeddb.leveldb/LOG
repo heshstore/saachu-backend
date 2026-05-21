@@ -1,0 +1,37 @@
+2026/05/21-16:57:24.948 12007b Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/MANIFEST-000001
+2026/05/21-16:57:24.949 12007b Recovering log #199
+2026/05/21-16:57:24.962 12007b Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/IndexedDB/https_web.whatsapp.com_0.indexeddb.leveldb/000199.log 
+2026/05/21-16:58:52.487 12009a Level-0 table #208: started
+2026/05/21-16:58:52.517 12009a Level-0 table #208: 1107604 bytes OK
+2026/05/21-16:58:52.520 12009a Delete type=0 #199
+2026/05/21-16:58:52.527 12009a Compacting 1@1 + 5@2 files
+2026/05/21-16:58:52.582 12009a Generated table #209@1: 38125 keys, 2196392 bytes
+2026/05/21-16:58:52.666 12009a Generated table #210@1: 61816 keys, 2227051 bytes
+2026/05/21-16:58:52.720 12009a Generated table #211@1: 33262 keys, 2195241 bytes
+2026/05/21-16:58:52.768 12009a Generated table #212@1: 24925 keys, 2180384 bytes
+2026/05/21-16:58:52.806 12009a Generated table #213@1: 29353 keys, 1479014 bytes
+2026/05/21-16:58:52.806 12009a Compacted 1@1 + 5@2 files => 10278082 bytes
+2026/05/21-16:58:52.808 12009a compacted to: files[ 0 0 5 0 0 0 0 ]
+2026/05/21-16:58:52.810 12009a Delete type=2 #203
+2026/05/21-16:58:52.810 12009a Delete type=2 #202
+2026/05/21-16:58:52.810 12009a Delete type=2 #201
+2026/05/21-16:58:52.810 12009a Delete type=2 #205
+2026/05/21-16:58:52.810 12009a Delete type=2 #204
+2026/05/21-16:58:52.810 12009a Delete type=2 #208
+2026/05/21-16:59:36.048 12007d Level-0 table #215: started
+2026/05/21-16:59:36.075 12007d Level-0 table #215: 1085237 bytes OK
+2026/05/21-16:59:36.078 12007d Delete type=0 #207
+2026/05/21-17:00:02.057 12009a Compacting 1@1 + 5@2 files
+2026/05/21-17:00:02.150 12009a Generated table #216@1: 38529 keys, 2197425 bytes
+2026/05/21-17:00:02.342 12009a Generated table #217@1: 61367 keys, 2226464 bytes
+2026/05/21-17:00:02.455 12009a Generated table #218@1: 35001 keys, 2196331 bytes
+2026/05/21-17:00:02.530 12009a Generated table #219@1: 24177 keys, 2176198 bytes
+2026/05/21-17:00:02.581 12009a Generated table #220@1: 31262 keys, 1620593 bytes
+2026/05/21-17:00:02.581 12009a Compacted 1@1 + 5@2 files => 10417011 bytes
+2026/05/21-17:00:02.583 12009a compacted to: files[ 0 0 5 0 0 0 0 ]
+2026/05/21-17:00:02.583 12009a Delete type=2 #215
+2026/05/21-17:00:02.583 12009a Delete type=2 #211
+2026/05/21-17:00:02.583 12009a Delete type=2 #210
+2026/05/21-17:00:02.583 12009a Delete type=2 #212
+2026/05/21-17:00:02.583 12009a Delete type=2 #213
+2026/05/21-17:00:02.583 12009a Delete type=2 #209

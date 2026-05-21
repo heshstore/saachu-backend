@@ -21,7 +21,7 @@ import { ProductionService } from './production.service';
 import { ProductionController } from './production.controller';
 import { PaymentsController } from './payments.controller';
 import { AccountsController } from './accounts.controller';
-import { CrmWhatsappService } from './crm-whatsapp.service';
+import { ProductionWhatsappService } from './production-whatsapp.service';
 import { ProductionCommandService } from './production-command.service';
 
 @Module({
@@ -34,7 +34,7 @@ import { ProductionCommandService } from './production-command.service';
     CrmWhatsAppModule,
   ],
   controllers: [OrdersController, ProductionController, PaymentsController, AccountsController],
-  providers: [OrdersService, PaymentService, ProductionService, CrmWhatsappService, ProductionCommandService, OrderExplosionService],
-  exports: [OrdersService, PaymentService, ProductionService, CrmWhatsappService, OrderExplosionService],
+  providers: [OrdersService, PaymentService, ProductionService, ProductionWhatsappService, ProductionCommandService, OrderExplosionService],
+  exports: [OrdersService, PaymentService, ProductionService, ProductionWhatsappService, OrderExplosionService],
 })
 export class OrdersModule {}

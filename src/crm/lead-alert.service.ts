@@ -141,7 +141,7 @@ export class LeadAlertService {
 
   // ── WhatsApp event listeners ──────────────────────────────────────────────────
 
-  @OnEvent('whatsapp.down')
+  @OnEvent('crm.whatsapp.down')
   async onWhatsAppDown(payload: { reason: string }): Promise<void> {
     try {
       await this.createWhatsAppDownAlert(payload.reason ?? 'unknown');
@@ -150,7 +150,7 @@ export class LeadAlertService {
     }
   }
 
-  @OnEvent('whatsapp.up')
+  @OnEvent('crm.whatsapp.up')
   async onWhatsAppUp(): Promise<void> {
     try {
       await this.resolveWhatsAppAlerts();

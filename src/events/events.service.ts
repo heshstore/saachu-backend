@@ -10,7 +10,8 @@ export type SaachuEventMap = {
   'order.created':      { id: number; salesman_id?: number; customer_name?: string };
   'order.completed':    { orderId: number; salesmanId?: number };
   'payment.received':   { orderId: number; amount: number; createdBy: number };
-  'whatsapp.down':      { reason: string };
+  'crm.whatsapp.down':  { reason: string };
+  'crm.whatsapp.up':    Record<string, never>;
   'shopify.sync_failed':{ error: string; syncedAt?: Date };
   'lead.assigned':      { leadId: number; userId: number; leadName?: string };
   'lead.converted':     { leadId: number; orderId?: number };

@@ -2072,13 +2072,13 @@ export class LeadService implements OnModuleInit {
     return this.leadRepo.findOne({ where: { external_id: externalId } });
   }
 
-  @OnEvent('whatsapp.down')
+  @OnEvent('crm.whatsapp.down')
   onWhatsAppDown(): void {
     this._whatsappDown = true;
     this.logger.warn('[LeadService] WhatsApp is down — incoming leads will be escalated to HIGH priority');
   }
 
-  @OnEvent('whatsapp.up')
+  @OnEvent('crm.whatsapp.up')
   onWhatsAppUp(): void {
     this._whatsappDown = false;
     this.logger.log('[LeadService] WhatsApp restored — normal lead priority resumed');

@@ -34,7 +34,7 @@ export class NotificationEngineService {
 
   // ── System: WhatsApp down ────────────────────────────────────────────────────
 
-  @OnEvent('whatsapp.down')
+  @OnEvent('crm.whatsapp.down')
   async onWhatsAppDown(payload: { reason: string }): Promise<void> {
     try {
       const isCritical = ['AUTH_FAILURE', 'CONFLICT'].includes(payload.reason);

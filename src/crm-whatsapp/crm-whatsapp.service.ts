@@ -5,9 +5,8 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
-import { execSync } from 'child_process';
-import { WhatsAppSession } from '../whatsapp/entities/whatsapp-session.entity';
-import { WhatsAppMessage } from '../whatsapp/entities/whatsapp-message.entity';
+import { WhatsAppSession } from './entities/whatsapp-session.entity';
+import { WhatsAppMessage } from './entities/whatsapp-message.entity';
 import { LeadSource } from '../crm/entities/lead.entity';
 import { normalizePhone } from '../crm/normalizers/lead-normalizer';
 
@@ -124,9 +123,16 @@ export class CrmWhatsAppService implements OnModuleDestroy {
     });
 
     this.client.on('qr', async (qr: string) => {
-      let QRCode: any;
-      try { QRCode = (await import('qrcode')).default; } catch { return; }
-      const dataUrl = await QRCode.toDataURL(qr, { width: 300 });
+      // qrcode@1.5.4 is pure CJS — (await import('qrcode')).default is undefined
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const QRCode = require('qrcode');
+      let dataUrl: string;
+      try {
+        dataUrl = await QRCode.toDataURL(qr, { width: 300 });
+      } catch (e: any) {
+        this.logger.error(`[CRM_WA_EVENT] QR toDataURL failed: ${e?.message}`);
+        return;
+      }
       this._waState        = 'qr_ready';
       this._qrDataUrl      = dataUrl;
       this._qrGeneratedAt  = new Date();
@@ -156,7 +162,7 @@ export class CrmWhatsAppService implements OnModuleDestroy {
         connected_at:   new Date(),
         disconnected_at: null,
       });
-      this.eventEmitter.emit('whatsapp.up');
+      this.eventEmitter.emit('crm.whatsapp.up');
       setTimeout(() => this.recoverMissedMessages().catch(() => {}), 3_000);
     });
 
@@ -167,7 +173,7 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       this._waState = 'disconnected';
       await this.updateSession({ status: 'DISCONNECTED', disconnected_at: new Date() });
       if (!this._manualDisconnect) {
-        this.eventEmitter.emit('whatsapp.down', { reason });
+        this.eventEmitter.emit('crm.whatsapp.down', { reason });
       }
       // No auto-reconnect — wait for manual Connect press.
     });
@@ -179,7 +185,7 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       this._qrDataUrl     = null;
       this._qrGeneratedAt = null;
       await this.updateSession({ status: 'DISCONNECTED', disconnected_at: new Date() });
-      this.eventEmitter.emit('whatsapp.down', { reason: 'AUTH_FAILURE' });
+      this.eventEmitter.emit('crm.whatsapp.down', { reason: 'AUTH_FAILURE' });
     });
 
     const onMsg = async (msg: any) => {
@@ -196,25 +202,49 @@ export class CrmWhatsAppService implements OnModuleDestroy {
     this.client.on('message', onMsg);
     this.client.on('message_create', onMsg);
 
-    this.logger.log('[WA_CONNECT] Calling initialize() — 30 s timeout');
-    try {
-      await Promise.race([
-        this.client.initialize(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('WA_INIT_TIMEOUT')), 30_000),
-        ),
-      ]);
-    } catch (e: any) {
-      if (e?.message === 'WA_INIT_TIMEOUT') {
-        this.logger.error('[WA_TIMEOUT] Chromium launch timed out — destroying client');
-      }
-      // Guaranteed cleanup before re-throwing to initClient's catch block
-      try { await this.client?.destroy(); } catch { /* ignore */ }
-      this.client       = null;
-      this._ready       = false;
-      this._waState     = 'disconnected';
-      throw e;
-    }
+    // Release init lock on first WA event — not on ready.
+    // initialize() stays pending while user scans QR; a timeout here would destroy the session.
+    // Only abort if Chromium produces no event at all within 60s (genuine boot failure).
+    const BOOT_TIMEOUT_MS = 60_000;
+    const initStart = Date.now();
+    this.logger.log('[WA_CONNECT] Calling initialize()');
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let bootTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+      const settle = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (bootTimeoutId) { clearTimeout(bootTimeoutId); bootTimeoutId = null; }
+        if (err) reject(err); else resolve();
+      };
+
+      const onFirstEvent = () => {
+        this.logger.log(`[CRM_WA_INIT] First event — init lock releasing (${Date.now() - initStart}ms)`);
+        settle();
+      };
+      this.client.once('qr', onFirstEvent);
+      this.client.once('authenticated', onFirstEvent);
+      this.client.once('ready', onFirstEvent);
+      this.client.once('auth_failure', onFirstEvent);
+
+      bootTimeoutId = setTimeout(() => {
+        settle(new Error(`Chromium boot timeout — no WA event in ${BOOT_TIMEOUT_MS / 1000}s`));
+      }, BOOT_TIMEOUT_MS);
+
+      this.client.initialize()
+        .then(() => { settle(); })
+        .catch((e: any) => {
+          if (!settled) {
+            settle(e instanceof Error ? e : new Error(String(e?.message ?? 'Unknown')));
+          } else {
+            this.logger.warn(`[CRM_WA_INIT] Late rejection after first event — waiting for disconnect events`);
+          }
+        });
+    });
+
+    this.logger.log('[CRM_WA_INIT] Init lock released — client live, awaiting scan or ready');
   }
 
   // ── Public control API ────────────────────────────────────────────────────────
@@ -239,11 +269,10 @@ export class CrmWhatsAppService implements OnModuleDestroy {
     this._ready            = false;
     this._manualDisconnect = true;
     if (this.client) {
+      try { this.client.removeAllListeners(); } catch { /* ignore */ }
       try { await this.client.logout(); } catch { /* already gone */ }
       try { await this.client.destroy(); } catch { /* ignore */ }
     }
-    try { execSync('pkill -f chromium || true'); } catch {}
-    try { execSync('pkill -f chrome || true'); } catch {}
     this.client            = null;
     this._ready            = false;
     this._initializing     = false;
@@ -266,11 +295,10 @@ export class CrmWhatsAppService implements OnModuleDestroy {
     this._ready            = false;
     this._manualDisconnect = true;
     if (this.client) {
+      try { this.client.removeAllListeners(); } catch { /* ignore */ }
       try { await this.client.logout(); } catch { /* already gone */ }
       try { await this.client.destroy(); } catch { /* ignore */ }
     }
-    try { execSync('pkill -f chromium || true'); } catch {}
-    try { execSync('pkill -f chrome || true'); } catch {}
     this.client            = null;
     this._ready            = false;
     this._initializing     = false;
@@ -536,7 +564,7 @@ export class CrmWhatsAppService implements OnModuleDestroy {
     const hash      = crypto.createHash('sha256').update(`${from}-${body || ''}`).digest('hex');
     const messageId = msg.id?._serialized || hash;
 
-    this.eventEmitter.emit('whatsapp.message.received', {
+    this.eventEmitter.emit('crm.whatsapp.message.received', {
       phone: phone ?? raw,
       body:  body.slice(0, 1000),
       chatId: from,

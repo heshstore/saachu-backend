@@ -102,4 +102,27 @@ export class NumbersController {
     await this.marketingWa.resetNumber(id);
     return { ok: true, message: 'Session wiped — scan new QR at /numbers/:id/qr' };
   }
+
+  /**
+   * HARD RESET — destroys client, removes from memory map, wipes full LocalAuth session dir.
+   * Use for corrupted sessions (lock files, bad state, repeated initialize() failures).
+   * After this, call /connect to generate a fresh QR.
+   */
+  @Post(':id/hard-reset')
+  @HttpCode(200)
+  async hardReset(@Param('id') id: string) {
+    await this.numbersService.findOne(id); // 404 guard
+    return this.marketingWa.hardResetSession(id);
+  }
+
+  /**
+   * RECOVERY — resets wa_state to null for ALL numbers in DB.
+   * Use when the backend logged "Startup — connecting N" but QR never appeared.
+   * After calling this, manually disconnect+connect each number via the UI.
+   */
+  @Post('recovery/reset-states')
+  @HttpCode(200)
+  recoveryResetStates() {
+    return this.marketingWa.resetAllConnectionStates();
+  }
 }
