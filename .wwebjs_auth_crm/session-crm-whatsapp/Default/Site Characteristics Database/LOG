@@ -1,3 +1,2 @@
-2026/05/21-16:57:22.876 12009e Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/Site Characteristics Database/MANIFEST-000001
-2026/05/21-16:57:22.877 12009e Recovering log #3
-2026/05/21-16:57:22.877 12009e Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/Site Characteristics Database/000003.log 
+2026/05/23-16:11:13.176 390afc Creating DB /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/Site Characteristics Database since it was missing.
+2026/05/23-16:11:13.184 390afc Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/Site Characteristics Database/MANIFEST-000001

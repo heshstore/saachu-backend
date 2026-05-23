@@ -23,13 +23,20 @@ export class NumbersService {
   }
 
   create(dto: Partial<WhatsappNumber>): Promise<WhatsappNumber> {
+    if (dto.phone) dto = { ...dto, phone: this._toE164(dto.phone) };
     return this.repo.save(this.repo.create(dto));
   }
 
   async update(id: string, dto: Partial<WhatsappNumber>): Promise<WhatsappNumber> {
     await this.findOne(id);
+    if (dto.phone) dto = { ...dto, phone: this._toE164(dto.phone) };
     await this.repo.update(id, dto);
     return this.findOne(id);
+  }
+
+  private _toE164(phone: string): string {
+    const digits = phone.replace(/\D/g, '');
+    return '+' + digits;
   }
 
   async remove(id: string): Promise<void> {

@@ -1,4 +1,4 @@
-import { Injectable, OnModuleDestroy, Logger } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -16,6 +16,10 @@ const SESSION_NAME   = 'crm-main';
 
 const LOCK_FILES = ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'DevToolsActivePort'] as const;
 
+const CHROME_PATH     = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+// 60s: if no WA lifecycle event fires by then, the session is a hydration deadlock.
+const BOOT_TIMEOUT_MS = 60_000;
+
 function isValidWAPhone(raw: string): boolean {
   if (!/^\d{8,15}$/.test(raw)) return false;
   if (raw.startsWith('0')) return false;
@@ -23,10 +27,13 @@ function isValidWAPhone(raw: string): boolean {
   return true;
 }
 
+// Strict linear state machine — no cyclic recovery transitions.
+// idle → initializing → qr_ready → authenticating → ready
+// Any failure from any state → disconnected/auth_failure → idle (manual connect required)
 type WaState = 'idle' | 'initializing' | 'qr_ready' | 'authenticating' | 'ready' | 'disconnected' | 'auth_failure';
 
 @Injectable()
-export class CrmWhatsAppService implements OnModuleDestroy {
+export class CrmWhatsAppService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(CrmWhatsAppService.name);
 
   private client: any       = null;
@@ -34,10 +41,12 @@ export class CrmWhatsAppService implements OnModuleDestroy {
   private _waState: WaState = 'idle';
   private _initializing     = false;
   private _manualDisconnect = false;
-  private _qrDataUrl: string | null  = null;
+  private _qrDataUrl: string | null   = null;
   private _qrGeneratedAt: Date | null = null;
-  private _recovering = false;
-  private seenMsgIds  = new Set<string>();
+  private _heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private _terminating = false;
+  private _destroying  = false;
+  private seenMsgIds   = new Set<string>();
 
   constructor(
     @InjectRepository(WhatsAppSession)
@@ -47,10 +56,20 @@ export class CrmWhatsAppService implements OnModuleDestroy {
     private eventEmitter: EventEmitter2,
   ) {}
 
+  async onModuleInit(): Promise<void> {
+    // Stability rule: NO silent rehydration on startup.
+    // CRM starts disconnected — only explicit user Connect action may start a session.
+    this.logger.log('[CRM_BOOT] module initialized — disconnected, manual connect required');
+    await this.updateSession({ status: 'DISCONNECTED' }).catch(() => {});
+  }
+
   async onModuleDestroy() {
+    this._terminating = true;
+    this._stopHeartbeat();
     this._ready = false;
     this._manualDisconnect = true;
     if (this.client) {
+      try { this.client.removeAllListeners(); } catch { /* ignore */ }
       try { await this.client.destroy(); } catch { /* ignore */ }
       this.client = null;
     }
@@ -59,6 +78,10 @@ export class CrmWhatsAppService implements OnModuleDestroy {
   // ── Init ─────────────────────────────────────────────────────────────────────
 
   async initClient(): Promise<void> {
+    if (this._terminating || this._destroying) {
+      this.logger.warn('[CRM_WA] initClient skipped — teardown in progress');
+      return;
+    }
     if (this._initializing) {
       this.logger.warn('[CRM_WA] initClient skipped — already initializing');
       return;
@@ -67,21 +90,31 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       this.logger.warn('[CRM_WA] initClient skipped — client already exists');
       return;
     }
+
     this._initializing = true;
     this._waState = 'initializing';
     this.logger.log(`[CRM_WA_INIT] Starting (clientId=${CLIENT_ID} pid=${process.pid})`);
 
+    // Single attempt only — no retries, no recovery loops.
     try {
       await this._startClient();
     } catch (e: any) {
       this.logger.error(`[CRM_WA_INIT] Failed: ${e?.message}`);
       this._waState = 'disconnected';
+      await this.updateSession({ status: 'DISCONNECTED' }).catch(() => {});
+      if (this.client) {
+        const c = this.client;
+        this.client = null;
+        try { c.removeAllListeners(); } catch {}
+        try { await c.destroy(); } catch {}
+      }
     } finally {
       this._initializing = false;
     }
   }
 
   private async _startClient(): Promise<void> {
+    // ── 1. Load wwebjs ────────────────────────────────────────────────────────────
     let Client: any, LocalAuth: any;
     try {
       const wwebjs = await import('whatsapp-web.js');
@@ -92,38 +125,49 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       return;
     }
 
-    const executablePath = this.findChrome();
-    this.logger.log(`[CRM_WA_INIT] Chrome: ${executablePath ?? '(bundled)'}`);
+    this.logger.log(`[WA_CHROME] executablePath=${CHROME_PATH}`);
+    this.logger.log(`[WA_CHROME] exists=${fs.existsSync(CHROME_PATH)}`);
+    this.logger.log(`[WA_CHROME] protocolTimeout=180000`);
+    this.logger.log(`[CRM_BOOT] before_client_create pid=${process.pid}`);
     this.removeLockFiles();
 
+    // ── 2. Create client ──────────────────────────────────────────────────────────
     this.client = new Client({
       authStrategy: new LocalAuth({ clientId: CLIENT_ID, dataPath: AUTH_DATA_PATH }),
       puppeteer: {
         headless: true,
-        ...(executablePath ? { executablePath } : {}),
+        protocolTimeout: 180_000,
+        executablePath: CHROME_PATH,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
           '--disable-gpu',
-          '--disable-extensions',
-          '--disable-background-networking',
-          '--disable-background-timer-throttling',
-          '--disable-renderer-backgrounding',
-          '--disable-sync',
-          '--disable-translate',
-          '--mute-audio',
-          '--no-first-run',
-          '--no-zygote',
-          '--single-process',
         ],
       },
+      authTimeoutMs: 0,
+      qrMaxRetries: 0,
       webVersionCache: { type: 'none' },
+    });
+    this.logger.log('[CRM_BOOT] after_client_create');
+
+    // ── 3. WA event handlers ──────────────────────────────────────────────────────
+
+    // Tracks whether any WA lifecycle event has fired.
+    // If the timeout fires with firstEventSeen=false, the session is a hydration deadlock.
+    let firstEventSeen = false;
+
+    this.client.on('loading_screen', () => {
+      if (!this._terminating) {
+        this.logger.log('[WA_EVENT] loading_screen');
+        setImmediate(() => this._attachBrowserDiagnostics());
+      }
     });
 
     this.client.on('qr', async (qr: string) => {
-      // qrcode@1.5.4 is pure CJS — (await import('qrcode')).default is undefined
+      firstEventSeen = true;
+      if (this._terminating) return;
+      this.logger.log('[WA_EVENT] qr');
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const QRCode = require('qrcode');
       let dataUrl: string;
@@ -133,62 +177,95 @@ export class CrmWhatsAppService implements OnModuleDestroy {
         this.logger.error(`[CRM_WA_EVENT] QR toDataURL failed: ${e?.message}`);
         return;
       }
-      this._waState        = 'qr_ready';
-      this._qrDataUrl      = dataUrl;
-      this._qrGeneratedAt  = new Date();
+      this._waState       = 'qr_ready';
+      this._qrDataUrl     = dataUrl;
+      this._qrGeneratedAt = new Date();
       this.logger.log('[CRM_WA_EVENT] QR ready');
       await this.updateSession({ status: 'CONNECTING', qr_code: dataUrl });
     });
 
     this.client.on('authenticated', () => {
-      this.logger.log('[CRM_WA_EVENT] Authenticated');
+      firstEventSeen = true;
+      if (this._terminating) return;
+      this.logger.log('[WA_EVENT] authenticated');
       this._waState       = 'authenticating';
       this._qrDataUrl     = null;
       this._qrGeneratedAt = null;
     });
 
     this.client.on('ready', async () => {
+      firstEventSeen = true;
+      if (this._terminating) return;
+      this.logger.log('[WA_EVENT] ready');
       if (this._ready) return;
+      const phone = this.client?.info?.wid?.user ?? null;
+
+      this.logger.log('[WA_DB_SYNC] writing READY → CRM');
+      try {
+        await this.updateSession({
+          status:          'CONNECTED',
+          qr_code:         null,
+          phone_number:    phone,
+          connected_at:    new Date(),
+          disconnected_at: null,
+        });
+        this.logger.log('[WA_DB_SYNC] READY persisted → CRM');
+      } catch (e: any) {
+        this.logger.error(`[WA_DB_SYNC] READY persistence failed → CRM: ${e?.message}`);
+        this._waState = 'disconnected';
+        await this.updateSession({ status: 'DISCONNECTED' }).catch(() => {});
+        return;
+      }
+
       this._ready         = true;
       this._waState       = 'ready';
       this._qrDataUrl     = null;
       this._qrGeneratedAt = null;
-      const phone = this.client?.info?.wid?.user ?? null;
       this.logger.log(`[WA_READY] Connected as +${phone}`);
-      await this.updateSession({
-        status:         'CONNECTED',
-        qr_code:        null,
-        phone_number:   phone,
-        connected_at:   new Date(),
-        disconnected_at: null,
-      });
       this.eventEmitter.emit('crm.whatsapp.up');
+      this._startHeartbeat();
       setTimeout(() => this.recoverMissedMessages().catch(() => {}), 3_000);
     });
 
     this.client.on('disconnected', async (reason: string) => {
+      if (this._terminating) return;
       if (reason === 'NAVIGATION') return;
       this.logger.log(`[WA_DISCONNECT] Session disconnected: ${reason}`);
-      this._ready   = false;
+      this._ready = false;
+      this._stopHeartbeat();
+      // Stability rule: no auto-recovery. Any disconnect → disconnected, manual reconnect required.
       this._waState = 'disconnected';
       await this.updateSession({ status: 'DISCONNECTED', disconnected_at: new Date() });
       if (!this._manualDisconnect) {
         this.eventEmitter.emit('crm.whatsapp.down', { reason });
       }
-      // No auto-reconnect — wait for manual Connect press.
     });
 
     this.client.on('auth_failure', async (msg: string) => {
+      firstEventSeen = true;
+      if (this._terminating) return;
       this.logger.error(`[CRM_WA_EVENT] Auth failure: ${msg}`);
+      // Null client immediately so connect() can proceed after this handler finishes.
+      const c = this.client;
+      this.client = null;
       this._ready         = false;
       this._waState       = 'auth_failure';
       this._qrDataUrl     = null;
       this._qrGeneratedAt = null;
+      this._stopHeartbeat();
+      // Device permanently unlinked — wipe auth so next connect generates a fresh QR.
+      await this.clearAuthFiles().catch((err: any) =>
+        this.logger.warn(`[CRM_WA_EVENT] auth_failure clearAuthFiles failed: ${err?.message}`),
+      );
       await this.updateSession({ status: 'DISCONNECTED', disconnected_at: new Date() });
       this.eventEmitter.emit('crm.whatsapp.down', { reason: 'AUTH_FAILURE' });
+      try { c?.removeAllListeners(); } catch {}
+      try { await c?.destroy(); } catch {}
+      this._waState = 'idle';
     });
 
     const onMsg = async (msg: any) => {
+      if (this._terminating) return;
       if (msg.fromMe) return;
       const msgId = msg.id?._serialized ?? `${msg.from}-${msg.timestamp}`;
       if (this.seenMsgIds.has(msgId)) return;
@@ -199,57 +276,156 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       }
       await this.handleInbound(msg);
     };
-    this.client.on('message', onMsg);
+    this.client.on('message',        onMsg);
     this.client.on('message_create', onMsg);
 
-    // Release init lock on first WA event — not on ready.
-    // initialize() stays pending while user scans QR; a timeout here would destroy the session.
-    // Only abort if Chromium produces no event at all within 60s (genuine boot failure).
-    const BOOT_TIMEOUT_MS = 60_000;
+    // ── 4. Boot promise — releases init lock on first WA lifecycle event ──────────
+    // Timeout is 60s. If no event fires, this is a hydration deadlock — clear auth.
     const initStart = Date.now();
-    this.logger.log('[WA_CONNECT] Calling initialize()');
+    this.logger.log('[CRM_BOOT] before_initialize');
 
     await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      let bootTimeoutId: ReturnType<typeof setTimeout> | null = null;
+      let settled    = false;
+      let bootId:    ReturnType<typeof setTimeout> | null = null;
+      let midpointId: ReturnType<typeof setTimeout> | null = null;
 
       const settle = (err?: Error) => {
         if (settled) return;
         settled = true;
-        if (bootTimeoutId) { clearTimeout(bootTimeoutId); bootTimeoutId = null; }
+        if (bootId)     { clearTimeout(bootId);     bootId     = null; }
+        if (midpointId) { clearTimeout(midpointId); midpointId = null; }
         if (err) reject(err); else resolve();
       };
 
-      const onFirstEvent = () => {
-        this.logger.log(`[CRM_WA_INIT] First event — init lock releasing (${Date.now() - initStart}ms)`);
-        settle();
-      };
-      this.client.once('qr', onFirstEvent);
-      this.client.once('authenticated', onFirstEvent);
-      this.client.once('ready', onFirstEvent);
-      this.client.once('auth_failure', onFirstEvent);
+      // Release init lock on first WA event — client runs autonomously after this.
+      this.client.once('qr',           () => { this.logger.log(`[CRM_BOOT] first_wa_event=qr elapsed=${Date.now() - initStart}ms`);           settle(); });
+      this.client.once('authenticated', () => { this.logger.log(`[CRM_BOOT] first_wa_event=authenticated elapsed=${Date.now() - initStart}ms`); settle(); });
+      this.client.once('ready',         () => { this.logger.log(`[CRM_BOOT] first_wa_event=ready elapsed=${Date.now() - initStart}ms`);         settle(); });
+      this.client.once('auth_failure',  () => { this.logger.log(`[CRM_BOOT] first_wa_event=auth_failure elapsed=${Date.now() - initStart}ms`);  settle(); });
 
-      bootTimeoutId = setTimeout(() => {
+      // 30s mid-point diagnostic — log only, no action
+      midpointId = setTimeout(async () => {
+        if (settled) return;
+        try {
+          const page    = this.client?.pupPage;
+          const browser = this.client?.pupBrowser;
+          const browserConnected = browser?.isConnected() ?? false;
+          let currentUrl = 'unavailable';
+          let diagTitle  = 'unavailable';
+          if (page && !page.isClosed()) {
+            try { currentUrl = page.url(); } catch {}      // synchronous
+            try { diagTitle  = await page.title(); } catch {}
+          }
+          this.logger.log(`[CRM_DIAG_30S] browserConnected=${browserConnected} url=${currentUrl} title=${diagTitle} firstEventSeen=${firstEventSeen} elapsed=${Date.now() - initStart}ms`);
+        } catch (e: any) {
+          this.logger.warn(`[CRM_DIAG_30S] snapshot failed: ${e?.message}`);
+        }
+      }, 30_000);
+
+      // 60s hard timeout — if no WA event fired, this is a hydration deadlock
+      this.logger.log(`[WA_BOOT] timeout=${BOOT_TIMEOUT_MS}`);
+      bootId = setTimeout(async () => {
+        try {
+          const page    = this.client?.pupPage;
+          const browser = this.client?.pupBrowser;
+          const browserConnected = browser?.isConnected() ?? false;
+          let diagUrl   = 'unavailable';
+          let diagTitle = 'unavailable';
+          let pageCount = 0;
+          if (page && !page.isClosed()) {
+            try { diagUrl   = page.url(); } catch {}       // synchronous
+            try { diagTitle = await page.title(); } catch {}
+          }
+          try { pageCount = (await browser?.pages())?.length ?? 0; } catch {}
+          this.logger.error('[CRM_TIMEOUT_DIAG] ' + JSON.stringify({
+            pid:            process.pid,
+            browserConnected,
+            currentUrl:     diagUrl,
+            title:          diagTitle,
+            pageCount,
+            elapsedMs:      BOOT_TIMEOUT_MS,
+            firstEventSeen,
+          }));
+
+          if (!firstEventSeen) {
+            // Hydration deadlock: browser loaded WA but WA never produced an event.
+            // Auth is stale/corrupted — wipe it so the next connect generates a fresh QR.
+            this.logger.error(`[CRM_AUTH_STALLED] no WA lifecycle event in ${BOOT_TIMEOUT_MS / 1000}s — session dead, clearing auth`);
+            await this.clearAuthFiles().catch((err: any) =>
+              this.logger.warn(`[CRM_AUTH_STALLED] clearAuthFiles failed: ${err?.message}`),
+            );
+          }
+        } catch (diagErr: any) {
+          this.logger.warn(`[CRM_DIAG_ERROR] timeout snapshot failed: ${diagErr?.message}`);
+        }
         settle(new Error(`Chromium boot timeout — no WA event in ${BOOT_TIMEOUT_MS / 1000}s`));
       }, BOOT_TIMEOUT_MS);
 
+      this.logger.log('[CRM_BOOT] initialize_called');
       this.client.initialize()
         .then(() => { settle(); })
         .catch((e: any) => {
+          const msg: string = e?.message ?? '';
+          if (this._terminating && (
+            msg.includes('Target closed') || msg.includes('Session closed') ||
+            msg.includes('Protocol error') || msg.includes('Execution context')
+          )) {
+            this.logger.log('[WA_CLEANUP] expected browser shutdown during teardown');
+            if (!settled) settle();
+            return;
+          }
           if (!settled) {
             settle(e instanceof Error ? e : new Error(String(e?.message ?? 'Unknown')));
           } else {
-            this.logger.warn(`[CRM_WA_INIT] Late rejection after first event — waiting for disconnect events`);
+            this.logger.warn('[CRM_WA_INIT] Late rejection after first event — waiting for disconnect events');
           }
         });
     });
 
+    if (this._terminating) {
+      this.logger.log('[WA_CLEANUP] CRM init aborted due to teardown');
+      return;
+    }
     this.logger.log('[CRM_WA_INIT] Init lock released — client live, awaiting scan or ready');
+  }
+
+  // Attach Puppeteer browser/page diagnostic event listeners.
+  // Called after loading_screen fires (guarantees pupBrowser/pupPage are populated).
+  private _attachBrowserDiagnostics(): void {
+    const browser = this.client?.pupBrowser;
+    const page    = this.client?.pupPage;
+    if (!browser || !page) return;
+
+    this.logger.log(`[CRM_BOOT] browser_connected isConnected=${browser.isConnected()}`);
+    this.logger.log(`[CRM_BOOT] pup_page_created isClosed=${page.isClosed()}`);
+    browser.version().then((v: string) => this.logger.log(`[CRM_BOOT] browser_version=${v}`)).catch(() => {});
+
+    browser.once('disconnected', () => {
+      if (this._terminating) return;
+      this.logger.error('[CRM_CHROME] pupBrowser disconnected unexpectedly');
+      this._ready = false;
+      this._waState = 'disconnected';
+      this._stopHeartbeat();
+      this.updateSession({ status: 'DISCONNECTED', disconnected_at: new Date() }).catch(() => {});
+      if (!this._manualDisconnect) {
+        this.eventEmitter.emit('crm.whatsapp.down', { reason: 'browser_disconnected' });
+      }
+      // Null client so connect() can be called again
+      const c = this.client;
+      this.client = null;
+      try { c?.removeAllListeners(); } catch {}
+      c?.destroy().catch(() => {});
+    });
+
+    page.once('error',     (err: Error) => { this.logger.error(`[CRM_CHROME] page error: ${err?.message}`); });
+    page.once('pageerror', (err: Error) => { this.logger.error(`[CRM_CHROME] page pageerror: ${err?.message}`); });
+    page.once('close',     ()           => { this.logger.warn('[CRM_CHROME] page closed'); });
+    page.on('crash',       ()           => { this.logger.error('[CRM_CHROME] page crashed'); });
   }
 
   // ── Public control API ────────────────────────────────────────────────────────
 
-  /** Trigger a connect. No-op if already initializing or connected. */
+  /** Trigger a connect. Always wipes stale auth first (QR-first mode). */
   async connect(): Promise<void> {
     if (this._initializing) {
       this.logger.warn('[WA_CONNECT] Already initializing — skipped');
@@ -259,19 +435,26 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       this.logger.warn('[WA_CONNECT] Already connected — skipped');
       return;
     }
-    this.logger.log('[WA_CONNECT] User triggered connect');
+    this.logger.log('[WA_CONNECT] User triggered connect — clearing stale auth for fresh QR');
+    // QR-first: wipe any existing LocalAuth so we always start with a clean QR scan.
+    await this.clearAuthFiles().catch((e: any) =>
+      this.logger.warn(`[WA_CONNECT] clearAuthFiles failed (non-fatal): ${e?.message}`),
+    );
     await this.initClient();
   }
 
   /** Destroy client and clear auth. Manual reconnect required after this. */
   async disconnect(): Promise<void> {
     this.logger.log('[WA_DISCONNECT] User triggered disconnect');
+    this._terminating      = true;
+    this._stopHeartbeat();
     this._ready            = false;
     this._manualDisconnect = true;
     if (this.client) {
       try { this.client.removeAllListeners(); } catch { /* ignore */ }
       try { await this.client.logout(); } catch { /* already gone */ }
       try { await this.client.destroy(); } catch { /* ignore */ }
+      await new Promise<void>((r) => setTimeout(r, 5_000));
     }
     this.client            = null;
     this._ready            = false;
@@ -280,24 +463,27 @@ export class CrmWhatsAppService implements OnModuleDestroy {
     this._waState          = 'idle';
     this._qrDataUrl        = null;
     this._qrGeneratedAt    = null;
-    await this.clearAuthFiles();
+    try { await this.clearAuthFiles(); } catch (e: any) {
+      this.logger.warn(`[WA_DISCONNECT] clearAuthFiles failed (non-fatal): ${e?.message}`);
+    }
     await this.updateSession({ status: 'DISCONNECTED', phone_number: null, connected_at: null });
+    this._terminating = false;
+    this._destroying  = false;
     this.logger.log('[WA_DISCONNECT] Done — client destroyed, auth cleared');
   }
 
-  /** Full session wipe: destroy + delete auth + fresh start (shows new QR). */
+  /** Full session wipe: destroy + delete auth. Manual reconnect required after. */
   async reset(): Promise<void> {
-    if (this._initializing) {
-      this.logger.warn('[WA_RESET] Already initializing — skipped');
-      return;
-    }
-    this.logger.log('[WA_RESET] User triggered full session reset');
+    this.logger.log('[CRM_RESET] Starting reset');
+    this._terminating      = true;
+    this._stopHeartbeat();
     this._ready            = false;
     this._manualDisconnect = true;
     if (this.client) {
       try { this.client.removeAllListeners(); } catch { /* ignore */ }
       try { await this.client.logout(); } catch { /* already gone */ }
       try { await this.client.destroy(); } catch { /* ignore */ }
+      await new Promise<void>((r) => setTimeout(r, 5_000));
     }
     this.client            = null;
     this._ready            = false;
@@ -306,13 +492,14 @@ export class CrmWhatsAppService implements OnModuleDestroy {
     this._waState          = 'idle';
     this._qrDataUrl        = null;
     this._qrGeneratedAt    = null;
+
+    // Throws if deletion fails — let caller handle
     await this.clearAuthFiles();
+
     await this.updateSession({ status: 'DISCONNECTED', phone_number: null, connected_at: null });
-    this.logger.log('[WA_RESET] Done — auth cleared, starting fresh client');
-    await new Promise<void>((r) => setTimeout(r, 2_000));
-    setImmediate(() => this.initClient().catch((e) =>
-      this.logger.error('[WA_RESET] Post-reset init failed', e?.message),
-    ));
+    this._terminating = false;
+    this._destroying  = false;
+    this.logger.log('[CRM_RESET] true reset complete — phone must re-scan QR');
   }
 
   // ── Status / QR getters ───────────────────────────────────────────────────────
@@ -324,9 +511,9 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       .catch(() => null);
     const qrReady = this._waState === 'qr_ready';
     return {
-      status:      row?.status      ?? 'DISCONNECTED',
-      phone:       row?.phone_number ?? null,
-      waState:     this._waState,
+      status:       row?.status      ?? 'DISCONNECTED',
+      phone:        row?.phone_number ?? null,
+      waState:      this._waState,
       initializing: this._initializing,
       qr: {
         active:      qrReady,
@@ -440,34 +627,39 @@ export class CrmWhatsAppService implements OnModuleDestroy {
     }
   }
 
-  private async clearAuthFiles(): Promise<void> {
-    const dir = this.getSessionDir();
-    if (fs.existsSync(dir)) {
-      await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
-      this.logger.log('[CRM_WA] Auth directory removed');
+  private _startHeartbeat(): void {
+    if (this._heartbeatTimer) return;
+    this._heartbeatTimer = setInterval(async () => {
+      if (this._terminating || !this.client || !this._ready) {
+        this._stopHeartbeat();
+        return;
+      }
+      try {
+        const waStateStr: string | undefined = await this.client.getState?.();
+        this.logger.log(`[CRM_HEARTBEAT] waState=${waStateStr ?? 'unknown'}`);
+      } catch { /* transient */ }
+    }, 60_000);
+  }
+
+  private _stopHeartbeat(): void {
+    if (this._heartbeatTimer) {
+      clearInterval(this._heartbeatTimer);
+      this._heartbeatTimer = null;
     }
   }
 
-  private findChrome(): string | undefined {
-    const CANDIDATES = [
-      process.env.CHROME_PATH,
-      process.env.PUPPETEER_EXECUTABLE_PATH,
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/google-chrome',
-      '/usr/bin/chromium-browser',
-      '/usr/bin/chromium',
-      '/snap/bin/chromium',
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    ];
-    for (const p of CANDIDATES) {
-      if (p && fs.existsSync(p)) return p;
+  private async clearAuthFiles(): Promise<void> {
+    const dir = this.getSessionDir();
+    if (!fs.existsSync(dir)) {
+      this.logger.log('[CRM_RESET] LocalAuth dir not found — nothing to delete');
+      return;
     }
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const ep: string = require('puppeteer').executablePath();
-      if (ep && fs.existsSync(ep)) return ep;
-    } catch { /* no bundled puppeteer */ }
-    return undefined;
+    await fs.promises.rm(dir, { recursive: true, force: true });
+    if (fs.existsSync(dir)) {
+      this.logger.error('[CRM_RESET] LocalAuth delete failed — session still exists');
+      throw new Error(`LocalAuth delete failed — session still exists at ${dir}`);
+    }
+    this.logger.log('[CRM_RESET] LocalAuth deleted successfully');
   }
 
   private normalizeChatId(chatId: string): string {
@@ -584,9 +776,10 @@ export class CrmWhatsAppService implements OnModuleDestroy {
     });
   }
 
+  private _recoveringMissed = false;
   private async recoverMissedMessages(): Promise<void> {
-    if (this._recovering || !this.isConnected()) return;
-    this._recovering = true;
+    if (this._recoveringMissed || !this.isConnected()) return;
+    this._recoveringMissed = true;
     try {
       this.logger.log('[CRM_WA_RECOVERY] Scanning for missed messages');
       const cutoff = Date.now() - 30 * 60 * 1000;
@@ -605,7 +798,7 @@ export class CrmWhatsAppService implements OnModuleDestroy {
       }
       this.logger.log('[CRM_WA_RECOVERY] Done');
     } catch { /* non-fatal */ } finally {
-      this._recovering = false;
+      this._recoveringMissed = false;
     }
   }
 

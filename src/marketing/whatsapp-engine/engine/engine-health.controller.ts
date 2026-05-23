@@ -1,8 +1,10 @@
-import { Controller, Get, Post, Body, Query } from '@nestjs/common';
+import { Controller, Get, Post, Body, Query, Param } from '@nestjs/common';
 import { EngineHealthService } from './engine-health.service';
 import { StabilityReportService } from './stability-report.service';
 import { ScaleReadinessService } from './scale-readiness.service';
 import { EngineAuditService, AuditEvent } from './engine-audit.service';
+import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
+import { ValidateService } from '../validate/validate.service';
 
 @Controller('marketing/whatsapp-engine')
 export class EngineHealthController {
@@ -11,7 +13,34 @@ export class EngineHealthController {
     private readonly stabilityService: StabilityReportService,
     private readonly scaleService: ScaleReadinessService,
     private readonly auditService: EngineAuditService,
+    private readonly marketingWa: MarketingWhatsAppService,
+    private readonly validateService: ValidateService,
   ) {}
+
+  // Audience pipeline diagnostics: exact DB rows, per-contact filter verdict, queue/number/template status
+  @Get('debug/test-audience')
+  getTestAudienceDiagnostics() {
+    return this.validateService.getTestAudienceDiagnostics();
+  }
+
+  /**
+   * Deep runtime diagnostics for a single number.
+   * Reads ONLY live in-memory state — never trusts DB.
+   * Use this to determine whether the browser/page/session are truly alive
+   * before deciding to rescan QR.
+   *
+   * Decision matrix:
+   *   CASE A — browserConnected=true, pageClosed=false, currentUrl contains whatsapp
+   *     → session is alive → DO NOT rescan QR → fix state reconciliation only
+   *   CASE B — browserConnected=false, clientExists=false, pageClosed=true
+   *     → session is truly dead → THEN rescan QR
+   *   CASE C — browserExists=true but waState=idle
+   *     → memory transition bug → check flags.terminating / flags.destroyed
+   */
+  @Get('debug/:id')
+  getDebugSnapshot(@Param('id') id: string) {
+    return this.marketingWa.getDebugSnapshot(id);
+  }
 
   // Real-time health snapshot
   @Get('health')

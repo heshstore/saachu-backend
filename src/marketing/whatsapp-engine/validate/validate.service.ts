@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, LessThan } from 'typeorm';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
@@ -42,6 +42,7 @@ export interface ValidationReport {
     dry_run_mode: boolean;
     test_only_mode: boolean;
     pilot_mode: boolean;
+    test_bypass_send_window: boolean;
   };
   server: {
     timezone: string;
@@ -56,6 +57,11 @@ export interface ValidationReport {
     count: number;
     phones: string[];
   };
+  catalog: {
+    active_templates: number;
+    active_campaigns: number;
+    pending_queue_items: number;
+  };
   queue: QueuePatternReport;
   delivery_flow: DeliveryFlowReport;
   recent_audit_events: { event: string; reason: string | null; created_at: string }[];
@@ -68,6 +74,8 @@ const STUCK_PROCESSING_MS = 5 * 60 * 1000; // 5 minutes
 
 @Injectable()
 export class ValidateService {
+  private readonly logger = new Logger(ValidateService.name);
+
   constructor(
     @InjectRepository(WhatsappMessageQueue)
     private readonly queueRepo: Repository<WhatsappMessageQueue>,
@@ -84,16 +92,34 @@ export class ValidateService {
   ) {}
 
   async getValidationReport(): Promise<ValidationReport> {
-    const [queuePattern, deliveryFlow, testContacts, recentAuditEvents] = await Promise.all([
+    const [queuePattern, deliveryFlow, testContacts, recentAuditEvents, catalogRows] = await Promise.all([
       this._analyzeQueuePatterns(),
       this._getDeliveryFlow(),
       this.audienceRepo.find({ where: { is_test_contact: true }, select: ['phone'] }),
       this._getRecentAuditEvents(),
+      this.ds.query(`
+        SELECT
+          (SELECT COUNT(*)::int FROM marketing_templates  WHERE is_active = true)                                     AS active_templates,
+          (SELECT COUNT(*)::int FROM marketing_campaigns  WHERE status NOT IN ('cancelled','completed'))              AS active_campaigns,
+          (SELECT COUNT(*)::int FROM whatsapp_message_queue WHERE status = 'pending')                                 AS pending_queue_items
+      `),
     ]);
 
+    // Log every test contact's raw DB values so mismatches are visible in server logs
+    if (testContacts.length > 0) {
+      const fullRows = await this.audienceRepo.find({ where: { is_test_contact: true } });
+      for (const r of fullRows) {
+        this.logger.log(
+          `[MKT_AUDIENCE_FETCH] validate_report test_contact ` +
+          `id=${r.id} phone=${JSON.stringify(r.phone)} ` +
+          `is_whatsapp_valid=${r.is_whatsapp_valid} quality_score=${r.quality_score} ` +
+          `opt_out=${r.opt_out} cooldown_until=${r.cooldown_until?.toISOString() ?? 'NULL'}`,
+        );
+      }
+    }
+
     const now = new Date();
-    const totalMinutes = now.getHours() * 60 + now.getMinutes();
-    const sendWindowActive = totalMinutes >= WINDOW_START && totalMinutes <= WINDOW_END;
+    const sendWindowActive = this.timingAi.isWithinSendWindow();
     const nextWindow = this.timingAi.getNextWindowStart();
 
     const anomalies: string[] = [];
@@ -119,6 +145,10 @@ export class ValidateService {
     if (testContacts.length === 0 && process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true') {
       anomalies.push('TEST_ONLY mode is active but no test contacts are configured');
     }
+    const catalogData = catalogRows?.[0] ?? { active_templates: 0, active_campaigns: 0, pending_queue_items: 0 };
+    if (catalogData.active_templates === 0) {
+      anomalies.push('No active templates — queue cannot build. Restart backend to auto-create the default test template.');
+    }
     if (queuePattern.total_pending === 0 && process.env.WHATSAPP_ENGINE_ENABLED === 'true') {
       anomalies.push('Queue is empty — daily queue may not have been built yet');
     }
@@ -132,6 +162,7 @@ export class ValidateService {
         dry_run_mode: process.env.WHATSAPP_ENGINE_DRY_RUN === 'true',
         test_only_mode: process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true',
         pilot_mode: process.env.WHATSAPP_ENGINE_PILOT_MODE === 'true',
+        test_bypass_send_window: process.env.MARKETING_TEST_BYPASS_SEND_WINDOW === 'true',
       },
       server: {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -146,10 +177,129 @@ export class ValidateService {
         count: testContacts.length,
         phones: testContacts.map((t) => t.phone),
       },
+      catalog: {
+        active_templates: Number(catalogData.active_templates),
+        active_campaigns: Number(catalogData.active_campaigns),
+        pending_queue_items: Number(catalogData.pending_queue_items),
+      },
       queue: queuePattern,
       delivery_flow: deliveryFlow,
       recent_audit_events: recentAuditEvents,
       anomalies,
+    };
+  }
+
+  async getTestAudienceDiagnostics(): Promise<Record<string, unknown>> {
+    const now = new Date();
+
+    // 1. Raw test contacts — every column
+    const rawRows: any[] = await this.ds.query(`
+      SELECT id, phone, name, is_test_contact, is_whatsapp_valid,
+             quality_score::float AS quality_score,
+             opt_out, cooldown_until, last_contacted_at, fatigue_score::float AS fatigue_score,
+             source, created_at, updated_at
+      FROM marketing_audience
+      WHERE is_test_contact = true
+      ORDER BY created_at DESC
+    `);
+
+    // 2. Per-contact filter verdict — reveal exactly which condition fails
+    const filterResults = rawRows.map((c: any) => {
+      const cooldownActive = c.cooldown_until && new Date(c.cooldown_until) > now;
+      const failReasons: string[] = [];
+      if (c.opt_out === true || c.opt_out === 'true') failReasons.push('opt_out=true');
+      if (c.is_whatsapp_valid === false || c.is_whatsapp_valid === 'false')
+        failReasons.push('is_whatsapp_valid=false');
+      if (Number(c.quality_score) < 30)
+        failReasons.push(`quality_score=${c.quality_score} < 30`);
+      if (cooldownActive)
+        failReasons.push(`cooldown_until=${c.cooldown_until} (still active)`);
+      // Reveal invisible characters or encoding surprises in the phone string
+      const phoneHex = Buffer.from(String(c.phone)).toString('hex');
+      return {
+        phone: c.phone,
+        phone_hex: phoneHex,
+        phone_length: String(c.phone).length,
+        is_whatsapp_valid: c.is_whatsapp_valid,
+        quality_score: c.quality_score,
+        opt_out: c.opt_out,
+        cooldown_until: c.cooldown_until,
+        passes: failReasons.length === 0,
+        fail_reasons: failReasons,
+      };
+    });
+
+    // 3. What filterByQuality(30) actually returns right now
+    const filteredRows: any[] = await this.ds.query(`
+      SELECT phone, quality_score::float, is_whatsapp_valid, opt_out, cooldown_until
+      FROM marketing_audience
+      WHERE opt_out = false
+        AND is_whatsapp_valid = true
+        AND quality_score >= 30
+        AND (cooldown_until IS NULL OR cooldown_until <= $1)
+      ORDER BY quality_score DESC
+    `, [now]);
+
+    // 4. Numbers eligibility
+    const numbersRows: any[] = await this.ds.query(`
+      SELECT id, phone, status, is_active, daily_sent, daily_limit, warmup_level
+      FROM whatsapp_numbers
+      ORDER BY created_at DESC
+    `);
+    const safeNumbers = numbersRows.filter(
+      (n: any) => n.is_active && n.status === 'ACTIVE' && Number(n.daily_sent) < Number(n.daily_limit),
+    );
+
+    // 5. Templates eligibility
+    const templatesRows: any[] = await this.ds.query(`
+      SELECT id, name, is_active FROM marketing_templates ORDER BY created_at DESC
+    `);
+    const activeTemplates = templatesRows.filter((t: any) => t.is_active);
+
+    // 6. Current pending queue
+    const pendingRows: any[] = await this.ds.query(`
+      SELECT id, customer_phone, scheduled_at, status, priority, created_at
+      FROM whatsapp_message_queue
+      WHERE status = 'pending'
+      ORDER BY scheduled_at ASC
+      LIMIT 20
+    `);
+
+    return {
+      timestamp: now.toISOString(),
+      raw_test_contacts: rawRows,
+      filter_results: filterResults,
+      filtered_passed_count: filteredRows.length,
+      filtered_passed: filteredRows,
+      numbers: {
+        total: numbersRows.length,
+        safe: safeNumbers.length,
+        detail: numbersRows.map((n: any) => ({
+          phone: n.phone,
+          status: n.status,
+          is_active: n.is_active,
+          daily_sent: n.daily_sent,
+          daily_limit: n.daily_limit,
+          is_safe: safeNumbers.some((s: any) => s.id === n.id),
+        })),
+      },
+      templates: {
+        total: templatesRows.length,
+        active: activeTemplates.length,
+        names: activeTemplates.map((t: any) => t.name),
+      },
+      pending_queue: {
+        count: pendingRows.length,
+        items: pendingRows,
+      },
+      verdict:
+        filteredRows.length === 0
+          ? 'BLOCKED: no contacts pass filterByQuality(30) — see filter_results for exact reasons'
+          : safeNumbers.length === 0
+          ? 'BLOCKED: audience passes filter but no safe numbers available'
+          : activeTemplates.length === 0
+          ? 'BLOCKED: audience + numbers OK but no active templates'
+          : 'OK: all gates pass — queue should build',
     };
   }
 
@@ -172,8 +322,13 @@ export class ValidateService {
           is_whatsapp_valid: true,
           quality_score: 50,
           source: 'TEST',
+          opt_out: false,
+          cooldown_until: null,
         } as any)
-        .orUpdate(['name', 'is_test_contact'], ['phone'])
+        .orUpdate(
+          ['name', 'is_test_contact', 'is_whatsapp_valid', 'quality_score', 'opt_out', 'source', 'cooldown_until'],
+          ['phone'],
+        )
         .execute();
     }
     return { seeded: contacts.length };

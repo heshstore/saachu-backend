@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { WhatsappMessageLog } from '../entities/whatsapp-message-log.entity';
@@ -10,6 +10,8 @@ type StatusRow = { status: string; count: string };
 
 @Injectable()
 export class AnalyticsService {
+  private readonly logger = new Logger(AnalyticsService.name);
+
   constructor(
     @InjectRepository(WhatsappMessageLog)
     private repo: Repository<WhatsappMessageLog>,
@@ -22,14 +24,34 @@ export class AnalyticsService {
   ) {}
 
   async getCampaignStats(campaignId: string): Promise<Record<string, number>> {
-    const rows = await this.repo
-      .createQueryBuilder('l')
-      .select('l.status', 'status')
-      .addSelect('COUNT(*)', 'count')
-      .where('l.campaign_id = :campaignId', { campaignId })
-      .groupBy('l.status')
-      .getRawMany<StatusRow>();
-    return this._buildStats(rows);
+    // Three-tier resolution for historical data where campaign_id was not persisted on queue rows:
+    // 1. Log row has campaign_id directly
+    // 2. Log row's queue_id points to a queue item with campaign_id set
+    // 3. Log row's queue_id points to a queue item whose template_id matches the campaign's template_id
+    const rows = await this.ds.query<StatusRow[]>(`
+      SELECT l.status, COUNT(*)::text AS count
+      FROM whatsapp_message_logs l
+      WHERE l.campaign_id = $1
+         OR l.queue_id IN (
+           SELECT q.id
+           FROM whatsapp_message_queue q
+           WHERE q.campaign_id = $1
+              OR q.template_id IN (
+                SELECT c.template_id
+                FROM marketing_campaigns c
+                WHERE c.id = $1 AND c.template_id IS NOT NULL
+              )
+         )
+      GROUP BY l.status
+    `, [campaignId]);
+
+    const stats = this._buildStats(rows);
+    this.logger.log(
+      `[MKT_CAMPAIGN_STATS_QUERY] campaign_id=${campaignId} ` +
+      `sent=${stats.sent} read=${stats.read} delivered=${stats.delivered} ` +
+      `failed=${stats.failed} skipped=${stats.skipped ?? 0} total=${stats.total}`,
+    );
+    return stats;
   }
 
   async getDashboardStats(): Promise<Record<string, number>> {
@@ -306,7 +328,7 @@ export class AnalyticsService {
   }
 
   private _buildStats(rows: StatusRow[]): Record<string, number> {
-    const stats: Record<string, number> = { sent: 0, delivered: 0, read: 0, replied: 0, failed: 0, total: 0 };
+    const stats: Record<string, number> = { sent: 0, delivered: 0, read: 0, replied: 0, failed: 0, skipped: 0, total: 0 };
     for (const r of rows) {
       const n = parseInt(r.count, 10);
       stats[r.status] = (stats[r.status] ?? 0) + n;

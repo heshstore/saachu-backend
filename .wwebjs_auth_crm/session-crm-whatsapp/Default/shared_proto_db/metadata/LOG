@@ -1,3 +1,2 @@
-2026/05/21-16:57:23.920 12009e Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/shared_proto_db/metadata/MANIFEST-000001
-2026/05/21-16:57:23.921 12009e Recovering log #3
-2026/05/21-16:57:23.922 12009e Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/shared_proto_db/metadata/000003.log 
+2026/05/23-16:11:14.385 390af9 Creating DB /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/shared_proto_db/metadata since it was missing.
+2026/05/23-16:11:14.398 390af9 Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/shared_proto_db/metadata/MANIFEST-000001

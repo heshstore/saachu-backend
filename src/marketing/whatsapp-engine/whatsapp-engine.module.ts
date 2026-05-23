@@ -110,4 +110,7 @@ import { SchemaValidatorService } from './engine/schema-validator.service';
     EngineAuditService,
   ],
 })
-export class WhatsappEngineModule {}
+export class WhatsappEngineModule {
+  // Forces NestJS to eagerly instantiate MarketingWhatsAppService so OnModuleInit always fires.
+  constructor(private readonly _mktWa: MarketingWhatsAppService) {}
+}

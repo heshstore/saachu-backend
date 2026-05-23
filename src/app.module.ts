@@ -85,7 +85,7 @@ new Logger('AppModule').log(
       // Neon serverless pooler can be briefly unreachable during cold-start.
       // Retry up to 20 times with 5s delay (100s total window) before giving up.
       retryAttempts:   20,
-      retryDelay:      5_000,
+      retryDelay:      3_000,
       verboseRetryLog: false,    // suppress per-retry stack traces from NestJS
       extra: {
         max:                          Number(process.env.DB_POOL_MAX) || 10,

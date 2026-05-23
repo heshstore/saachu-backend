@@ -1,3 +1,2 @@
-2026/05/21-16:57:23.245 12007b Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/Session Storage/MANIFEST-000001
-2026/05/21-16:57:23.245 12007b Recovering log #3
-2026/05/21-16:57:23.245 12007b Reusing old log /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/Session Storage/000003.log 
+2026/05/23-16:11:13.734 390b3f Creating DB /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/Session Storage since it was missing.
+2026/05/23-16:11:13.759 390b3f Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/Session Storage/MANIFEST-000001

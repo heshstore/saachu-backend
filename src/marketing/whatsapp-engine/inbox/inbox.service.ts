@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { WhatsappReply } from '../entities/whatsapp-reply.entity';
@@ -7,6 +7,8 @@ import { ReplyStatus } from '../entities/enums';
 
 @Injectable()
 export class InboxService {
+  private readonly logger = new Logger(InboxService.name);
+
   constructor(
     @InjectRepository(WhatsappReply)
     private repo: Repository<WhatsappReply>,
@@ -36,6 +38,23 @@ export class InboxService {
 
   // Called internally when an inbound WA message arrives from a marketing-linked number
   async saveReply(dto: Partial<WhatsappReply>): Promise<WhatsappReply> {
+    // Hard gate — final guardrail before DB write.
+    // Requires: starts with '+', 10–15 digits, valid E.164 pattern.
+    const phone = dto.customer_phone ?? '';
+    const digits = phone.replace(/\D/g, '');
+    const isValidE164 = phone.startsWith('+') &&
+      digits.length >= 10 &&
+      digits.length <= 15 &&
+      /^\+[1-9]\d{9,14}$/.test(phone);
+
+    if (!isValidE164) {
+      this.logger.warn(
+        `[MKT_REPLY_SAVE_BLOCKED] phone="${phone}" digits=${digits.length} — ` +
+        `failed E.164 validation; row not inserted`,
+      );
+      throw new Error(`[MKT_REPLY_SAVE_BLOCKED] Invalid phone: "${phone}"`);
+    }
+
     const saved = await this.repo.save(this.repo.create(dto));
     if (dto.customer_phone) {
       await this.audienceRepo.update(

@@ -35,6 +35,22 @@ export class ReplyIntelligenceService {
   }): Promise<void> {
     const { phone, body, chatId, name } = payload;
 
+    // Hard gate — last-resort firewall before any DB write, websocket, or lead creation.
+    // Rejects: empty, @-containing strings, <10 digits, >15 digits, or non-E164 patterns.
+    const phoneDigits = (phone ?? '').replace(/\D/g, '');
+    const phoneIsValid = !!phone &&
+      phoneDigits.length >= 10 &&
+      phoneDigits.length <= 15 &&
+      /^\+?[1-9]\d{9,14}$/.test(phone);
+
+    if (!phoneIsValid) {
+      this.logger.warn(
+        `[MKT_INBOX_BLOCK_INVALID_PHONE] raw=${payload.chatId ?? 'n/a'} resolved=${phone} ` +
+        `digit_count=${phoneDigits.length} — rejected at hard gate; no row inserted`,
+      );
+      return;
+    }
+
     // 1. Save reply to marketing inbox
     try {
       await this.inboxService.saveReply({
@@ -44,6 +60,7 @@ export class ReplyIntelligenceService {
         message_type: MessageType.TEXT,
         received_at: new Date(),
       });
+      this.logger.log(`[MKT_INBOX_DB_SAVE] phone=${phone} message="${body.slice(0, 80)}"`);
     } catch (err: any) {
       this.logger.warn(`[ReplyIntelligence] Failed to save reply for ${phone}: ${err?.message}`);
     }

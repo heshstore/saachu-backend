@@ -1,6 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { WhatsAppNumberStatus, QueueStatus } from '../entities/enums';
+import { WhatsAppNumberStatus, QueueStatus, CampaignStatus, MessageType, CTAType } from '../entities/enums';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
 import { MarketingTemplate } from '../entities/marketing-template.entity';
 import { AudienceAiService } from '../ai/audience-ai.service';
@@ -8,13 +8,33 @@ import { MessageAiService } from '../ai/message-ai.service';
 import { TimingAiService } from '../ai/timing-ai.service';
 import { QueueService } from '../queue/queue.service';
 import { TemplatesService } from '../templates/templates.service';
+import { CampaignsService } from '../campaigns/campaigns.service';
 import { NumbersService } from '../numbers/numbers.service';
+import { AudienceService } from '../audience/audience.service';
 import { EngineAuditService, AuditEvent } from './engine-audit.service';
 
 @Injectable()
-export class AutonomousEngineService {
+export class AutonomousEngineService implements OnModuleInit {
   private readonly logger = new Logger(AutonomousEngineService.name);
   private _running = false;
+
+  async onModuleInit(): Promise<void> {
+    const bypass = process.env.MARKETING_TEST_BYPASS_SEND_WINDOW === 'true';
+    const testOnly = process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true';
+    const enabled = process.env.WHATSAPP_ENGINE_ENABLED !== 'false';
+    this.logger.log(`[MKT_QUEUE_GATE] onModuleInit — enabled=${enabled} testOnly=${testOnly} bypass=${bypass}`);
+
+    if (testOnly) {
+      const testPhones = await this.audienceService.getTestPhones();
+      this.logger.log(`[MKT_TEST_CONTACTS_FINAL] count=${testPhones.length} phones=${JSON.stringify(testPhones)}`);
+    }
+
+    if (!bypass || !testOnly || !enabled) return;
+    await this._ensureTestSetup();
+    this.logger.log('[MKT_QUEUE_GATE] TEST_ONLY+BYPASS: triggering immediate startup queue build');
+    const result = await this._buildQueue();
+    this.logger.log(`[MKT_QUEUE_GATE] Startup queue build complete: queued=${result.queued} numbers=${result.numbers}`);
+  }
 
   constructor(
     private readonly audienceAi: AudienceAiService,
@@ -22,7 +42,9 @@ export class AutonomousEngineService {
     private readonly timingAi: TimingAiService,
     private readonly queueService: QueueService,
     private readonly templatesService: TemplatesService,
+    private readonly campaignsService: CampaignsService,
     private readonly numbersService: NumbersService,
+    private readonly audienceService: AudienceService,
     private readonly auditService: EngineAuditService,
   ) {}
 
@@ -61,6 +83,12 @@ export class AutonomousEngineService {
   }
 
   async _buildQueue(): Promise<{ queued: number; numbers: number }> {
+    this.logger.log(
+      `[MKT_QUEUE_GATE] _buildQueue start — engine_enabled=${process.env.WHATSAPP_ENGINE_ENABLED} ` +
+      `test_only=${process.env.WHATSAPP_ENGINE_TEST_ONLY} bypass=${process.env.MARKETING_TEST_BYPASS_SEND_WINDOW} ` +
+      `maxDaily=${process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE}`,
+    );
+
     const allNumbers = await this.numbersService.findAll();
     const safeNumbers = allNumbers.filter(
       (n) =>
@@ -69,30 +97,53 @@ export class AutonomousEngineService {
         n.daily_sent < n.daily_limit,
     );
 
+    this.logger.log(`[MKT_QUEUE_GATE] numbers: total=${allNumbers.length} safe=${safeNumbers.length}`);
     if (!safeNumbers.length) {
-      this.logger.warn('[Engine] No safe numbers available for queue building');
+      this.logger.warn('[MKT_QUEUE_SKIP_REASON] No safe numbers (is_active=true, status=ACTIVE, daily_sent<daily_limit) — skipping build');
       return { queued: 0, numbers: 0 };
     }
+
+    // Dedup: skip phones already in an active (PENDING/PROCESSING) queue item
+    const activePhones = await this.queueService.findActivePhonesSet();
+    this.logger.log(`[MKT_QUEUE_GATE] active_queue_phones=${activePhones.size} phones=${JSON.stringify([...activePhones])}`);
 
     const rawAudience = await this.audienceAi.filterByQuality(30);
     // Honour daily audience cap (WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE) — critical for pilot safety
     const maxDaily = parseInt(process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE || '999999', 10);
     const audience = rawAudience.slice(0, maxDaily);
+    this.logger.log(`[MKT_QUEUE_GATE] audience: raw=${rawAudience.length} capped=${audience.length} maxDaily=${maxDaily}`);
     if (!audience.length) {
-      this.logger.warn('[Engine] No eligible audience members found');
+      this.logger.warn('[MKT_QUEUE_SKIP_REASON] No eligible audience (quality_score>=30, is_whatsapp_valid=true, opt_out=false, cooldown expired) — skipping build');
       return { queued: 0, numbers: safeNumbers.length };
     }
     if (rawAudience.length > audience.length) {
-      this.logger.log(`[Engine] Audience capped: ${audience.length}/${rawAudience.length} eligible (MAX_DAILY_AUDIENCE=${maxDaily})`);
+      this.logger.log(`[MKT_QUEUE_GATE] Audience capped: ${audience.length}/${rawAudience.length} eligible (MAX_DAILY_AUDIENCE=${maxDaily})`);
     }
 
     const allTemplates = await this.templatesService.findAll();
     const activeTemplates = allTemplates.filter((t) => t.is_active);
 
+    this.logger.log(`[MKT_QUEUE_GATE] templates: total=${allTemplates.length} active=${activeTemplates.length}`);
     if (!activeTemplates.length) {
-      this.logger.warn('[Engine] No active templates found, skipping queue build');
+      this.logger.warn('[MKT_QUEUE_SKIP_REASON] No active templates — skipping build');
       return { queued: 0, numbers: safeNumbers.length };
     }
+
+    // Build template_id → campaign_id map from RUNNING campaigns
+    const allCampaigns = await this.campaignsService.findAll();
+    const templateToCampaign = new Map<string, string>();
+    for (const c of allCampaigns) {
+      if (c.template_id && c.status === CampaignStatus.RUNNING) {
+        templateToCampaign.set(c.template_id, c.id);
+      }
+    }
+    this.logger.log(`[MKT_QUEUE_GATE] campaign_map_entries=${templateToCampaign.size}`);
+
+    this.logger.log(
+      `[MKT_QUEUE_INPUT] audience=${audience.length} templates=${activeTemplates.length} ` +
+      `safe_numbers=${safeNumbers.map(n => n.phone).join(',')} ` +
+      `audience_phones=${JSON.stringify(audience.map(a => a.phone))}`,
+    );
 
     const items: Partial<WhatsappMessageQueue>[] = [];
     const allocatedPerNumber: Record<string, number> = {};
@@ -110,14 +161,21 @@ export class AutonomousEngineService {
 
       if (allocatedPerNumber[number.id] >= number.daily_limit) continue;
 
+      // Skip phones already in an active queue slot
+      if (activePhones.has(member.phone)) {
+        this.logger.log(`[MKT_QUEUE_SKIP_DUPE] phone=${member.phone} already in active queue — skipping`);
+        continue;
+      }
+
       // Pick template, respecting category saturation
       const template = this._balancedTemplate(activeTemplates, categoryCount, audience.length, MAX_CATEGORY_SHARE);
       if (!template) continue;
 
       const scheduledAt = await this.timingAi.getOptimalSendTime(member.phone);
+      const campaignId = templateToCampaign.get(template.id) ?? null;
 
       items.push({
-        campaign_id: null,
+        campaign_id: campaignId,
         number_id: number.id,
         customer_phone: member.phone,
         customer_id: member.customer_id ?? undefined,
@@ -131,14 +189,82 @@ export class AutonomousEngineService {
           business_type: member.business_type ?? '',
         },
       });
+      this.logger.log(
+        `[MKT_QUEUE_ITEM] phone=${member.phone} template="${template.template_name}" number=${number.phone} ` +
+        `campaign_id=${campaignId ?? 'none'} scheduled_at=${scheduledAt.toISOString()}`,
+      );
 
       const cat = template.product_category ?? 'general';
       categoryCount[cat] = (categoryCount[cat] ?? 0) + 1;
       allocatedPerNumber[number.id]++;
     }
 
+    this.logger.log(`[MKT_QUEUE_FINAL] items assembled=${items.length} phones=${JSON.stringify(items.map(i => i.customer_phone))}`);
     const queued = await this.queueService.bulkEnqueue(items);
+    if (queued > 0) {
+      this.logger.log(`[MKT_QUEUE_CREATED] queued=${queued} phones=${JSON.stringify(items.map(i => i.customer_phone))}`);
+    }
+    this.logger.log(`[MKT_QUEUE_GATE] _buildQueue complete: queued=${queued} numbers=${safeNumbers.length}`);
     return { queued, numbers: safeNumbers.length };
+  }
+
+  // Idempotent: creates the default test template + campaign if none exist.
+  // Only called when TEST_ONLY+BYPASS mode is active.
+  private async _ensureTestSetup(): Promise<void> {
+    // ── Template ─────────────────────────────────────────────────────────────
+    const allTemplates = await this.templatesService.findAll();
+    const byName = allTemplates.find((t) => t.template_name === 'AI Test Campaign');
+    let template: MarketingTemplate;
+
+    if (byName) {
+      template = byName;
+      if (!byName.is_active) {
+        await this.templatesService.update(byName.id, { is_active: true });
+        this.logger.log(`[MKT_TEMPLATE_AUTO_CREATED] re-activated existing template id=${byName.id}`);
+      } else {
+        this.logger.log(`[MKT_TEMPLATE_AUTO_CREATED] skipped — template "AI Test Campaign" already exists id=${byName.id}`);
+      }
+    } else {
+      const activeAlready = allTemplates.filter((t) => t.is_active);
+      if (activeAlready.length > 0) {
+        template = activeAlready[0];
+        this.logger.log(
+          `[MKT_TEMPLATE_AUTO_CREATED] skipped — ${activeAlready.length} active template(s) exist, using "${template.template_name}" id=${template.id}`,
+        );
+      } else {
+        template = await this.templatesService.create({
+          template_name: 'AI Test Campaign',
+          message_body:
+            'Hello {{name}}, this is a live WhatsApp engine test from Saachu App. Reply YES if you received this message.',
+          product_category: 'TEST',
+          is_active: true,
+          performance_weight: 1.0,
+          message_type: MessageType.TEXT,
+          cta_type: CTAType.NONE,
+        });
+        this.logger.log(`[MKT_TEMPLATE_AUTO_CREATED] created id=${template.id} name="${template.template_name}"`);
+      }
+    }
+
+    // ── Campaign ─────────────────────────────────────────────────────────────
+    const allCampaigns = await this.campaignsService.findAll();
+    const existingCampaign = allCampaigns.find((c) => c.campaign_name === 'AI Engine Test Campaign');
+    if (existingCampaign) {
+      this.logger.log(
+        `[MKT_CAMPAIGN_AUTO_CREATED] skipped — campaign "${existingCampaign.campaign_name}" already exists (status=${existingCampaign.status})`,
+      );
+    } else {
+      const campaign = await this.campaignsService.create({
+        campaign_name: 'AI Engine Test Campaign',
+        status: CampaignStatus.RUNNING,
+        template_id: template.id,
+        daily_target: 10,
+        notes: 'Auto-created for TEST_ONLY mode — autonomous engine validation',
+      });
+      this.logger.log(
+        `[MKT_CAMPAIGN_AUTO_CREATED] created id=${campaign.id} template_id=${template.id}`,
+      );
+    }
   }
 
   // Weighted template selection with category saturation guard.

@@ -22,6 +22,15 @@ export class QueueService {
     });
   }
 
+  async findActivePhonesSet(): Promise<Set<string>> {
+    const rows = await this.repo
+      .createQueryBuilder('q')
+      .select('q.customer_phone', 'phone')
+      .where('q.status IN (:...statuses)', { statuses: [QueueStatus.PENDING, QueueStatus.PROCESSING] })
+      .getRawMany<{ phone: string }>();
+    return new Set(rows.map((r) => r.phone));
+  }
+
   findByCampaign(campaignId: string, limit = 200): Promise<WhatsappMessageQueue[]> {
     return this.repo.find({
       where: { campaign_id: campaignId },

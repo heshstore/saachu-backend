@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
+import { DbHealthService } from '../shared/db-health.service';
 
 /**
  * Computes behavioral tags for all active leads in a single batch SQL UPDATE.
@@ -17,18 +18,21 @@ export class LeadTagService {
   private readonly logger = new Logger(LeadTagService.name);
   private _running = false;
 
-  constructor(@InjectDataSource() private ds: DataSource) {}
+  constructor(
+    @InjectDataSource() private ds: DataSource,
+    private readonly dbHealth: DbHealthService,
+  ) {}
 
   @Cron('0 2 * * *') // daily at 02:00 server time — low-traffic window
   async computeTags(): Promise<void> {
-    this.logger.log('[Cron] LeadTagService: computing tags...');
+    if (!this.dbHealth.healthy) return;
     if (this._running) return;
     this._running = true;
     try {
       await this._computeTagsInner();
+      this.dbHealth.recordSuccess();
     } catch (e: any) {
-      this.logger.error('[Cron] LeadTagService: tag computation failed', e?.stack ?? e?.message);
-      // Do NOT rethrow — a single failure must never prevent the next scheduled run
+      this.dbHealth.handleError(e, 'LeadTagService.computeTags');
     } finally {
       this._running = false;
     }

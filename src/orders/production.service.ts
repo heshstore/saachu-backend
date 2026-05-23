@@ -10,6 +10,7 @@ import { Order, OrderStatus } from './entities/order.entity';
 import { User } from '../users/entities/user.entity';
 import { AuditService } from '../logs/audit.service';
 import { ProductionWhatsappService } from './production-whatsapp.service';
+import { DbHealthService } from '../shared/db-health.service';
 
 const STAGE_CAPACITY: Record<string, number> = {
   DESIGNING: 1000,
@@ -41,7 +42,8 @@ const ESCALATION_HOURS    = 24;
 
 @Injectable()
 export class ProductionService {
-  private _running = false;
+  private _decisionRunning = false;
+  private _delayRunning    = false;
 
   constructor(
     @InjectRepository(ProductionJob)
@@ -55,6 +57,7 @@ export class ProductionService {
     private readonly audit: AuditService,
     private readonly crmWa: ProductionWhatsappService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly dbHealth: DbHealthService,
   ) {}
 
   /**
@@ -383,7 +386,17 @@ export class ProductionService {
   @Cron('*/10 * * * *')
   async handleDecisionEngine(): Promise<void> {
     if (!ENABLE_DECISION_ENGINE) return;
-    await this.runDecisionEngine();
+    if (!this.dbHealth.healthy) return;
+    if (this._decisionRunning) return;
+    this._decisionRunning = true;
+    try {
+      await this.runDecisionEngine();
+      this.dbHealth.recordSuccess();
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'ProductionService.handleDecisionEngine');
+    } finally {
+      this._decisionRunning = false;
+    }
   }
 
   async getAvailableWorkers(stage: ProductionStage): Promise<number> {
@@ -599,6 +612,20 @@ export class ProductionService {
 
   @Cron('*/5 * * * *')
   async checkDelayedJobs(): Promise<void> {
+    if (!this.dbHealth.healthy) return;
+    if (this._delayRunning) return;
+    this._delayRunning = true;
+    try {
+      await this._checkDelayedJobsInner();
+      this.dbHealth.recordSuccess();
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'ProductionService.checkDelayedJobs');
+    } finally {
+      this._delayRunning = false;
+    }
+  }
+
+  private async _checkDelayedJobsInner(): Promise<void> {
     // Only load jobs that are actually overdue — previously loaded ALL active jobs.
     // Batch-fetch existing DELAY alerts in a single query so we avoid N alreadyAlerted() calls.
     const overdueJobs: Array<{

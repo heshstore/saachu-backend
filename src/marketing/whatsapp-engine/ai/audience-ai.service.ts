@@ -177,15 +177,39 @@ export class AudienceAiService {
     );
   }
 
-  filterByQuality(minScore: number): Promise<MarketingAudience[]> {
-    return this.repo
+  async filterByQuality(minScore: number): Promise<MarketingAudience[]> {
+    const now = new Date();
+
+    if (process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true') {
+      const testContacts = await this.repo.find({ where: { is_test_contact: true } });
+      this.logger.log(`[MKT_AUDIENCE_FETCH] test contacts in DB: ${testContacts.length}`);
+      for (const c of testContacts) {
+        const cooldownActive = !!(c.cooldown_until && c.cooldown_until > now);
+        const skipReasons: string[] = [];
+        if (c.opt_out) skipReasons.push('opt_out=true');
+        if (!c.is_whatsapp_valid) skipReasons.push('is_whatsapp_valid=false');
+        if (Number(c.quality_score) < minScore) skipReasons.push(`quality_score=${c.quality_score}<${minScore}`);
+        if (cooldownActive) skipReasons.push(`cooldown_until=${c.cooldown_until?.toISOString()}`);
+        this.logger.log(
+          `[MKT_AUDIENCE_FILTER] phone=${c.phone} ` +
+          `opt_out=${c.opt_out} is_whatsapp_valid=${c.is_whatsapp_valid} ` +
+          `quality_score=${c.quality_score} cooldown_until=${c.cooldown_until?.toISOString() ?? 'NULL'} ` +
+          `passes=${skipReasons.length === 0} skip_reason=${skipReasons.join(', ') || 'none'}`,
+        );
+      }
+    }
+
+    const result = await this.repo
       .createQueryBuilder('a')
       .where('a.opt_out = false')
       .andWhere('a.is_whatsapp_valid = true')
       .andWhere('a.quality_score >= :minScore', { minScore })
-      .andWhere('(a.cooldown_until IS NULL OR a.cooldown_until <= :now)', { now: new Date() })
+      .andWhere('(a.cooldown_until IS NULL OR a.cooldown_until <= :now)', { now })
       .orderBy('a.quality_score', 'DESC')
       .getMany();
+
+    this.logger.log(`[MKT_AUDIENCE_FETCH] filterByQuality(minScore=${minScore}): ${result.length} passed`);
+    return result;
   }
 
   _computeScore(member: MarketingAudience, logs?: LogStats): number {
