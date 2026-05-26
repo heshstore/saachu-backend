@@ -1,5 +1,0 @@
-2026/05/23-16:11:13.183 390b3f Creating DB /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/Local Storage/leveldb since it was missing.
-2026/05/23-16:11:13.195 390b3f Reusing MANIFEST /Users/saachi/Projects/Saachu-app/backend/.wwebjs_auth_crm/session-crm-whatsapp/Default/Local Storage/leveldb/MANIFEST-000001
-2026/05/23-17:33:52.930 390b44 Level-0 table #5: started
-2026/05/23-17:33:52.937 390b44 Level-0 table #5: 15455 bytes OK
-2026/05/23-17:33:52.939 390b44 Delete type=0 #3

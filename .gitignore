@@ -48,6 +48,8 @@ lerna-debug.log*
 
 # WhatsApp session data (large Chromium profile — never commit)
 .wwebjs_auth/
+.wwebjs_auth_crm/
+.wwebjs_auth_marketing/
 # WhatsApp Web HTML cache (fetched from WA CDN — rebuilt on each deploy if absent)
 .wwebjs_cache/
 # Puppeteer-downloaded Chrome binary — project-local cache for Render
