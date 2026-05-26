@@ -198,7 +198,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     for (const [id, state] of this.clients) {
       state.terminating = true;
       state.destroyed = true;
-      this._clearTimers(state);
+      this._clearTimers(state, true);
       shutdowns.push(this._destroyClient(id, state));
     }
     await Promise.allSettled(shutdowns);
@@ -1135,12 +1135,15 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     state.qrSubject.next(JSON.stringify({ type: 'state_change', state: next, prev, timestamp: new Date().toISOString() }));
   }
 
-  private _clearTimers(state: NumberClientState): void {
+  private _clearTimers(state: NumberClientState, stopWatchdog = false): void {
     if (state.authTimeoutId) {
       clearTimeout(state.authTimeoutId);
       state.authTimeoutId = null;
     }
-    // Watchdog continues across invalidations — stopped only on full destroy.
+    if (stopWatchdog && state.watchdogTimer) {
+      clearInterval(state.watchdogTimer);
+      state.watchdogTimer = null;
+    }
   }
 
   private async _safeEval<T>(numberId: string, state: NumberClientState, fn: () => Promise<T>, retriesLeft = 1): Promise<T> {

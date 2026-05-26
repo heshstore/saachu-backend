@@ -64,6 +64,7 @@ export class CrmWhatsAppService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleDestroy() {
+    this.logger.log('[CRM_WA_DESTROY] onModuleDestroy — teardown start');
     this._terminating = true;
     this._stopHeartbeat();
     this._ready = false;
