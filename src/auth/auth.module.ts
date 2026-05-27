@@ -14,7 +14,7 @@ import { RbacModule } from '../rbac/rbac.module';
     PassportModule,
     JwtModule.register({
       secret: appConfig.jwtSecret,
-      signOptions: { expiresIn: '8h' },
+      signOptions: { expiresIn: '30d' },
     }),
     TypeOrmModule.forFeature([User]),
     forwardRef(() => RbacModule),
