@@ -4,6 +4,14 @@ import { ManufacturingAnalyticsService } from '../manufacturing-analytics/manufa
 import { FinanceOpsService } from '../finance-ops/finance-ops.service';
 import type { FinanceDashboardSummary } from '../finance-ops/finance-ops.service';
 
+export interface TopItem {
+  sku:         string;
+  item_name:   string;
+  total_qty:   number;
+  total_value: number;
+  image:       string | null;
+}
+
 export interface DashboardSummary {
   orders: {
     total_orders:       number;
@@ -120,5 +128,26 @@ export class DashboardService {
       manufacturing_intel,
       finance_ops,
     };
+  }
+
+  async getTopItems(limit = 10): Promise<TopItem[]> {
+    const rows = await this.dataSource.query<Record<string, string>[]>(`
+      SELECT oi.sku, oi.item_name,
+             SUM(oi.qty)::int        AS total_qty,
+             SUM(oi.amount)::numeric AS total_value,
+             i.image
+      FROM   order_item oi
+      LEFT JOIN item i ON i.sku = oi.sku
+      GROUP  BY oi.sku, oi.item_name, i.image
+      ORDER  BY total_qty DESC
+      LIMIT  $1
+    `, [limit]);
+    return rows.map(r => ({
+      sku:         r.sku,
+      item_name:   r.item_name,
+      total_qty:   Number(r.total_qty   ?? 0),
+      total_value: Number(r.total_value ?? 0),
+      image:       r.image ?? null,
+    }));
   }
 }

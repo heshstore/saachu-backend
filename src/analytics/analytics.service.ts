@@ -4,6 +4,7 @@ import { DataSource, Repository } from 'typeorm';
 import { AnalyticsEvent } from './entities/analytics-event.entity';
 import { TrackEventDto } from './dto/track-event.dto';
 import { LogsService, LogAction } from '../logs/logs.service';
+import { getSyncStatus } from '../shopify/shopify.service';
 
 @Injectable()
 export class AnalyticsService {
@@ -148,9 +149,12 @@ export class AnalyticsService {
     ]);
 
     const waStatus: string = waRows[0]?.status ?? 'NO_SESSION';
+    // Prefer in-process lastSuccessfulSyncAt (accurate even for no-change syncs),
+    // fall back to DB MAX(updated_at) if server was just restarted.
     let shopifySyncMinutes: number | null = null;
-    if (syncRows[0]?.last_sync) {
-      shopifySyncMinutes = Math.round((Date.now() - new Date(syncRows[0].last_sync).getTime()) / 60_000);
+    const verifiedAt = getSyncStatus().lastSuccessfulSyncAt ?? syncRows[0]?.last_sync ?? null;
+    if (verifiedAt) {
+      shopifySyncMinutes = Math.round((Date.now() - new Date(verifiedAt).getTime()) / 60_000);
     }
 
     return {
@@ -281,8 +285,9 @@ export class AnalyticsService {
     const syncRow = syncRows[0];
 
     let shopifySyncMinutes: number | null = null;
-    if (syncRow?.last_sync) {
-      shopifySyncMinutes = Math.round((Date.now() - new Date(syncRow.last_sync).getTime()) / 60_000);
+    const verifiedAt2 = getSyncStatus().lastSuccessfulSyncAt ?? syncRow?.last_sync ?? null;
+    if (verifiedAt2) {
+      shopifySyncMinutes = Math.round((Date.now() - new Date(verifiedAt2).getTime()) / 60_000);
     }
 
     const waConnected = waRow?.status === 'AUTHENTICATED' || waRow?.status === 'CONNECTED';

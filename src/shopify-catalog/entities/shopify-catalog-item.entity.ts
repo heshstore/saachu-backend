@@ -12,9 +12,17 @@ export class ShopifyCatalogItem {
   @Column({ name: 'shopify_product_id', nullable: true })
   shopifyProductId: string;
 
-  /** Stable Shopify identifier — used as upsert key during sync */
+  /** Stable Shopify identifier — primary upsert key during sync */
   @Column({ name: 'shopify_variant_id', unique: true })
   shopifyVariantId: string;
+
+  /** Shopify inventory_item_id — needed for future inventory-level sync */
+  @Column({ name: 'shopify_inventory_item_id', nullable: true })
+  shopifyInventoryItemId: string;
+
+  /** Shopify's own updated_at for this variant — used to validate incremental sync */
+  @Column({ name: 'shopify_updated_at', type: 'timestamptz', nullable: true })
+  shopifyUpdatedAt: Date;
 
   @Column({ name: 'item_name', nullable: true })
   itemName: string;

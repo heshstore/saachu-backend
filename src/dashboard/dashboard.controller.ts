@@ -11,4 +11,10 @@ export class DashboardController {
   getSummary() {
     return this.service.getSummary();
   }
+
+  @Get('top-items')
+  @RequirePermission('order.view')
+  getTopItems() {
+    return this.service.getTopItems();
+  }
 }

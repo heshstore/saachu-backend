@@ -58,16 +58,26 @@ export class ShopifyCatalogService {
   }
 
   async getStats() {
-    const [pending, ready, ignored] = await Promise.all([
-      this.repo.createQueryBuilder('s')
-        .where("(s.hsn_code IS NULL OR s.hsn_code = '' OR s.cost_price <= 0)")
-        .andWhere('s.sync_ignored = false').getCount(),
-      this.repo.createQueryBuilder('s')
-        .where("s.hsn_code IS NOT NULL AND s.hsn_code != '' AND s.cost_price > 0")
-        .andWhere('s.sync_ignored = false').getCount(),
-      this.repo.createQueryBuilder('s').where('s.sync_ignored = true').getCount(),
-    ]);
-    return { shopifyPending: pending, shopifyReady: ready, shopifyIgnored: ignored };
+    const [row] = await this.repo.manager.query<Record<string, string>[]>(`
+      SELECT
+        COUNT(*)                  FILTER (WHERE NOT sync_ignored)                                                                                                           AS total_variants,
+        COUNT(DISTINCT item_name) FILTER (WHERE NOT sync_ignored)                                                                                                           AS total_items,
+        COUNT(*)                  FILTER (WHERE NOT sync_ignored AND hsn_code IS NOT NULL AND hsn_code <> '' AND cost_price > 0)                                            AS quot_ready_variants,
+        COUNT(DISTINCT item_name) FILTER (WHERE NOT sync_ignored AND hsn_code IS NOT NULL AND hsn_code <> '' AND cost_price > 0)                                            AS quot_ready_items,
+        COUNT(*)                  FILTER (WHERE NOT sync_ignored AND hsn_code IS NOT NULL AND hsn_code <> '' AND cost_price > 0 AND main_category_type IS NOT NULL AND main_category_type <> '') AS boq_ready_variants,
+        COUNT(DISTINCT item_name) FILTER (WHERE NOT sync_ignored AND hsn_code IS NOT NULL AND hsn_code <> '' AND cost_price > 0 AND main_category_type IS NOT NULL AND main_category_type <> '') AS boq_ready_items,
+        COUNT(*)                  FILTER (WHERE sync_ignored)                                                                                                                AS hidden_variants,
+        COUNT(*)                  FILTER (WHERE NOT sync_ignored AND wholesale_price > 0)                                                                                   AS wholesale_ready_variants,
+        COUNT(DISTINCT item_name) FILTER (WHERE NOT sync_ignored AND wholesale_price > 0)                                                                                   AS wholesale_ready_items
+      FROM shopify_catalog_items
+    `);
+    return {
+      syncTotal:      { items: Number(row.total_items ?? 0),              variants: Number(row.total_variants ?? 0) },
+      quotationReady: { items: Number(row.quot_ready_items ?? 0),         variants: Number(row.quot_ready_variants ?? 0) },
+      boqReady:       { items: Number(row.boq_ready_items ?? 0),          variants: Number(row.boq_ready_variants ?? 0) },
+      hiddenVariants: Number(row.hidden_variants ?? 0),
+      wholesaleReady: { items: Number(row.wholesale_ready_items ?? 0),    variants: Number(row.wholesale_ready_variants ?? 0) },
+    };
   }
 
   findById(id: number) {

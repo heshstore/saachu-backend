@@ -424,6 +424,24 @@ async function ensureShopifyCatalogClassificationColumns(): Promise<void> {
   }
 }
 
+async function ensureShopifyCatalogTraceabilityColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    // shopify_inventory_item_id — for future inventory-level sync (read from Shopify variant)
+    await client.query(
+      `ALTER TABLE shopify_catalog_items ADD COLUMN IF NOT EXISTS shopify_inventory_item_id VARCHAR`,
+    ).catch(() => {});
+    // shopify_updated_at — Shopify's own updated_at for the variant; used to validate incremental sync
+    await client.query(
+      `ALTER TABLE shopify_catalog_items ADD COLUMN IF NOT EXISTS shopify_updated_at TIMESTAMPTZ`,
+    ).catch(() => {});
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 async function ensureServiceItemClassificationColumns(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
   let client: Client | null = null;
@@ -1035,6 +1053,13 @@ async function bootstrap() {
     logger.log('✅ Shopify catalog classification columns ready');
   } catch (err: any) {
     logger.error('Shopify catalog classification migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureShopifyCatalogTraceabilityColumns();
+    logger.log('✅ Shopify catalog traceability columns ready (shopify_inventory_item_id, shopify_updated_at)');
+  } catch (err: any) {
+    logger.error('Shopify catalog traceability migration failed (non-fatal):', err?.message);
   }
 
   try {
