@@ -5,6 +5,7 @@ import { WhatsappMessageLog } from '../entities/whatsapp-message-log.entity';
 import { WhatsappNumber } from '../entities/whatsapp-number.entity';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
 import { QueueStatus } from '../entities/enums';
+import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 
 type StatusRow = { status: string; count: string };
 
@@ -21,6 +22,7 @@ export class AnalyticsService {
     private queueRepo: Repository<WhatsappMessageQueue>,
     @InjectDataSource()
     private ds: DataSource,
+    private readonly marketingWa: MarketingWhatsAppService,
   ) {}
 
   async getCampaignStats(campaignId: string): Promise<Record<string, number>> {
@@ -93,23 +95,33 @@ export class AnalyticsService {
     const todayMidnight = new Date();
     todayMidnight.setHours(0, 0, 0, 0);
 
-    const [
-      active_numbers,
-      queue_pending,
-      sent_today,
-      delivered_today,
-      read_today,
-      replied_today,
-    ] = await Promise.all([
-      this.numberRepo.count({ where: { is_active: true } }),
-      this.queueRepo.count({ where: { status: QueueStatus.PENDING } }),
-      this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.SENT }).andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
-      this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.DELIVERED }).andWhere('l.delivered_at >= :mid', { mid: todayMidnight }).getCount(),
-      this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.READ }).andWhere('l.read_at >= :mid', { mid: todayMidnight }).getCount(),
-      this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.REPLIED }).andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
-    ]);
+    this.logger.log(`[MKT_DASHBOARD] endpoint=engine/dashboard starting stats fetch`);
 
-    let crm_leads_today = 0;
+    let active_numbers = 0, queue_pending = 0, sent_today = 0,
+        delivered_today = 0, read_today = 0, replied_today = 0, crm_leads_today = 0;
+
+    try {
+      // Use sent_at for ALL date filters — it is always set on log rows and avoids
+      // the delivered_at / read_at columns that may be absent in older DB schemas.
+      [
+        active_numbers,
+        queue_pending,
+        sent_today,
+        delivered_today,
+        read_today,
+        replied_today,
+      ] = await Promise.all([
+        this.numberRepo.count({ where: { is_active: true } }),
+        this.queueRepo.count({ where: { status: QueueStatus.PENDING } }),
+        this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.SENT      }).andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
+        this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.DELIVERED }).andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
+        this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.READ      }).andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
+        this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.REPLIED   }).andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
+      ]);
+    } catch (err: any) {
+      this.logger.error(`[MKT_DASHBOARD] endpoint=engine/dashboard fail=stats_query reason=${err?.message}`);
+    }
+
     try {
       const rows: { count: string }[] = await this.ds.query(
         `SELECT COUNT(*) AS count FROM leads WHERE source = $1 AND context LIKE $2 AND created_at >= $3`,
@@ -117,6 +129,13 @@ export class AnalyticsService {
       );
       crm_leads_today = parseInt(rows[0]?.count ?? '0', 10);
     } catch { crm_leads_today = 0; }
+
+    this.logger.log(
+      `[MKT_DASHBOARD] endpoint=engine/dashboard success=true ` +
+      `active_numbers=${active_numbers} queue_pending=${queue_pending} sent_today=${sent_today} ` +
+      `delivered_today=${delivered_today} read_today=${read_today} replied_today=${replied_today} ` +
+      `crm_leads_today=${crm_leads_today}`,
+    );
 
     return { active_numbers, queue_pending, sent_today, delivered_today, read_today, replied_today, crm_leads_today };
   }
@@ -179,7 +198,7 @@ export class AnalyticsService {
     date: string;
     delivery_funnel: Record<string, number>;
     audience: { total: number; eligible: number; in_cooldown: number; opted_out: number };
-    number_health: { id: string; phone: string; name: string; daily_sent: number; daily_limit: number; risk_score: number; is_active: boolean }[];
+    number_health: { id: string; phone: string; name: string; daily_sent: number; daily_limit: number; risk_score: number; is_active: boolean; waState: string }[];
     top_templates: { template_name: string; replied: number; reply_rate_pct: number }[];
     crm_leads_today: number;
     risk_alerts: number;
@@ -247,6 +266,7 @@ export class AnalyticsService {
         daily_limit: n.daily_limit,
         risk_score: Number(n.risk_score),
         is_active: n.is_active,
+        waState: this.marketingWa.getNumberWaStatus(n.id).waState,
       })),
       top_templates: templatePerf
         .filter((t) => t.sent > 0)

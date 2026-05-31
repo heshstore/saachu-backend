@@ -45,8 +45,20 @@ export class MarketingCampaign {
   @Column({ type: 'uuid', nullable: true })
   template_id: string | null;
 
+  /** Links campaign to a specific catalog product — populates product fields in queue payload */
+  @Column({ type: 'int', nullable: true })
+  product_id: number | null;
+
   @Column({ type: 'text', nullable: true })
   notes: string | null;
+
+  /** True when campaign uses fixed promotion rules (window, delay, audience locked by system) */
+  @Column({ type: 'boolean', default: false })
+  is_promotion: boolean;
+
+  /** True when campaign targets only the 6 hardcoded test phones, bypassing customer DB */
+  @Column({ type: 'boolean', default: false })
+  test_mode: boolean;
 
   @Column({ type: 'int', nullable: true })
   created_by: number | null;

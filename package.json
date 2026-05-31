@@ -49,6 +49,7 @@
     "migrate:idempotency-safe": "node scripts/migrate-idempotency-safe.js",
     "migrate:orders-payments": "node scripts/migrate-orders-payments.js",
     "migrate:whatsapp-message-id": "node scripts/migrate-whatsapp-message-id.js",
+    "migrate:whatsapp-sender-tracking": "node scripts/migrate-whatsapp-sender-tracking.js",
     "migrate:crm-lead-columns": "node scripts/migrate-crm-lead-columns.js",
     "migrate:leads-idempotency-updated": "node scripts/migrate-leads-idempotency-updated.js",
     "migrate:leads-phone-unique": "node scripts/migrate-leads-phone-unique.js",
@@ -69,6 +70,10 @@
     "migrate:job-status-priority-index": "node scripts/migrate-job-status-priority-index.js",
     "migrate:crm-phase20-1-startup-cleanup": "node scripts/migrate-crm-phase20-1-startup-cleanup.js",
     "migrate:crm-phase21-lead-ref-sequences": "node scripts/migrate-crm-phase21-lead-ref-sequences.js",
+    "migrate:promotion-campaigns": "node scripts/migrate-promotion-campaigns.js",
+    "migrate:promotion-product-rotation": "node scripts/migrate-promotion-product-rotation.js",
+    "migrate:template-mode": "node scripts/migrate-template-mode.js",
+    "migrate:template-offer-fields": "node scripts/migrate-template-offer-fields.js",
     "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {

@@ -60,6 +60,17 @@ export class WhatsappMessageQueue {
   @Column({ type: 'timestamptz', nullable: true })
   sent_at: Date | null;
 
+  // Actual sender — set at send time, denormalized for historical stability.
+  // Survives number renames/deletions; differs from number_id when pool failover kicks in.
+  @Column({ type: 'uuid', nullable: true })
+  actual_sender_number_id: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  actual_sender_phone: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  actual_sender_name: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   created_at: Date;
 

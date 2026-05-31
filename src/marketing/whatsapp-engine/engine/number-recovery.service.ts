@@ -34,7 +34,19 @@ export class NumberRecoveryService {
   @Cron('0 6 * * *')
   async recoverNumbers(): Promise<void> {
     if (process.env.WHATSAPP_ENGINE_ENABLED === 'false') return;
+    if (this._running) {
+      this.logger.warn('[NumberRecovery] Previous run still in progress — skipping cron tick');
+      return;
+    }
+    this._running = true;
+    try {
+      await this._recoverNumbersInternal();
+    } finally {
+      this._running = false;
+    }
+  }
 
+  private async _recoverNumbersInternal(): Promise<void> {
     const coolingCutoff = new Date(Date.now() - MIN_COOLING_DAYS * 86_400_000);
 
     // Find numbers that are inactive and have been cooling long enough

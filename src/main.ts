@@ -896,7 +896,9 @@ async function validateSchema(): Promise<void> {
   try {
     client = await createMigrationClient();
     const required: Array<{ table: string; column: string; migration: string }> = [
-      { table: 'leads', column: 'stage', migration: 'npm run migrate:lead-stage' },
+      { table: 'leads',                column: 'stage',        migration: 'npm run migrate:lead-stage' },
+      { table: 'marketing_campaigns',  column: 'is_promotion', migration: 'npm run migrate:promotion-campaigns' },
+      { table: 'marketing_campaigns',  column: 'test_mode',    migration: 'npm run migrate:promotion-campaigns' },
     ];
 
     const missing: string[] = [];
@@ -1145,10 +1147,25 @@ async function bootstrap() {
     logger.error('Schema validation failed (non-fatal) — app will start anyway:', err?.message);
   }
 
+  // ── Shopify integration config check ─────────────────────────────────────────
+  // Logs presence only — NEVER logs actual token values.
+  // If missing: sync endpoints will return a clean error; dashboard chip shows "not configured".
+  // Fix: add SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN to ecosystem.config.js env_production,
+  //      or set them as system env vars before running pm2 start.
+  const shopifyStoreStatus = process.env.SHOPIFY_STORE        ? 'present' : 'MISSING';
+  const shopifyTokenStatus = process.env.SHOPIFY_ACCESS_TOKEN ? 'present' : 'MISSING';
+  logger.log(`[SHOPIFY_CONFIG] SHOPIFY_STORE=${shopifyStoreStatus}  SHOPIFY_ACCESS_TOKEN=${shopifyTokenStatus}`);
+  if (shopifyStoreStatus === 'MISSING' || shopifyTokenStatus === 'MISSING') {
+    logger.warn(
+      '[SHOPIFY_CONFIG] Shopify sync is UNAVAILABLE — add SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN ' +
+      'to ecosystem.config.js env_production or set them as server environment variables before starting PM2.',
+    );
+  }
+
   const isProd = (process.env.NODE_ENV ?? 'development') === 'production';
   const app = await NestFactory.create(AppModule, {
     rawBody: true,
-    logger: isProd ? ['error', 'warn'] : ['error', 'warn', 'log'],
+    logger: isProd ? ['error', 'warn', 'log'] : ['error', 'warn', 'log', 'debug', 'verbose'],
   });
   console.log('🚀 PROMOTION ROUTE READY');
 

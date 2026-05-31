@@ -4,7 +4,7 @@ import { DataSource, Repository } from 'typeorm';
 import { AnalyticsEvent } from './entities/analytics-event.entity';
 import { TrackEventDto } from './dto/track-event.dto';
 import { LogsService, LogAction } from '../logs/logs.service';
-import { getSyncStatus } from '../shopify/shopify.service';
+import { getSyncStatus, isShopifyConfigured } from '../shopify/shopify.service';
 
 @Injectable()
 export class AnalyticsService {
@@ -166,6 +166,7 @@ export class AnalyticsService {
       overdue_payments:      Number(overdueRows[0]?.count  ?? 0),
       production_pending:    Number(prodRows[0]?.count     ?? 0),
       whatsapp_status:       waStatus,
+      shopify_configured:    isShopifyConfigured(),
       shopify_sync_minutes:  shopifySyncMinutes,
       active_leads:          Number(leadRows[0]?.count     ?? 0),
     };

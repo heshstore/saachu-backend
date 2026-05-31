@@ -1,8 +1,11 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
 import { WhatsAppNumberStatus, QueueStatus, CampaignStatus, MessageType, CTAType } from '../entities/enums';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
 import { MarketingTemplate } from '../entities/marketing-template.entity';
+import { ShopifyCatalogItem } from '../../../shopify-catalog/entities/shopify-catalog-item.entity';
 import { AudienceAiService } from '../ai/audience-ai.service';
 import { MessageAiService } from '../ai/message-ai.service';
 import { TimingAiService } from '../ai/timing-ai.service';
@@ -12,6 +15,8 @@ import { CampaignsService } from '../campaigns/campaigns.service';
 import { NumbersService } from '../numbers/numbers.service';
 import { AudienceService } from '../audience/audience.service';
 import { EngineAuditService, AuditEvent } from './engine-audit.service';
+import { EngineSettingsService } from './engine-settings.service';
+import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 
 @Injectable()
 export class AutonomousEngineService implements OnModuleInit {
@@ -36,7 +41,11 @@ export class AutonomousEngineService implements OnModuleInit {
     this.logger.log(`[MKT_QUEUE_GATE] Startup queue build complete: queued=${result.queued} numbers=${result.numbers}`);
   }
 
+  private static readonly STORE_URL = 'https://www.heshstore.in';
+
   constructor(
+    @InjectRepository(ShopifyCatalogItem)
+    private readonly catalogRepo: Repository<ShopifyCatalogItem>,
     private readonly audienceAi: AudienceAiService,
     private readonly messageAi: MessageAiService,
     private readonly timingAi: TimingAiService,
@@ -46,6 +55,8 @@ export class AutonomousEngineService implements OnModuleInit {
     private readonly numbersService: NumbersService,
     private readonly audienceService: AudienceService,
     private readonly auditService: EngineAuditService,
+    private readonly engineSettings: EngineSettingsService,
+    private readonly whatsAppService: MarketingWhatsAppService,
   ) {}
 
   // Reset daily sent counters at midnight
@@ -72,6 +83,25 @@ export class AutonomousEngineService implements OnModuleInit {
       this.logger.warn('[Engine] Disabled via WHATSAPP_ENGINE_ENABLED=false — skipping queue build');
       return;
     }
+    if (this._running) {
+      this.logger.warn('[Engine] buildDailyQueue already running — skipping re-entrant call');
+      return;
+    }
+    this._running = true;
+
+    try {
+    // Require at least one RUNNING campaign OR auto AI mode ON
+    const campaigns = await this.campaignsService.findAll();
+    const hasRunning = campaigns.some((c) => c.status === CampaignStatus.RUNNING);
+    if (!hasRunning) {
+      const autoAiMode = await this.engineSettings.getAutoAiMode();
+      if (!autoAiMode) {
+        this.logger.warn('[Engine] No running campaigns and auto AI mode is OFF — skipping daily queue build');
+        return;
+      }
+      this.logger.log('[Engine] No running campaigns — auto AI mode ON, building from active AI templates');
+    }
+
     this.logger.log('[Engine] Building daily queue');
     const result = await this._buildQueue();
     this.logger.log(`[Engine] Daily queue built: ${result.queued} items across ${result.numbers} numbers`);
@@ -80,6 +110,9 @@ export class AutonomousEngineService implements OnModuleInit {
       reason: `Daily queue build: ${result.queued} items across ${result.numbers} numbers`,
       metadata: result,
     });
+    } finally {
+      this._running = false;
+    }
   }
 
   async _buildQueue(): Promise<{ queued: number; numbers: number }> {
@@ -90,16 +123,21 @@ export class AutonomousEngineService implements OnModuleInit {
     );
 
     const allNumbers = await this.numbersService.findAll();
-    const safeNumbers = allNumbers.filter(
+    const sendableNumbers = allNumbers.filter(
       (n) =>
         n.is_active &&
         n.status === WhatsAppNumberStatus.ACTIVE &&
-        n.daily_sent < n.daily_limit,
+        n.daily_sent < n.daily_limit &&
+        n.wa_state === 'ready' &&
+        this.whatsAppService.isConnected(n.id),
     );
 
-    this.logger.log(`[MKT_QUEUE_GATE] numbers: total=${allNumbers.length} safe=${safeNumbers.length}`);
-    if (!safeNumbers.length) {
-      this.logger.warn('[MKT_QUEUE_SKIP_REASON] No safe numbers (is_active=true, status=ACTIVE, daily_sent<daily_limit) — skipping build');
+    this.logger.log(
+      `[MKT_QUEUE_GATE] numbers: total=${allNumbers.length} sendable=${sendableNumbers.length} ` +
+      `ready_in_db=${allNumbers.filter(n => n.wa_state === 'ready').length}`,
+    );
+    if (!sendableNumbers.length) {
+      this.logger.warn('[MKT_QUEUE_GATE] reason=no_connected_numbers — zero sendable numbers (is_active+ready+liveAndReady); skipping build');
       return { queued: 0, numbers: 0 };
     }
 
@@ -114,7 +152,7 @@ export class AutonomousEngineService implements OnModuleInit {
     this.logger.log(`[MKT_QUEUE_GATE] audience: raw=${rawAudience.length} capped=${audience.length} maxDaily=${maxDaily}`);
     if (!audience.length) {
       this.logger.warn('[MKT_QUEUE_SKIP_REASON] No eligible audience (quality_score>=30, is_whatsapp_valid=true, opt_out=false, cooldown expired) — skipping build');
-      return { queued: 0, numbers: safeNumbers.length };
+      return { queued: 0, numbers: sendableNumbers.length };
     }
     if (rawAudience.length > audience.length) {
       this.logger.log(`[MKT_QUEUE_GATE] Audience capped: ${audience.length}/${rawAudience.length} eligible (MAX_DAILY_AUDIENCE=${maxDaily})`);
@@ -126,28 +164,57 @@ export class AutonomousEngineService implements OnModuleInit {
     this.logger.log(`[MKT_QUEUE_GATE] templates: total=${allTemplates.length} active=${activeTemplates.length}`);
     if (!activeTemplates.length) {
       this.logger.warn('[MKT_QUEUE_SKIP_REASON] No active templates — skipping build');
-      return { queued: 0, numbers: safeNumbers.length };
+      return { queued: 0, numbers: sendableNumbers.length };
     }
 
     // Build template_id → campaign_id map from RUNNING campaigns
+    // Also build campaign_id → catalog product map for product-driven campaigns
+    // Also build campaign_id → daily_target for per-campaign queue cap
     const allCampaigns = await this.campaignsService.findAll();
     const templateToCampaign = new Map<string, string>();
+    const campaignToProduct = new Map<string, ShopifyCatalogItem>();
+    const campaignDailyTargets = new Map<string, number>();
+    const runningCampaignIds: string[] = [];
+
     for (const c of allCampaigns) {
       if (c.template_id && c.status === CampaignStatus.RUNNING) {
         templateToCampaign.set(c.template_id, c.id);
       }
+      if (c.status === CampaignStatus.RUNNING) {
+        if (c.daily_target) {
+          campaignDailyTargets.set(c.id, c.daily_target);
+          runningCampaignIds.push(c.id);
+        }
+        if (c.product_id) {
+          const item = await this.catalogRepo
+            .findOne({ where: { id: c.product_id, syncIgnored: false } })
+            .catch(() => null);
+          if (item) campaignToProduct.set(c.id, item);
+        }
+      }
     }
-    this.logger.log(`[MKT_QUEUE_GATE] campaign_map_entries=${templateToCampaign.size}`);
+
+    // Load today's existing row counts per campaign — used to enforce daily_target idempotently
+    const existingTodayCounts = runningCampaignIds.length
+      ? await this.queueService.countTodayByCampaign(runningCampaignIds)
+      : new Map<string, number>();
+    // Track how many rows we add this run per campaign
+    const addedThisRunByCampaign = new Map<string, number>();
+
+    this.logger.log(
+      `[MKT_QUEUE_GATE] campaign_map_entries=${templateToCampaign.size} product_campaigns=${campaignToProduct.size} ` +
+      `campaigns_with_targets=${campaignDailyTargets.size}`,
+    );
 
     this.logger.log(
       `[MKT_QUEUE_INPUT] audience=${audience.length} templates=${activeTemplates.length} ` +
-      `safe_numbers=${safeNumbers.map(n => n.phone).join(',')} ` +
+      `sendable_numbers=${sendableNumbers.map(n => n.phone).join(',')} ` +
       `audience_phones=${JSON.stringify(audience.map(a => a.phone))}`,
     );
 
     const items: Partial<WhatsappMessageQueue>[] = [];
     const allocatedPerNumber: Record<string, number> = {};
-    for (const n of safeNumbers) {
+    for (const n of sendableNumbers) {
       allocatedPerNumber[n.id] = 0;
     }
 
@@ -157,13 +224,13 @@ export class AutonomousEngineService implements OnModuleInit {
 
     for (let i = 0; i < audience.length; i++) {
       const member = audience[i];
-      const number = safeNumbers[i % safeNumbers.length];
+      const number = sendableNumbers[i % sendableNumbers.length];
 
       if (allocatedPerNumber[number.id] >= number.daily_limit) continue;
 
-      // Skip phones already in an active queue slot
+      // Skip phones already queued today (any status — sent, skipped, failed, or pending)
       if (activePhones.has(member.phone)) {
-        this.logger.log(`[MKT_QUEUE_SKIP_DUPE] phone=${member.phone} already in active queue — skipping`);
+        this.logger.log(`[MKT_QUEUE_SKIP_DUPE] phone=${member.phone} already in today's queue — skipping`);
         continue;
       }
 
@@ -171,28 +238,61 @@ export class AutonomousEngineService implements OnModuleInit {
       const template = this._balancedTemplate(activeTemplates, categoryCount, audience.length, MAX_CATEGORY_SHARE);
       if (!template) continue;
 
-      const scheduledAt = await this.timingAi.getOptimalSendTime(member.phone);
       const campaignId = templateToCampaign.get(template.id) ?? null;
 
+      // Enforce per-campaign daily_target cap
+      if (campaignId && campaignDailyTargets.has(campaignId)) {
+        const target  = campaignDailyTargets.get(campaignId)!;
+        const existing = existingTodayCounts.get(campaignId) ?? 0;
+        const added    = addedThisRunByCampaign.get(campaignId) ?? 0;
+        if (existing + added >= target) {
+          this.logger.log(
+            `[MKT_QUEUE_SKIP_CAP] campaign_id=${campaignId} target=${target} ` +
+            `existingToday=${existing} addedThisRun=${added} — daily cap reached, skipping phone=${member.phone}`,
+          );
+          continue;
+        }
+      }
+
+      const scheduledAt = await this.timingAi.getOptimalSendTime(member.phone);
+      const catalogItem = campaignId ? campaignToProduct.get(campaignId) ?? null : null;
+
+      const productFields = catalogItem
+        ? {
+            product_name:  catalogItem.itemName ?? '',
+            product_sku:   catalogItem.sku ?? '',
+            product_image: catalogItem.image ?? '',
+            product_link:  AutonomousEngineService.STORE_URL,
+          }
+        : {};
+
       items.push({
-        campaign_id: campaignId,
-        number_id: number.id,
+        campaign_id:    campaignId,
+        number_id:      number.id,
+        product_id:     catalogItem?.id ?? undefined,
         customer_phone: member.phone,
-        customer_id: member.customer_id ?? undefined,
-        template_id: template.id,
-        scheduled_at: scheduledAt,
-        status: QueueStatus.PENDING,
-        priority: Math.round(Number(member.quality_score)),
+        customer_id:    member.customer_id ?? undefined,
+        template_id:    template.id,
+        scheduled_at:   scheduledAt,
+        status:         QueueStatus.PENDING,
+        priority:       Math.round(Number(member.quality_score)),
         message_payload: {
-          name: member.name ?? '',
-          city: member.city ?? '',
+          name:          member.name ?? '',
+          city:          member.city ?? '',
           business_type: member.business_type ?? '',
+          sender_phone:  number.phone,
+          ...productFields,
         },
       });
       this.logger.log(
         `[MKT_QUEUE_ITEM] phone=${member.phone} template="${template.template_name}" number=${number.phone} ` +
         `campaign_id=${campaignId ?? 'none'} scheduled_at=${scheduledAt.toISOString()}`,
       );
+
+      // Update per-campaign add counter
+      if (campaignId) {
+        addedThisRunByCampaign.set(campaignId, (addedThisRunByCampaign.get(campaignId) ?? 0) + 1);
+      }
 
       const cat = template.product_category ?? 'general';
       categoryCount[cat] = (categoryCount[cat] ?? 0) + 1;
@@ -204,8 +304,19 @@ export class AutonomousEngineService implements OnModuleInit {
     if (queued > 0) {
       this.logger.log(`[MKT_QUEUE_CREATED] queued=${queued} phones=${JSON.stringify(items.map(i => i.customer_phone))}`);
     }
-    this.logger.log(`[MKT_QUEUE_GATE] _buildQueue complete: queued=${queued} numbers=${safeNumbers.length}`);
-    return { queued, numbers: safeNumbers.length };
+
+    // Per-campaign summary log
+    for (const [cid, added] of addedThisRunByCampaign) {
+      const existingToday = existingTodayCounts.get(cid) ?? 0;
+      const dailyTarget   = campaignDailyTargets.get(cid) ?? 0;
+      this.logger.log(
+        `[MKT_QUEUE_BUILD] campaignId=${cid} existingToday=${existingToday} ` +
+        `dailyTarget=${dailyTarget} newRows=${added} skippedDuplicates=${existingToday}`,
+      );
+    }
+
+    this.logger.log(`[MKT_QUEUE_GATE] _buildQueue complete: queued=${queued} numbers=${sendableNumbers.length}`);
+    return { queued, numbers: sendableNumbers.length };
   }
 
   // Idempotent: creates the default test template + campaign if none exist.

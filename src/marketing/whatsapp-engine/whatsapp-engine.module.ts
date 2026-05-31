@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { MarketingWhatsAppService } from './marketing-whatsapp.service';
 
+import { ShopifyCatalogItem } from '../../shopify-catalog/entities/shopify-catalog-item.entity';
 import { WhatsappNumber } from './entities/whatsapp-number.entity';
 import { MarketingCampaign } from './entities/marketing-campaign.entity';
 import { MarketingTemplate } from './entities/marketing-template.entity';
@@ -10,6 +11,7 @@ import { MarketingAudience } from './entities/marketing-audience.entity';
 import { WhatsappMessageQueue } from './entities/whatsapp-message-queue.entity';
 import { WhatsappMessageLog } from './entities/whatsapp-message-log.entity';
 import { WhatsappReply } from './entities/whatsapp-reply.entity';
+import { PromotionProductRotation } from './entities/promotion-product-rotation.entity';
 
 import { CampaignsController } from './campaigns/campaigns.controller';
 import { TemplatesController } from './templates/templates.controller';
@@ -47,6 +49,9 @@ import { ValidateService } from './validate/validate.service';
 import { ValidateController } from './validate/validate.controller';
 import { ProcessingWatchdogService } from './engine/processing-watchdog.service';
 import { SchemaValidatorService } from './engine/schema-validator.service';
+import { PromotionProductSelectionService } from './promotion/promotion-product-selection.service';
+import { PromotionAiTemplateService } from './promotion/promotion-ai-template.service';
+import { EngineSettingsService } from './engine/engine-settings.service';
 
 @Module({
   imports: [
@@ -58,6 +63,8 @@ import { SchemaValidatorService } from './engine/schema-validator.service';
       WhatsappMessageQueue,
       WhatsappMessageLog,
       WhatsappReply,
+      ShopifyCatalogItem,
+      PromotionProductRotation,
     ]),
   ],
   controllers: [
@@ -97,6 +104,9 @@ import { SchemaValidatorService } from './engine/schema-validator.service';
     ValidateService,
     ProcessingWatchdogService,
     SchemaValidatorService,
+    PromotionProductSelectionService,
+    PromotionAiTemplateService,
+    EngineSettingsService,
   ],
   exports: [
     CampaignsService,
@@ -108,6 +118,7 @@ import { SchemaValidatorService } from './engine/schema-validator.service';
     InboxService,
     NumbersService,
     EngineAuditService,
+    EngineSettingsService,
   ],
 })
 export class WhatsappEngineModule {

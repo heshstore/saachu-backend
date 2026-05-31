@@ -13,6 +13,7 @@ const MAX_ATTEMPTS = 3;
 @Injectable()
 export class ProcessingWatchdogService {
   private readonly logger = new Logger(ProcessingWatchdogService.name);
+  private _running = false;
 
   constructor(
     @InjectRepository(WhatsappMessageQueue)
@@ -23,7 +24,19 @@ export class ProcessingWatchdogService {
   @Interval(5 * 60 * 1000)
   async recoverStuckItems(): Promise<void> {
     if (process.env.WHATSAPP_ENGINE_ENABLED === 'false') return;
+    if (this._running) {
+      this.logger.warn('[Watchdog] Previous recovery run still in progress — skipping tick');
+      return;
+    }
+    this._running = true;
+    try {
+      await this._recoverStuckItemsInternal();
+    } finally {
+      this._running = false;
+    }
+  }
 
+  private async _recoverStuckItemsInternal(): Promise<void> {
     const cutoff = new Date(Date.now() - STUCK_THRESHOLD_MS);
     const stuck = await this.queueRepo.find({
       where: { status: QueueStatus.PROCESSING, updated_at: LessThan(cutoff) },

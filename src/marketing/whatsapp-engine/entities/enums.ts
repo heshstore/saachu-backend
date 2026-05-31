@@ -53,3 +53,8 @@ export enum WarmupLevel {
   HOT = 3,
   SEASONED = 4,
 }
+
+export enum TemplateMode {
+  MANUAL = 'manual',
+  AI     = 'ai',
+}

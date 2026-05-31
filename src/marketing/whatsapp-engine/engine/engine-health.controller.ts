@@ -3,6 +3,7 @@ import { EngineHealthService } from './engine-health.service';
 import { StabilityReportService } from './stability-report.service';
 import { ScaleReadinessService } from './scale-readiness.service';
 import { EngineAuditService, AuditEvent } from './engine-audit.service';
+import { EngineSettingsService } from './engine-settings.service';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 import { ValidateService } from '../validate/validate.service';
 
@@ -13,6 +14,7 @@ export class EngineHealthController {
     private readonly stabilityService: StabilityReportService,
     private readonly scaleService: ScaleReadinessService,
     private readonly auditService: EngineAuditService,
+    private readonly engineSettings: EngineSettingsService,
     private readonly marketingWa: MarketingWhatsAppService,
     private readonly validateService: ValidateService,
   ) {}
@@ -64,6 +66,23 @@ export class EngineHealthController {
   @Post('scale-up')
   scaleUp() {
     return this.scaleService.scaleUp();
+  }
+
+  // Get current auto AI mode setting
+  @Get('auto-mode')
+  async getAutoMode() {
+    const enabled = await this.engineSettings.getAutoAiMode();
+    return { enabled };
+  }
+
+  // Toggle auto AI mode — persisted in crm_settings
+  @Post('auto-mode')
+  async setAutoMode(@Body('enabled') enabled: unknown) {
+    if (typeof enabled !== 'boolean') {
+      return { success: false, message: '"enabled" must be a boolean' };
+    }
+    await this.engineSettings.setAutoAiMode(enabled);
+    return { success: true, enabled };
   }
 
   // Safe re-enable after AUTO_PAUSE — requires investigator to supply a reason (Step 3)

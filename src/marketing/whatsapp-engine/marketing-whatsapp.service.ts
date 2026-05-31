@@ -13,22 +13,59 @@ import { EngineAutoPauseService } from './engine/engine-auto-pause.service';
 
 const WA_AUTH_DATA_PATH = '.wwebjs_auth_marketing';
 
-// Returns true only for real E.164-style mobile numbers (10–15 digits, no internal WA IDs).
-function isRealPhone(value?: string | null): boolean {
-  if (!value) return false;
-  const digits = value.replace(/\D/g, '');
-  if (digits.length < 10 || digits.length > 15) return false;
-  return /^\+?[1-9]\d{9,14}$/.test(value);
-}
+/**
+ * Strict phone resolver — extracts a canonical E.164 phone number from a WhatsApp message.
+ *
+ * ONLY @c.us JIDs are accepted as phone sources. Every other JID type (@lid, @g.us,
+ * @newsletter, status@broadcast) is rejected immediately — no contact lookup fallback.
+ *
+ * contact.number is NEVER used: for @lid contacts it returns a WhatsApp-internal 15-digit
+ * identifier (e.g. 199454170841150) that passes digit-length checks but is not a real phone.
+ *
+ * Source priority:
+ *   1. msg.from             — always @c.us for direct messages in standard mode
+ *   2. msg._data.from       — raw protocol field; reliable in some multi-device scenarios
+ *   3. contact.id._serialized — @c.us only; fallback when msg.from is @lid but contact resolves to @c.us
+ */
+function resolveCustomerPhone(
+  msg: any,
+  contact: any | null,
+): { phone: string | null; source: string; reason: string } {
+  function tryExtractCusJid(
+    raw: unknown,
+    label: string,
+  ): { phone: string; source: string; reason: string } | null {
+    if (typeof raw !== 'string' || !raw.endsWith('@c.us')) return null;
+    // Strip multi-device device suffix: "919940172777:3@c.us" → "919940172777"
+    const userSeg = raw.replace(/:\d+@c\.us$/, '').replace(/@c\.us$/, '');
+    const digits = userSeg.replace(/\D/g, '');
+    if (!digits || digits.length < 10 || digits.length > 15) return null;
+    // Must start with a non-zero digit (no country code starts with 0)
+    if (!/^[1-9]\d{9,14}$/.test(digits)) return null;
+    return { phone: `+${digits}`, source: label, reason: 'ok' };
+  }
 
-// Normalise a verified phone candidate to E.164 ('+' + digits).
-function normalizeWhatsAppSender(rawNumber: string): string {
-  const digits = rawNumber.replace(/\D/g, '');
-  return '+' + digits;
+  // P1: msg.from
+  const r1 = tryExtractCusJid(msg?.from, 'msg.from');
+  if (r1) return r1;
+
+  // P2: msg._data.from (raw WhatsApp protocol value)
+  const r2 = tryExtractCusJid(msg?._data?.from, 'msg._data.from');
+  if (r2) return r2;
+
+  // P3: contact.id._serialized — accepted only in @c.us format
+  const r3 = tryExtractCusJid(contact?.id?._serialized, 'contact.id._serialized');
+  if (r3) return r3;
+
+  const from: string = msg?.from ?? '';
+  const jidType = from.includes('@') ? from.split('@')[1] : 'unknown';
+  return { phone: null, source: from, reason: `no_cus_jid:${jidType}` };
 }
-const WATCHDOG_MS       = 60_000;
-const BOOT_TIMEOUT_MS   = 180_000;
-const AUTH_TIMEOUT_MS   = 180_000;
+const WATCHDOG_MS          = 60_000;
+const BOOT_TIMEOUT_MS      = 180_000;
+const AUTH_TIMEOUT_MS      = 180_000;
+const MAX_AUTO_RECONNECTS  = 3;
+const RECONNECT_DELAY_MS   = 5_000;
 
 const CHROME_PATH = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
@@ -37,32 +74,64 @@ const CHROMIUM_LOCK_FILES = [
 ] as const;
 
 // Strict linear state machine — no cyclic recovery transitions.
-// idle → booting → qr_ready → authenticating → ready
+// idle → initializing → awaiting_scan → authenticating → ready
 // Any failure from any state → failed → idle (via forceInvalidateSession)
 type WaState =
   | 'idle'           // Not connected — Connect button visible
-  | 'booting'        // Chromium launching
-  | 'qr_ready'       // QR displayed, awaiting scan
+  | 'initializing'   // Chromium launching (formerly: booting)
+  | 'awaiting_scan'  // QR displayed, waiting for user scan (formerly: qr_ready)
   | 'authenticating' // QR scanned, WA establishing session
   | 'ready'          // Session active — can send messages
-  | 'failed';        // Init or auth failure — auto-resets to idle
+  | 'failed'         // Init or auth failure — auto-resets to idle
+  | 'disconnecting'; // Manual disconnect or teardown in progress
+
+// Monotonic rank for forward-only lifecycle enforcement.
+// disconnecting is a teardown overlay — not a linear step — so it is absent from this map.
+const WA_STATE_ORDER: Partial<Record<WaState, number>> = {
+  idle:           0,
+  initializing:   1,
+  awaiting_scan:  2,
+  authenticating: 3,
+  ready:          4,
+  failed:         5,
+};
 
 interface NumberClientState {
   client: any;
   waState: WaState;
   starting: boolean;
+  // True after _initClient attaches .on() listeners to this client instance.
+  // Cleared by _destroyClient when state.client is nulled.
+  listenersAttached: boolean;
   manualDisconnect: boolean;
   destroyed: boolean;
   terminating: boolean;
   destroying: boolean;
   authTimeoutId: ReturnType<typeof setTimeout> | null;
+  // Separate timer from authTimeoutId — fires 60 s after authenticated if ready never fires.
+  readyWatchdogTimeoutId: ReturnType<typeof setTimeout> | null;
+  // Post-init stuck guard — fires BOOT_TIMEOUT_MS after init lock releases if waState is
+  // still 'initializing'. Stored so _clearTimers can cancel it when session advances.
+  postInitGuardId: ReturnType<typeof setTimeout> | null;
+  // Consecutive auto-reconnect attempts since last stable ready session.
+  // Resets to 0 on ready and on forceInvalidateSession. Caps at MAX_AUTO_RECONNECTS.
+  autoReconnectAttempts: number;
+  // Pending reconnect timer — cleared by _clearTimers on any teardown path.
+  reconnectTimerId: ReturnType<typeof setTimeout> | null;
+  // Epoch ms when authenticated event fired — used by ready watchdog for diagnostics.
+  authenticatedAt: number | null;
   watchdogTimer: ReturnType<typeof setInterval> | null;
   lastHeartbeat: Date | null;
   // Lives for the lifetime of the number so SSE subscribers survive invalidations.
   qrSubject: ReplaySubject<string>;
   qrDataUrl: string | null;
   qrGeneratedAt: Date | null;
+  firstQrGeneratedAt: Date | null;
   lastReadyAt: Date | null;
+  reconnectCount: number;
+  qrRefreshCount: number;
+  sessionStartedAt: Date | null;
+  lastDisconnectedAt: Date | null;
 }
 
 function makeState(): NumberClientState {
@@ -70,17 +139,28 @@ function makeState(): NumberClientState {
     client: null,
     waState: 'idle',
     starting: false,
+    listenersAttached: false,
     manualDisconnect: false,
     destroyed: false,
     terminating: false,
     destroying: false,
     authTimeoutId: null,
+    readyWatchdogTimeoutId: null,
+    postInitGuardId: null,
+    autoReconnectAttempts: 0,
+    reconnectTimerId: null,
+    authenticatedAt: null,
     watchdogTimer: null,
     lastHeartbeat: null,
     qrSubject: new ReplaySubject<string>(1),
     qrDataUrl: null,
     qrGeneratedAt: null,
+    firstQrGeneratedAt: null,
     lastReadyAt: null,
+    reconnectCount: 0,
+    qrRefreshCount: 0,
+    sessionStartedAt: null,
+    lastDisconnectedAt: null,
   };
 }
 
@@ -88,10 +168,12 @@ function makeState(): NumberClientState {
 export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(MarketingWhatsAppService.name);
   private readonly clients = new Map<string, NumberClientState>();
-  // Sequential init lock — only one Chromium launch at a time.
-  private _initQueue: Promise<void> = Promise.resolve();
+  // Per-number init locks — prevents concurrent Chromium launches for the same number.
+  private readonly _initLocks = new Map<string, Promise<void>>();
   // Idempotency guard for forceInvalidateSession.
   private readonly _invalidatingIds = new Set<string>();
+  // ACK race bridge: waMessageId → logRowId, set synchronously in sender before DB write.
+  private readonly _pendingAckMap = new Map<string, string>();
   // Log-only stability counters.
   private readonly _metrics = {
     successfulReadySessions: 0,
@@ -100,6 +182,9 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     qrToReadyAttempts:       0,
     qrToReadySuccesses:      0,
   };
+
+  // Populated in onModuleInit from DB rows — best-effort phone lookup for isolation logs.
+  private readonly _phoneCache = new Map<string, string>();
 
   constructor(
     @InjectRepository(WhatsappNumber)
@@ -116,80 +201,106 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     this.logger.log('[MKT_BOOT] onModuleInit entered');
-    console.log('[BUILD_INFO]', { file: __filename, cwd: process.cwd(), pid: process.pid, timestamp: new Date().toISOString() });
+
+    // Bulk-reset all stale non-idle wa_states before any client activity begins.
+    // Prevents the frontend from briefly seeing a stale 'ready' or 'authenticating'
+    // during boot, before the per-number scan and restore queue run.
+    try {
+      const { affected } = await this.numberRepo
+        .createQueryBuilder()
+        .update()
+        .set({ wa_state: 'idle' } as any)
+        .where('wa_state IN (:...states)', {
+          states: ['ready', 'authenticating', 'initializing', 'disconnecting'],
+        })
+        .execute();
+      this.logger.log(`[WA_BOOT_PRE_RESET] affectedRows=${affected ?? 0}`);
+    } catch (e: any) {
+      this.logger.warn(`[WA_BOOT_PRE_RESET] bulk reset failed (non-fatal): ${e?.message}`);
+    }
 
     // One-time startup: purge historical bad inbox rows (invalid phones / empty bodies)
     await this._cleanupInvalidInboxRows();
 
-    this.logger.log('[WA_RESTORE_START] Scanning active numbers for persisted LocalAuth sessions...');
+    this.logger.log('[WA_STARTUP_SCAN] Scanning numbers for startup restore');
     try {
       const rows = await this.numberRepo.find();
-      let toRestore = 0;
 
       for (const r of rows) {
-        const sessionDir = this._getSessionDir(r.id);
-        const sessionExists = fs.existsSync(sessionDir);
-        this.logger.log(`[MKT_BOOT] startup id=${r.id} phone=${r.phone} is_active=${r.is_active} wa_state=${JSON.stringify(r.wa_state)} sessionExists=${sessionExists}`);
+        // Populate phone cache for isolation logging throughout the session lifecycle.
+        this._phoneCache.set(r.id, r.phone);
+        const folderExists      = fs.existsSync(this._getSessionDir(r.id));
+        const restorableSession = this._hasRestorableSession(r.id);
+        this.logger.log(
+          `[MKT_BOOT] startup id=${r.id} phone=${r.phone} is_active=${r.is_active} ` +
+          `wa_state=${JSON.stringify(r.wa_state)} folderExists=${folderExists} restorableSession=${restorableSession}`,
+        );
+      }
 
-        if (r.is_active && sessionExists) {
-          this.logger.log(`[WA_RESTORE_SESSION_FOUND] id=${r.id} phone=${r.phone} sessionDir=${sessionDir} — queuing auto-restore`);
-          toRestore++;
-          // Fire-and-forget: don't block module init waiting for Chromium handshake
-          this._autoRestoreNumber(r.id).catch((e: any) =>
-            this.logger.error(`[WA_RESTORE_ERROR] id=${r.id} phone=${r.phone}: ${e?.message}`),
+      const restoreTargets = rows.filter(
+        (r) => r.is_active && this._hasRestorableSession(r.id),
+      );
+
+      if (restoreTargets.length === 0) {
+        this.logger.log(`[MKT_BOOT] ${rows.length} number(s) set idle — no saved sessions found`);
+      } else {
+        this.logger.log(
+          `[MKT_BOOT] ${rows.length} total; ${restoreTargets.length} will auto-restore — sequential`,
+        );
+        for (let i = 0; i < restoreTargets.length; i++) {
+          const r = restoreTargets[i];
+          this.logger.log(
+            `[WA_AUTO_RESTORE_QUEUE] position=${i + 1}/${restoreTargets.length} numberId=${r.id} phone=${r.phone}`,
           );
-        } else {
-          this.logger.log(`[WA_RESTORE_NO_SESSION] id=${r.id} phone=${r.phone} is_active=${r.is_active} sessionExists=${sessionExists} — resetting to idle`);
-          if (r.wa_state !== 'idle') {
-            await this.numberRepo.update(r.id, { wa_state: 'idle' });
+          await this._autoRestoreNumber(r.id, r.phone);
+          if (i < restoreTargets.length - 1) {
+            this.logger.log(
+              `[WA_RESTORE_QUEUE_NEXT] completed=${i + 1}/${restoreTargets.length} ` +
+              `numberId=${r.id} — no active client; advancing to next`,
+            );
           }
         }
       }
-
-      this.logger.log(`[MKT_BOOT] ${rows.length} number(s) scanned: ${toRestore} restoring in background, ${rows.length - toRestore} set idle`);
+      // Active numbers whose session failed validation → skip restore, start fresh QR flow.
+      // These were excluded from restoreTargets above; without this block they would stay
+      // stuck in whatever wa_state the DB recorded from the previous run.
+      const freshQrTargets = rows.filter(
+        (r) => r.is_active && !this._hasRestorableSession(r.id),
+      );
+      if (freshQrTargets.length) {
+        this.logger.log(
+          `[MKT_BOOT] ${freshQrTargets.length} active number(s) have invalid sessions — starting fresh QR flow`,
+        );
+        for (const r of freshQrTargets) {
+          // Ensure clean in-memory state before initializing — guards against any
+          // partial state left by a previous connect attempt this process.
+          const staleState = this.clients.get(r.id);
+          if (staleState) {
+            staleState.client = null;
+            staleState.listenersAttached = false;
+            staleState.destroyed = false;
+          }
+          // Wipe any partial/corrupt session directory before launching Chrome.
+          // blobExists=false + ldbExists=false means the profile was never authenticated
+          // or left in an unknown state. Clean slate avoids Chrome reusing broken data.
+          await this._clearAuthFiles(r.id).catch((e: any) => {
+            this.logger.warn(`[WA_FRESH_SESSION_INIT] numberId=${r.id} auth_wipe_failed="${e?.message}" — continuing anyway`);
+          });
+          this.logger.log(
+            `[WA_FRESH_SESSION_INIT] numberId=${r.id} reason=non_restorable_session auth_wiped=true starting_qr_flow=true`,
+          );
+          // connectNumber creates a fresh makeState(), sets wa_state=initializing in DB,
+          // launches Chrome, and WA (finding no valid session) generates a QR.
+          this.connectNumber(r.id).catch((e: any) => {
+            this.logger.warn(`[WA_FORCE_FRESH_SESSION_FAIL] numberId=${r.id} error="${e?.message}"`);
+          });
+        }
+      }
     } catch (e: any) {
-      this.logger.warn(`[MKT_BOOT] session restore scan failed: ${e?.message}`);
+      this.logger.warn(`[MKT_BOOT] startup scan failed: ${e?.message}`);
     }
 
     this.logger.log('[MKT_BOOT] module fully initialized');
-  }
-
-  // Auto-restore a persisted LocalAuth session on startup.
-  // Identical to connectNumber() but bypasses the "max 1 active" guard so that
-  // all numbers with sessions can be queued through the sequential init lock.
-  private async _autoRestoreNumber(numberId: string): Promise<void> {
-    let state = this.clients.get(numberId);
-    if (!state) {
-      state = makeState();
-      this.clients.set(numberId, state);
-      this._startWatchdog(numberId, state);
-    }
-    if (state.destroyed || state.terminating || state.destroying) {
-      this.logger.warn(`[WA_RESTORE_SESSION_FOUND] ${numberId} — skipped (teardown in progress)`);
-      return;
-    }
-    if (state.starting || state.client) {
-      this.logger.warn(`[WA_RESTORE_SESSION_FOUND] ${numberId} — skipped (already starting or client exists)`);
-      return;
-    }
-
-    this._metrics.qrToReadyAttempts++;
-    state.starting = true;
-    this._transitionState(numberId, state, 'booting');
-    await this._updateNumberWaState(numberId, 'booting');
-
-    this.logger.log(`[WA_CLIENT_INITIALIZE] ${numberId} — queued in init lock for startup restore`);
-    try {
-      await this._withInitLock(numberId, () => this._initClient(numberId, state!));
-    } catch (e: any) {
-      this.logger.error(`[WA_RESTORE_ERROR] ${numberId} init failed: ${e?.message}`);
-      this._metrics.failedBeforeReady++;
-      this._logMetrics();
-      state.qrSubject.next(JSON.stringify({ type: 'error', message: `Restore failed: ${e?.message}` }));
-      await this.forceInvalidateSession(numberId, 'restore_init_error');
-    } finally {
-      state.starting = false;
-    }
   }
 
   async onModuleDestroy() {
@@ -204,15 +315,91 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     await Promise.allSettled(shutdowns);
   }
 
+  private async _autoRestoreNumber(numberId: string, phone: string): Promise<void> {
+    const RESTORE_TIMEOUT_MS = 90_000;
+    this.logger.log(`[WA_AUTO_RESTORE_BEGIN] numberId=${numberId} phone=${phone} sessionExists=true`);
+
+    // connectNumber() is synchronous up to its first await — state is in clients Map before we yield.
+    this.connectNumber(numberId).catch(() => {});
+
+    const state = this.clients.get(numberId);
+    if (!state) {
+      this.logger.warn(`[WA_AUTO_RESTORE_FAILED] numberId=${numberId} phone=${phone} reason=no_state_created`);
+      return;
+    }
+
+    const result = await new Promise<'success' | 'fallback_qr' | 'failed'>((resolve) => {
+      if (state.waState === 'ready') { resolve('success'); return; }
+
+      const subRef: { current: { unsubscribe(): void } | null } = { current: null };
+
+      const timer = setTimeout(() => {
+        subRef.current?.unsubscribe();
+        resolve('failed');
+      }, RESTORE_TIMEOUT_MS);
+
+      subRef.current = state.qrSubject.subscribe((json: string) => {
+        try {
+          const msg = JSON.parse(json) as { type: string; state?: string };
+          if (msg.type === 'ready') {
+            clearTimeout(timer); subRef.current?.unsubscribe(); resolve('success');
+          } else if (msg.type === 'qr') {
+            // QR = stored session expired server-side. waState has already transitioned to
+            // awaiting_scan in the qr event handler. Client and browser are alive.
+            // Resolve immediately so we don't block the restore queue for 90s.
+            clearTimeout(timer); subRef.current?.unsubscribe(); resolve('fallback_qr');
+          } else if (
+            msg.type === 'error' ||
+            (msg.type === 'state_change' && (msg.state === 'idle' || msg.state === 'failed'))
+          ) {
+            clearTimeout(timer); subRef.current?.unsubscribe(); resolve('failed');
+          }
+        } catch {}
+      });
+    });
+
+    if (result === 'success') {
+      this.logger.log(`[WA_AUTO_RESTORE_SUCCESS] numberId=${numberId} phone=${phone} waState=${state.waState}`);
+      return;
+    }
+
+    if (result === 'fallback_qr') {
+      // Client is alive, browser running, waState=awaiting_scan.
+      // Do not destroy — allow the user to scan the QR and complete authentication normally.
+      this.logger.log(
+        `[WA_RESTORE_QR_FALLBACK] numberId=${numberId} phone=${phone} waState=${state.waState} ` +
+        `— restore produced QR; keeping session alive for manual scan`,
+      );
+      return;
+    }
+
+    // 'failed': timeout or hard error — clean up Chromium so the next restore can start cleanly.
+    this.logger.warn(
+      `[WA_AUTO_RESTORE_FAILED] numberId=${numberId} phone=${phone} waState=${state.waState} reason=timeout_or_error`,
+    );
+
+    try {
+      await this.disconnectNumber(numberId);
+    } catch (e: any) {
+      this.logger.warn(`[WA_RESTORE_CLEANUP] numberId=${numberId} disconnect threw: ${e?.message} — continuing`);
+    }
+    this.logger.log(
+      `[WA_RESTORE_CLEANUP_COMPLETE] numberId=${numberId} phone=${phone} — Chromium destroyed, idle`,
+    );
+  }
+
   // ── Public API ───────────────────────────────────────────────────────────────
 
   async connectNumber(numberId: string): Promise<void> {
-    // Stability rule: max 1 active marketing session at a time.
+    // [WA_ISOLATION] Step 1 — log connect entry with full snapshot before any mutation.
+    this._logIsolation('connect_requested', numberId, {
+      activeClientsSnapshot: this._clientsSnapshot(),
+    });
+    this._checkIsolationViolations(numberId, 'connect_requested');
+
     const activeId = this._getActiveNumberId();
     if (activeId && activeId !== numberId) {
-      const msg = `Another number (${activeId}) is already active. Disconnect it first.`;
-      this.logger.warn(`[MKT_WA:${numberId}] connect rejected — ${msg}`);
-      throw new Error(msg);
+      this.logger.warn(`[MKT_WA:${numberId}] connect — another number (${activeId}) is also active`);
     }
 
     let state = this.clients.get(numberId);
@@ -220,23 +407,42 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       state = makeState();
       this.clients.set(numberId, state);
       this._startWatchdog(numberId, state);
+      // [WA_ISOLATION] New state registered — log the clients map after insertion.
+      this._logIsolation('client_registered', numberId, {
+        isNew: true,
+        activeClientsSnapshot: this._clientsSnapshot(),
+      });
     }
-    if (state.destroyed) return;
-    if (state.terminating || state.destroying) {
-      this.logger.log(`[MKT_WA:${numberId}] connect skipped — teardown in progress`);
+    if (state.destroyed) {
+      this.logger.warn(`[WA_INIT_SKIPPED] ${numberId} — state destroyed`);
       return;
     }
-    if (state.starting || state.client) {
-      this.logger.log(`[MKT_WA:${numberId}] connect skipped — already starting or client exists`);
+    if (state.terminating || state.destroying) {
+      this.logger.warn(`[WA_DUPLICATE_BLOCKED] ${numberId} — teardown in progress (waState=${state.waState})`);
+      return;
+    }
+    // Never recreate a client while authentication is in progress — QR has been scanned.
+    if (state.waState === 'authenticating') {
+      this.logger.warn(`[WA_DUPLICATE_BLOCKED] ${numberId} — waState=authenticating, QR scan in progress`);
+      return;
+    }
+    if (state.starting) {
+      this.logger.warn(`[WA_INIT_SKIPPED] ${numberId} — already starting (waState=${state.waState})`);
+      return;
+    }
+    if (state.client) {
+      this.logger.warn(`[WA_CLIENT_EXISTS] ${numberId} — client already exists (waState=${state.waState})`);
       return;
     }
 
     this._metrics.qrToReadyAttempts++;
     state.starting = true;
-    this._transitionState(numberId, state, 'booting');
-    await this._updateNumberWaState(numberId, 'booting');
+    state.qrRefreshCount = 0;
+    state.firstQrGeneratedAt = null;
+    this._transitionState(numberId, state, 'initializing', 'connect_requested');
+    await this._updateNumberWaState(numberId, 'initializing');
 
-    this.logger.log(`[WA_LOCK] ${numberId} — queued for init lock`);
+    this.logger.log(`[WA_INIT_LOCK_ACQUIRED] numberId=${numberId} — queued, waiting for init lock`);
     try {
       await this._withInitLock(numberId, () => this._initClient(numberId, state!));
     } catch (e: any) {
@@ -257,15 +463,19 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`[NUMBER_DISCONNECTED] ${numberId}`);
     state.terminating = true;
     state.manualDisconnect = true;
+    this._transitionState(numberId, state, 'disconnecting', 'manual_disconnect');
     this._clearTimers(state);
     if (state.client) { state.client.removeAllListeners(); }
     await this._destroyClient(numberId, state);
     await new Promise<void>((r) => setTimeout(r, 5_000));
     state.qrDataUrl = null;
     state.qrGeneratedAt = null;
+    state.firstQrGeneratedAt = null;
     state.lastReadyAt = null;
+    state.sessionStartedAt = null;
+    state.lastDisconnectedAt = new Date();
     state.manualDisconnect = false;
-    this._transitionState(numberId, state, 'idle');
+    this._transitionState(numberId, state, 'idle', 'disconnect_complete');
     await this._updateNumberWaState(numberId, 'idle', 'manual_disconnect');
     state.terminating = false;
     state.destroying = false;
@@ -382,14 +592,13 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       await this.numberRepo.update(numberId, {
         wa_state: null,
         last_connected_at: null,
-        qr_code: null,
-      } as any);
+      });
     } catch (e: any) {
       this.logger.warn(`[MKT_RESET] DB update failed (non-fatal): ${e?.message}`);
     }
 
     if (state) {
-      this._transitionState(numberId, state, 'idle');
+      this._transitionState(numberId, state, 'idle', 'manual_hard_reset');
       state.terminating = false;
       state.destroying = false;
     }
@@ -400,9 +609,51 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
   /** True if the specific number's WA client is live, browser open, and session ready. */
   isConnected(numberId: string): boolean {
     const state = this.clients.get(numberId);
-    if (state?.waState !== 'ready' || !state.client || state.destroyed) return false;
+    if (!state || !state.client || state.destroyed) return false;
+
     const page = state.client.pupPage;
-    return page != null && !page.isClosed();
+    const pageOpen = page != null && !page.isClosed();
+
+    return state.waState === 'ready' && !state.destroyed && pageOpen;
+  }
+
+  /** Temporary diagnostic helper — exposes every sub-condition of isConnected() for pool-stage logging. */
+  getConnectionDiagnostics(numberId: string): {
+    inClientsMap: boolean; hasClient: boolean; destroyed: boolean;
+    waState: string; pageExists: boolean; pageOpen: boolean;
+    browserConnected: boolean; isConnectedResult: boolean;
+  } {
+    const state = this.clients.get(numberId);
+    if (!state) {
+      return { inClientsMap: false, hasClient: false, destroyed: false, waState: 'none', pageExists: false, pageOpen: false, browserConnected: false, isConnectedResult: false };
+    }
+    const page    = state.client?.pupPage;
+    const browser = state.client?.pupBrowser;
+    const pageExists = page != null;
+    const pageOpen   = pageExists && !(page.isClosed() as boolean);
+    return {
+      inClientsMap:      true,
+      hasClient:         !!state.client,
+      destroyed:         !!state.destroyed,
+      waState:           state.waState,
+      pageExists,
+      pageOpen,
+      browserConnected:  !!(browser?.isConnected?.()),
+      isConnectedResult: this.isConnected(numberId),
+    };
+  }
+
+  /** Called by SenderService/InboxService synchronously after extracting waMessageId, before DB write. */
+  registerPendingAck(waMessageId: string, logRowId: string): void {
+    this._pendingAckMap.set(waMessageId, logRowId);
+  }
+
+  /** Called after DB write commits wa_message_id — prunes map entry if final ACK hasn't already. */
+  deregisterPendingAck(waMessageId: string): void {
+    if (this._pendingAckMap.has(waMessageId)) {
+      this._pendingAckMap.delete(waMessageId);
+      this.logger.log(`[MKT_ACK_MAP_DELETE] waMessageId=${waMessageId} reason=db_committed`);
+    }
   }
 
   /** True if at least one number is connected. */
@@ -413,6 +664,98 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     return false;
   }
 
+  // Races `promise` against a hard timeout. Logs [MKT_PROTOCOL_TIMEOUT] and throws
+  // `<label>_TIMEOUT` if the deadline is exceeded. Cleans up the timer on success.
+  private async _withTimeout<T>(
+    promise: Promise<T>,
+    ms: number,
+    label: string,
+    numberId?: string,
+  ): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        this.logger.warn(
+          `[MKT_PROTOCOL_TIMEOUT] numberId=${numberId ?? 'unknown'} operation=${label} elapsedMs=${ms}`,
+        );
+        reject(new Error(`${label}_TIMEOUT`));
+      }, ms);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      clearTimeout(timer!);
+    }
+  }
+
+  /**
+   * Pre-send health guard — read-only validation, no side effects on failure.
+   * Checks: client presence, page liveness, client.info/wid, WA protocol state (getState).
+   * On failure: logs [WA_HEALTH_FAIL] and throws. Never mutates waState, never calls
+   * forceInvalidateSession. Session lifecycle is owned by the watchdog and event handlers
+   * (pupBrowser disconnected, WA disconnected event) — not by a per-send probe.
+   * On success: logs [WA_HEALTH_PASS] with wid + wa_state.
+   *
+   * window.Store and getChats probes are intentionally absent:
+   *   - sendMessage() uses window.WWebJS (injected by wwebjs), not window.Store
+   *   - window.WWebJS presence is guaranteed by the time waState=ready (wwebjs fires 'ready'
+   *     only after confirming WWebJS injection in Client.js:308)
+   *   - getChats (10s probe) adds latency to every send with no benefit for plain text sends
+   */
+  async assertHealthyClient(numberId: string): Promise<void> {
+    const state = this.clients.get(numberId);
+
+    // Check 1: client state + client object.
+    // A missing client is NOT corruption — the number is simply offline (disconnected,
+    // never connected this run, or after a server restart). Never wipe the session here:
+    // forceInvalidateSession → _clearAuthFiles would delete valid LocalAuth files and
+    // force a full QR re-scan even though the session on disk is perfectly healthy.
+    if (!state || !state.client) {
+      this.logger.error(`[WA_HEALTH_FAIL] numberId=${numberId} reason=no_client`);
+      throw new Error('WhatsApp client unhealthy');
+    }
+
+    // Checks 2–7: log the failure reason and throw so the caller (send path) receives
+    // a clean error. Do NOT mutate waState, do NOT call forceInvalidateSession.
+    // Rationale: health checks run on every send attempt. Transient conditions
+    // (Store reloading, brief IPC lag, page mid-navigation) must not permanently destroy
+    // the session. The watchdog (WATCHDOG_MS interval) and pupBrowser/WA disconnect
+    // event handlers are the correct owners of session invalidation.
+    const fail = (reason: string): never => {
+      this.logger.error(`[WA_HEALTH_FAIL] numberId=${numberId} reason=${reason}`);
+      throw new Error('WhatsApp client unhealthy');
+    };
+
+    const client = state.client;
+
+    // Check 2: pupPage exists and is open
+    const page = client.pupPage;
+    if (!page || page.isClosed()) return fail('no_page_or_closed');
+
+    // Check 3: client.info populated
+    if (!client.info) return fail('no_client_info');
+
+    // Check 4: wid present (confirms session is authenticated)
+    if (!client.info.wid) return fail('no_wid');
+
+    // Check 5: WA-layer session state via getState()
+    let waState: string | null = null;
+    try {
+      waState = await this._withTimeout(client.getState(), 8_000, 'GET_STATE', numberId);
+    } catch (e: any) {
+      return fail(`getState_threw:${(e?.message ?? '').slice(0, 80)}`);
+    }
+    const validWaStates = ['CONNECTED', 'OPENING', 'PAIRING'];
+    if (!waState || !validWaStates.includes(waState)) {
+      return fail(`bad_wa_state:${waState ?? 'null'}`);
+    }
+
+    this.logger.log(
+      `[WA_HEALTH_PASS] numberId=${numberId} wid=${client.info?.wid?.user ?? 'unknown'} ` +
+      `wa_state=${waState}`,
+    );
+  }
+
   /**
    * Send a message via a specific number's WA client.
    * Hard safety: verifies browser + session health, normalizes phone, checks WA registration.
@@ -420,6 +763,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
    */
   async sendViaNumber(numberId: string, phone: string, body: string): Promise<any> {
     const state = this.clients.get(numberId);
+    this.logger.log(`[MKT_SEND_START] numberId=${numberId} phone=${phone} bodyLength=${body.length}`);
 
     if (!state || state.destroyed) {
       throw new Error(`[SEND_SKIPPED] ${numberId} — no client state`);
@@ -457,7 +801,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     if (typeof state.client.isRegisteredUser === 'function') {
       let registered = false;
       try {
-        registered = await state.client.isRegisteredUser(target);
+        registered = await this._withTimeout(state.client.isRegisteredUser(target), 10_000, 'REGISTER_CHECK', numberId);
         this.logger.log(`[MKT_WA_REGISTERED] target=${target} registered=${registered}`);
       } catch (regErr: any) {
         this.logger.warn(
@@ -472,15 +816,29 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`[MKT_WA_REGISTERED] isRegisteredUser not available on this client — skipping check`);
     }
 
-    const result: any = await this._safeEval(numberId, state, () =>
-      state.client.sendMessage(target, body),
+    // Deep health validation — confirms browser, page, WA session, Store, and IPC are all live
+    await this.assertHealthyClient(numberId);
+
+    this.logger.log(
+      `[MKT_WA_SEND_CALL] numberId=${numberId} chatId=${target} messageLength=${body.length}`,
     );
+
+    let result: any;
+    try {
+      result = await this._safeEval(numberId, state, () =>
+        state.client.sendMessage(target, body),
+      );
+    } catch (sendErr: any) {
+      this.logger.error(
+        `[MKT_WA_SEND_FAIL] numberId=${numberId} chatId=${target} error="${sendErr?.message}"`,
+      );
+      throw sendErr;
+    }
 
     const resultId = result?.id?._serialized ?? result?.id ?? null;
     this.logger.log(
-      `[MKT_WA_SEND_RESULT] target=${target} ` +
-      `result_id=${resultId} ` +
-      `result_keys=${Object.keys(result ?? {}).join(',') || 'null'}`,
+      `[MKT_WA_SEND_SUCCESS] numberId=${numberId} chatId=${target} ` +
+      `messageId=${resultId} timestamp=${new Date().toISOString()}`,
     );
 
     return result;
@@ -496,7 +854,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   getQrData(numberId: string): { active: boolean; qr: string | null; generatedAt: string | null } {
     const state = this.clients.get(numberId);
-    const qrReady = state?.waState === 'qr_ready';
+    const qrReady = state?.waState === 'awaiting_scan';
     const result = {
       active:      qrReady,
       qr:          qrReady ? (state!.qrDataUrl ?? null) : null,
@@ -508,6 +866,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   getNumberWaStatus(numberId: string): {
     waState: WaState;
+    effectiveState: WaState;
     connected: boolean;
     booting: boolean;
     qrActive: boolean;
@@ -515,8 +874,16 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     lastReadyAt: string | null;
     browserConnected: boolean;
     clientExists: boolean;
+    reconnectCount: number;
+    qrRefreshCount: number;
+    sessionStartedAt: string | null;
+    lastDisconnectedAt: string | null;
+    firstQrGeneratedAt: string | null;
+    sessionAvailable: boolean;
+    liveAndReady: boolean;
   } {
     const state = this.clients.get(numberId);
+    const sessionAvailable = this._hasRestorableSession(numberId);
 
     // clientExists: the WA client object is alive in memory (not destroyed/null).
     // browserConnected: the Chrome DevTools WebSocket is open (browser process running).
@@ -526,11 +893,11 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       : false;
 
     if (!state) {
-      this.logger.log(`[WA_STATUS_RESOLVE] ${JSON.stringify({ id: numberId, memoryState: 'none', browserConnected: false, clientExists: false, finalState: 'idle' })}`);
-      return { waState: 'idle', connected: false, booting: false, qrActive: false, lastHeartbeat: null, lastReadyAt: null, browserConnected: false, clientExists: false };
+      this.logger.log(`[WA_STATUS_RESOLVE] ${JSON.stringify({ id: numberId, memoryState: 'none', sessionAvailable, browserConnected: false, clientExists: false, finalState: 'idle' })}`);
+      return { waState: 'idle', effectiveState: 'idle', connected: false, booting: false, qrActive: false, lastHeartbeat: null, lastReadyAt: null, browserConnected: false, clientExists: false, reconnectCount: 0, qrRefreshCount: 0, sessionStartedAt: null, lastDisconnectedAt: null, firstQrGeneratedAt: null, sessionAvailable, liveAndReady: false };
     }
 
-    const memoryState = state.waState;
+    const memoryState: WaState = state.waState;
 
     // Memory is authoritative: if the client and browser are live and memory says ready,
     // return connected=true regardless of any transient intermediate state. This prevents
@@ -540,24 +907,63 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       (memoryState === 'ready' || memoryState === 'authenticating');
     const connected = liveAndReady || (memoryState === 'ready' && !state.destroyed);
 
+    // effectiveState: what the UI should display.
+    // Promotes 'authenticating' → 'ready' when all live-connection signals agree the session
+    // is actually up. This covers the 60s window between saved-session restore (wwebjs emits
+    // authenticated, browser is live) and the ready-watchdog forcing the ready transition.
+    // Raw memoryState is preserved separately for debugging and internal logic.
+    const effectiveState: WaState = (liveAndReady && connected && clientExists && browserConnected)
+      ? 'ready'
+      : memoryState;
+
     // Only log when something non-trivial is happening (avoids 15s-interval log spam).
     if (memoryState !== 'idle') {
       this.logger.log(`[WA_STATUS_RESOLVE] ${JSON.stringify({
         id: numberId, memoryState, browserConnected, clientExists,
         destroyed: state.destroyed, liveAndReady, connected,
       })}`);
+      if (effectiveState !== memoryState) {
+        this.logger.log(`[WA_EFFECTIVE_STATE] ${JSON.stringify({
+          numberId,
+          memoryState,
+          effectiveState,
+          connected,
+          browserConnected,
+          liveAndReady,
+          ts: new Date().toISOString(),
+        })}`);
+      }
     }
-
     return {
-      waState:         memoryState,
+      waState:            memoryState,
+      effectiveState,
       connected,
-      booting:         memoryState === 'booting',
-      qrActive:        memoryState === 'qr_ready',
-      lastHeartbeat:   state.lastHeartbeat?.toISOString() ?? null,
-      lastReadyAt:     state.lastReadyAt?.toISOString() ?? null,
+      booting:            effectiveState === 'initializing',
+      qrActive:           effectiveState === 'awaiting_scan',
+      lastHeartbeat:      state.lastHeartbeat?.toISOString() ?? null,
+      lastReadyAt:        state.lastReadyAt?.toISOString() ?? null,
       browserConnected,
       clientExists,
+      reconnectCount:      state.reconnectCount,
+      qrRefreshCount:      state.qrRefreshCount,
+      sessionStartedAt:    state.sessionStartedAt?.toISOString() ?? null,
+      lastDisconnectedAt:  state.lastDisconnectedAt?.toISOString() ?? null,
+      firstQrGeneratedAt:  state.firstQrGeneratedAt?.toISOString() ?? null,
+      sessionAvailable,
+      liveAndReady,
     };
+  }
+
+  /** In-memory state counts for dashboard observability. */
+  getStateBreakdown(): Record<string, number> {
+    const counts: Record<string, number> = {
+      idle: 0, initializing: 0, awaiting_scan: 0,
+      authenticating: 0, ready: 0, failed: 0, disconnecting: 0,
+    };
+    for (const [, s] of this.clients) {
+      counts[s.waState] = (counts[s.waState] ?? 0) + 1;
+    }
+    return counts;
   }
 
   getOverallStatus(): { connected_count: number; total_clients: number } {
@@ -595,7 +1001,14 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   // ── Core init per number ─────────────────────────────────────────────────────
 
-  private async _initClient(numberId: string, state: NumberClientState): Promise<void> {
+  private async _initClient(numberId: string, state: NumberClientState, _restoreRetry = 0): Promise<void> {
+    this.logger.log(`[WA_INIT_ENTER] numberId=${numberId} waState=${state.waState} ts=${new Date().toISOString()}`);
+    // [WA_ISOLATION] init_started — log all clients and browsers alive at this moment.
+    this._logIsolation('init_started', numberId, {
+      restoreRetry:          _restoreRetry,
+      waState:               state.waState,
+      activeClientsSnapshot: this._clientsSnapshot(),
+    });
 
     // Clean teardown before creating a new client — safe no-op if client is already null
     await this._destroyClient(numberId, state);
@@ -633,6 +1046,12 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     if (!fs.existsSync(CHROME_PATH)) {
       throw new Error(`[WA_CHROME] Chrome not found at ${CHROME_PATH} — aborting init`);
     }
+    // [WA_ISOLATION] session_folder — confirm this number's auth path before Chromium launch.
+    const _sessionDir = this._getSessionDir(numberId);
+    this._logIsolation('session_folder', numberId, {
+      path:   _sessionDir,
+      exists: fs.existsSync(_sessionDir),
+    });
     this._removeSingletonFiles(numberId);
 
     this.logger.log(`[WA_AUDIT] before_client_create — ${numberId} chrome=${CHROME_PATH}`);
@@ -658,146 +1077,330 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       userAgent: false as unknown as string,
       webVersionCache: { type: 'none' },
     });
+    this.logger.log(`[WA_CLIENT_CREATED] ${numberId} — new wwebjs Client instantiated (waState=${state.waState})`);
     this.logger.log(`[WA_AUDIT] after_client_create — ${numberId}`);
+    // [WA_ISOLATION] browser_created — confirm only this number owns a new Client object.
+    this._logIsolation('browser_created', numberId, {
+      clientId:              `marketing-${numberId}`,
+      sessionPath:           this._getSessionDir(numberId),
+      activeClientsSnapshot: this._clientsSnapshot(),
+    });
 
     // ── Event handlers ──────────────────────────────────────────────────────────
 
     // Heartbeat: updated on every WA event to prove Chromium is alive
     const beat = () => { state.lastHeartbeat = new Date(); };
 
+    // Pre-attach diagnostics: all counts must be 0 on a fresh client.
+    // Non-zero means something attached listeners before _initClient — a bug.
+    const WA_TRACKED_EVENTS = ['qr', 'authenticated', 'ready', 'disconnected', 'auth_failure', 'message', 'message_ack'];
+    const preCounts: Record<string, number> = {};
+    for (const e of WA_TRACKED_EVENTS) { preCounts[e] = state.client.listenerCount(e) ?? 0; }
+    this.logger.log(`[WA_LISTENER_ATTACH] pre numberId=${numberId} counts=${JSON.stringify(preCounts)}`);
+
+    if (state.listenersAttached) {
+      // Should never happen: _destroyClient clears this flag before new Client is created.
+      // Log the anomaly and reset — we MUST attach to the fresh client regardless.
+      this.logger.warn(
+        `[WA_LISTENER_ATTACH] WARN numberId=${numberId} — listenersAttached=true on a fresh client ` +
+        `(flag not cleared by _destroyClient). Resetting and continuing.`,
+      );
+      state.listenersAttached = false;
+    }
+
     // Heartbeat-only listeners — do not alter state machine
-    state.client.on('loading_screen', () => { beat(); if (state.terminating) return; this.logger.log(`[WA_EVENT_ORDER] loading_screen — ${numberId} waState=${state.waState}`); });
-    state.client.on('change_state',   (s: string) => { beat(); this.logger.log(`[WA_EVENT_ORDER] change_state — ${numberId} s=${s} waState=${state.waState}`); });
+    state.client.on('loading_screen', () => { beat(); });
+    state.client.on('change_state',   () => { beat(); });
 
     state.client.on('qr', async (qr: string) => {
       beat();
+      this.logger.log(`[WA_EVENT_ORDER] qr — ${numberId} prevState=${state.waState} length=${qr?.length ?? 0} ts=${new Date().toISOString()}`);
       if (state.terminating) return;
-      console.log('[QR_HANDLER_VERSION]', '2026-05-22-v1');
-      console.log('[QR_HANDLER_ATTACHED]', numberId);
-      console.log('[QR_DEBUG] entered_qr_handler', { id: numberId });
-      this.logger.log(`[WA_EVENT] qr — ${numberId} length=${qr.length}`);
-      console.log('[WA_QR_RAW]', { id: numberId, type: typeof qr, length: qr?.length, preview: qr?.slice?.(0, 80) });
-      this.logger.log(`[QR_PIPELINE] stage=qr_event id=${numberId} rawLength=${qr?.length ?? 0}`);
 
-      if (state.lastReadyAt !== null) { state.lastReadyAt = null; }
+      // Hard gate: ready → awaiting_scan is a state machine violation. Once the session is
+      // ready, all future QR events are ignored unconditionally. wid may be absent transiently
+      // after a browser/inject cycle, so the state check is the only reliable signal here.
+      if (state.waState === 'ready') {
+        this.logger.warn(`[WA_QR_IGNORED_READY] numberId=${numberId} qrRefreshCount=${state.qrRefreshCount} — QR event suppressed: session already ready`);
+        return;
+      }
+
+      // FREEZE QR: suppress once wid is present (session authenticated) or authenticating is in progress.
+      if (!!(state.client?.info?.wid) || state.waState === 'authenticating') {
+        this.logger.warn(`[WA_QR_SUPPRESSED] ${numberId} waState=${state.waState} wid=${state.client?.info?.wid?.user ?? 'none'} — QR frozen: auth evidence present`);
+        return;
+      }
+
+      state.lastReadyAt = null;
 
       // qrcode@1.5.4 is pure CJS — (await import('qrcode')).default is undefined; require() gives the real module
-      console.log('[QR_DEBUG] before_qrcode_import');
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const QRCode = require('qrcode');
-      console.log('[QR_DEBUG] after_qrcode_import', { type: typeof QRCode, hasToDataURL: typeof QRCode?.toDataURL });
-
       const qrInput = process.env.WA_QR_TEST_MODE === 'true' ? 'HELLO_TEST_QR' : qr;
-      if (process.env.WA_QR_TEST_MODE === 'true') {
-        console.log('[QR_DEBUG] test_mode_active — using static test input');
-      }
 
       let dataUrl: string;
       try {
-        console.log('[QR_DEBUG] before_toDataURL');
         dataUrl = await QRCode.toDataURL(qrInput, { width: 300 });
-        console.log('[QR_DEBUG] after_toDataURL', { length: dataUrl?.length });
       } catch (e: any) {
-        this.logger.error(`[QR_PIPELINE] stage=toDataURL_failed id=${numberId}: ${e?.message}`);
-        console.log('[QR_DEBUG] toDataURL_error', { message: (e as any)?.message });
-        return;
-      }
-      this.logger.log(`[QR_PIPELINE] stage=toDataURL id=${numberId} dataUrlLength=${dataUrl?.length ?? 0}`);
-
-      // RACE GUARD — toDataURL is async. authenticated/ready can fire and complete
-      // while it executes, advancing state beyond qr_ready. Without this guard the QR
-      // handler resumes and blindly overwrites the ready state with qr_ready in both
-      // memory and DB, causing the frontend to stay stuck showing "View QR" forever.
-      if (state.terminating || (['authenticating', 'ready'] as WaState[]).includes(state.waState)) {
-        this.logger.warn(`[QR_PIPELINE] stage=qr_post_async_discarded id=${numberId} waState=${state.waState} — session advanced during toDataURL`);
+        this.logger.error(`[QR_PIPELINE] toDataURL_failed id=${numberId}: ${e?.message}`);
         return;
       }
 
-      this._transitionState(numberId, state, 'qr_ready');
-      state.qrDataUrl = dataUrl;
+      // RACE GUARD — toDataURL is async. authenticated can fire and complete while it
+      // executes. wid presence is the authoritative signal that auth occurred during the await.
+      if (state.terminating || !!(state.client?.info?.wid)) {
+        this.logger.warn(`[WA_QR_SUPPRESSED] ${numberId} waState=${state.waState} wid=${state.client?.info?.wid?.user ?? 'none'} — QR discarded: session advanced during async toDataURL`);
+        return;
+      }
+
+      this._transitionState(numberId, state, 'awaiting_scan', 'qr_received');
       state.qrGeneratedAt = new Date();
-      this.logger.log(`[QR_PIPELINE] stage=state_set id=${numberId} dataUrlLength=${dataUrl?.length ?? 0}`);
+      state.qrRefreshCount++;
+      // Always update stored QR and push to subscribers — WA codes expire every ~20s.
+      // The post-scan suppression guard above (wid present || authenticating) handles
+      // the case where the user has already scanned; this path only runs pre-scan.
+      state.qrDataUrl = dataUrl;
       state.qrSubject.next(JSON.stringify({ type: 'qr', dataUrl, timestamp: new Date().toISOString() }));
-      this.logger.log(`[QR_PIPELINE] stage=emitted id=${numberId}`);
-      await this._updateNumberWaState(numberId, 'qr_ready');
+      if (state.qrRefreshCount === 1) {
+        state.firstQrGeneratedAt = new Date();
+        this.logger.log(`[WA_QR_CREATED] ${numberId} — first QR generated and ready for scan`);
+        await this._updateNumberWaState(numberId, 'awaiting_scan');
+      } else {
+        this.logger.log(`[WA_QR_REFRESH] ${numberId} — QR refresh #${state.qrRefreshCount} waState=${state.waState} — display updated`);
+      }
     });
 
     state.client.on('authenticated', () => {
       beat();
       if (state.terminating) return;
       this.logger.log(`[WA_EVENT_ORDER] authenticated — ${numberId} waState=${state.waState}`);
-      this._transitionState(numberId, state, 'authenticating');
+
+      // Guard: wwebjs can emit 'authenticated' multiple times per session.
+      //   Case 1: waState=ready  — late event after session is fully up. Ignoring prevents a
+      //           ready→authenticating regression that arms a fresh 180s auth timeout and destroys
+      //           the healthy session.
+      //   Case 2: waState=authenticating — duplicate event during session restore. Ignoring prevents
+      //           the authTimeout (180s) and readyWatchdog (60s) from being reset, which would defer
+      //           or permanently suppress the watchdog recovery path.
+      if (state.waState === 'ready' || state.waState === 'authenticating') {
+        this.logger.warn(
+          `[WA_AUTH_EVENT_IGNORED] ${JSON.stringify({
+            id: numberId,
+            reason: state.waState === 'ready'
+              ? 'late_authenticated_after_ready'
+              : 'duplicate_authenticated_while_authenticating',
+            ts: new Date().toISOString(),
+          })}`,
+        );
+        return;
+      }
+
+      this._transitionState(numberId, state, 'authenticating', 'authenticated_event');
+      state.authenticatedAt = Date.now();
       state.qrDataUrl = null;
       state.qrGeneratedAt = null;
+      this.logger.log(`[WA_QR_LOOP_STOPPED] numberId=${numberId} trigger=authenticated qrRefreshCount=${state.qrRefreshCount}`);
       state.qrSubject.next(JSON.stringify({ type: 'authenticated', timestamp: new Date().toISOString() }));
-
-      // 120s window: if ready doesn't fire within AUTH_TIMEOUT_MS, mark failed
       if (state.authTimeoutId) { clearTimeout(state.authTimeoutId); }
+      // Auth watchdog: safe to arm unconditionally here — the waState===ready early-return above
+      // guarantees we only reach this line when state is genuinely entering authenticating.
       state.authTimeoutId = setTimeout(() => {
         state.authTimeoutId = null;
         if (state.waState === 'authenticating' && !state.destroyed && !state.manualDisconnect) {
           this.logger.warn(`[AUTH_TIMEOUT] ${numberId} — ${AUTH_TIMEOUT_MS / 1000}s elapsed after authenticated without ready`);
-          this._transitionState(numberId, state, 'failed');
+          this._transitionState(numberId, state, 'failed', 'auth_timeout');
           this._updateNumberWaState(numberId, 'failed');
         }
       }, AUTH_TIMEOUT_MS);
+
+      // Ready watchdog — fires 10 s after authenticated if 'ready' never arrived.
+      // Covers restored sessions where wwebjs skips emitting 'ready' after re-establishing
+      // the session (client.info is populated, browser alive, but ready event never fires).
+      // 10 s is sufficient: wid + browser alive at the time authenticated fires means the
+      // session is already established — ready is missing only because wwebjs skipped it.
+      if (state.readyWatchdogTimeoutId) { clearTimeout(state.readyWatchdogTimeoutId); }
+      state.readyWatchdogTimeoutId = setTimeout(() => {
+        state.readyWatchdogTimeoutId = null;
+        if (
+          state.waState !== 'authenticating' ||
+          !state.client ||
+          state.destroyed ||
+          state.terminating
+        ) return;
+
+        const browserAlive = state.client.pupBrowser?.isConnected?.() ?? false;
+        const widExists     = !!(state.client.info?.wid);
+        this.logger.log(
+          `[WA_READY_RECOVERY_CHECK] ${JSON.stringify({
+            id: numberId, waState: state.waState, widExists, browserConnected: browserAlive,
+            ts: new Date().toISOString(),
+          })}`,
+        );
+
+        // Fast-path: if all recovery signals are present, execute immediately without
+        // waiting for the watchdog's full trigger/fallback flow below.
+        if (widExists && browserAlive) {
+          this.logger.warn(
+            `[WA_READY_WATCHDOG_TRIGGER] ${JSON.stringify({ id: numberId, waState: state.waState, authenticatedAt: state.authenticatedAt, fast_path: true, ts: new Date().toISOString() })}`,
+          );
+        } else {
+          if (!browserAlive) return;
+          this.logger.warn(
+            `[WA_READY_WATCHDOG_TRIGGER] ${JSON.stringify({ id: numberId, waState: state.waState, authenticatedAt: state.authenticatedAt, ts: new Date().toISOString() })}`,
+          );
+        }
+
+        const info = state.client.info;
+        if (info) {
+          this.logger.warn(
+            `[WA_READY_WATCHDOG_RECOVERY] ${JSON.stringify({ id: numberId, wid: info?.wid?.user ?? 'unknown', ts: new Date().toISOString() })}`,
+          );
+          (async () => {
+            try {
+              await this._updateNumberConnected(numberId);
+              state.qrDataUrl = null;
+              state.qrGeneratedAt = null;
+              this.logger.log(`[WA_QR_LOOP_STOPPED] numberId=${numberId} trigger=ready_watchdog qrRefreshCount=${state.qrRefreshCount}`);
+              state.lastReadyAt = new Date();
+              state.sessionStartedAt = state.sessionStartedAt ?? new Date();
+              this._transitionState(numberId, state, 'ready', 'ready_watchdog_recovery');
+              this.logger.log(`[WA_READY_LOCK] numberId=${numberId} — session ready (watchdog); future QR events will be suppressed`);
+              this._metrics.qrToReadySuccesses++;
+              this._metrics.successfulReadySessions++;
+              this._logMetrics();
+              const phone = info?.wid?.user ?? null;
+              state.qrSubject.next(JSON.stringify({ type: 'ready', phone, timestamp: new Date().toISOString() }));
+              this.logger.log(`[WA_READY_COMPLETE] ${JSON.stringify({ id: numberId, phone, waState: state.waState, ts: new Date().toISOString() })}`);
+            } catch (err: any) {
+              this.logger.error(`[WA_READY_WATCHDOG_RECOVERY_FAIL] ${JSON.stringify({ id: numberId, error: err?.message, ts: new Date().toISOString() })}`);
+              this._transitionState(numberId, state, 'failed', 'ready_watchdog_db_failed');
+              this._updateNumberWaState(numberId, 'failed').catch(() => {});
+            }
+          })().catch((e: any) => {
+            this.logger.error(`[WA_READY_WATCHDOG_ERROR] ${numberId}: ${e?.message}`);
+          });
+        } else {
+          this.logger.warn(
+            `[WA_READY_WATCHDOG_FAILED] ${JSON.stringify({ id: numberId, reason: 'client_info_missing', ts: new Date().toISOString() })}`,
+          );
+          this._transitionState(numberId, state, 'failed', 'ready_watchdog_no_info');
+          this._updateNumberWaState(numberId, 'failed').catch(() => {});
+        }
+      }, 10_000);
     });
 
     state.client.on('remote_session_saved', () => { /* session persisted to disk */ });
 
     state.client.on('ready', async () => {
       beat();
+      this.logger.log(`[WA_READY_DEBUG] event_fired — ${numberId} waState=${state.waState} terminating=${state.terminating} ts=${new Date().toISOString()}`);
       if (state.terminating) return;
       if (state.authTimeoutId) { clearTimeout(state.authTimeoutId); state.authTimeoutId = null; }
+      if (state.readyWatchdogTimeoutId) { clearTimeout(state.readyWatchdogTimeoutId); state.readyWatchdogTimeoutId = null; }
+      if (state.postInitGuardId) { clearTimeout(state.postInitGuardId); state.postInitGuardId = null; }
       this.logger.log(`[WA_EVENT_ORDER] ready — ${numberId} waState=${state.waState}`);
       this.logger.log(`[WA_READY_ENTER] ${JSON.stringify({ id: numberId, waState: state.waState, ts: new Date().toISOString() })}`);
+      this.logger.log(`[WA_READY_DEBUG] pre_state_check — ${numberId} waState=${state.waState} authTimeoutCleared=${!state.authTimeoutId}`);
       if (state.waState === 'ready') {
         this.logger.warn(`[WA_READY_ENTER] skipped — already ready — ${numberId}`);
         return;
       }
       const phone = state.client?.info?.wid?.user ?? null;
-
-      // Persist to DB FIRST — session is only authoritative after the write lands.
-      // _updateNumberConnected throws on final failure (after one retry).
-      this.logger.log(`[WA_READY_DB_WRITE] ${numberId} — starting`);
+      this.logger.log(`[WA_READY_DEBUG] pre_db_write — ${numberId} phone=${phone} waState=${state.waState}`);
       try {
         await this._updateNumberConnected(numberId);
-        this.logger.log(`[WA_READY_DB_WRITE] ${numberId} — success`);
-      } catch {
-        // DB write failed after retry — invalidate session, return to idle.
+        this.logger.log(`[WA_READY_DEBUG] db_write_success — ${numberId}`);
+      } catch (err: any) {
+        this.logger.error(`[WA_READY_DEBUG] db_write_failed — ${numberId} reason=${err?.message}`);
         this.logger.error(`[WA_READY_ERROR] ${JSON.stringify({ id: numberId, stage: 'db_write', waState: state.waState, ts: new Date().toISOString() })}`);
         state.qrSubject.next(JSON.stringify({ type: 'error', reason: 'db_sync_failed', timestamp: new Date().toISOString() }));
         await this.forceInvalidateSession(numberId, 'ready_db_write_failed');
         return;
       }
-
-      // DB committed — now safe to commit memory state and emit SSE.
-      this.logger.log(`[WA_READY_STATE_TRANSITION] ${numberId} — transitioning memory state to ready`);
       state.qrDataUrl = null;
       state.qrGeneratedAt = null;
+      this.logger.log(`[WA_QR_LOOP_STOPPED] numberId=${numberId} trigger=ready qrRefreshCount=${state.qrRefreshCount}`);
       state.lastReadyAt = new Date();
-      this._transitionState(numberId, state, 'ready');
+      state.sessionStartedAt = state.sessionStartedAt ?? new Date();
+      this._transitionState(numberId, state, 'ready', 'ready_event');
+      this.logger.log(`[WA_READY_LOCK] numberId=${numberId} — session ready; future QR events will be suppressed`);
+      this.logger.log(`[WA_READY_DEBUG] state_transitioned — ${numberId} waState=${state.waState}`);
       this._metrics.qrToReadySuccesses++;
       this._metrics.successfulReadySessions++;
       this._logMetrics();
-      this.logger.log(`[WA_READY_COMPLETE] ${JSON.stringify({ id: numberId, phone, waState: state.waState, ts: new Date().toISOString() })}`);
+      state.autoReconnectAttempts = 0;
       state.qrSubject.next(JSON.stringify({ type: 'ready', phone, timestamp: new Date().toISOString() }));
+      this.logger.log(`[WA_READY_DEBUG] complete — ${numberId} phone=${phone} waState=${state.waState}`);
+      this.logger.log(`[WA_READY_COMPLETE] ${JSON.stringify({ id: numberId, phone, waState: state.waState, ts: new Date().toISOString() })}`);
     });
 
     state.client.on('disconnected', async (reason: string) => {
       beat();
+      this.logger.warn(`[WA_EVENT_ORDER] disconnected — ${numberId} reason="${reason}" waState=${state.waState}`);
       if (state.terminating) return;
       if (reason === 'NAVIGATION') return;
+
+      // During session establishment (QR scanned, WA handshake in progress), WhatsApp Web
+      // emits 'disconnected' with empty string or other transient reasons before 'ready' fires.
+      // Invalidating here wipes the just-authenticated session and forces a fresh QR scan.
+      // Instead, defer to the authTimeoutId which will fire after AUTH_TIMEOUT_MS if ready never comes.
+      if (state.waState === 'authenticating') {
+        this.logger.warn(
+          `[WA_DISCONNECTED_DEFERRED] ${numberId} reason="${reason}" waState=authenticating ` +
+          `— deferring to authTimeout, NOT invalidating session`,
+        );
+        return;
+      }
+
+      // During session-restore: wwebjs emits 'disconnected'('') during the internal page navigation
+      // from the WhatsApp loading screen to the chat view. This happens BEFORE 'authenticated' fires,
+      // so state is still 'initializing'. Chrome and the WA socket are still alive — 'authenticated'
+      // and 'ready' will follow shortly. Invalidating here wipes the restored session unnecessarily.
+      if (state.waState === 'initializing' && !reason) {
+        this.logger.warn(
+          `[WA_DISCONNECTED_DEFERRED] ${numberId} reason="" waState=initializing ` +
+          `— session-restore navigation artifact; 'authenticated' expected shortly, NOT invalidating`,
+        );
+        return;
+      }
+
+      // During QR display: wwebjs emits 'disconnected'('') when a QR code expires on WhatsApp's
+      // servers and it is about to generate the next one. The browser and WA socket are still alive.
+      // Invalidating here would destroy the Chromium process and force the user to press Connect
+      // again every ~20s. Defer: the next 'qr' event will refresh the displayed code automatically.
+      if (state.waState === 'awaiting_scan' && !reason) {
+        this.logger.warn(
+          `[WA_DISCONNECTED_DEFERRED] ${numberId} reason="" waState=awaiting_scan ` +
+          `— QR rotation artifact from wwebjs, ignoring; next 'qr' event will refresh the code`,
+        );
+        return;
+      }
+
+      // Post-ready artifact: wwebjs emits disconnected(reason='') during its internal session-sync
+      // sequence immediately after ready fires. This is NOT a real disconnect — Chrome and the WA
+      // socket are still alive. Invalidating here would wipe a healthy session.
+      // Guard: only suppress within 10 s of ready; beyond that, treat as a real disconnect.
+      if (state.waState === 'ready' && !reason && state.lastReadyAt) {
+        const msSinceReady = Date.now() - state.lastReadyAt.getTime();
+        if (msSinceReady < 10_000) {
+          this.logger.warn(
+            `[WA_DISCONNECTED_DEFERRED] ${numberId} reason="" waState=ready msSinceReady=${msSinceReady} ` +
+            `— post-ready session-sync artifact, ignoring`,
+          );
+          return;
+        }
+      }
+
       if (state.authTimeoutId) { clearTimeout(state.authTimeoutId); state.authTimeoutId = null; }
-      this.logger.log(`[NUMBER_DISCONNECTED] ${numberId} reason=${reason}`);
-      this._autoPause?.recordDisconnect();
+      this._autoPause?.recordDisconnect(numberId);
       state.qrSubject.next(JSON.stringify({ type: 'disconnected', reason, timestamp: new Date().toISOString() }));
-      // Stability rule: any unexpected disconnect → invalidate session, no auto-reconnect.
-      await this.forceInvalidateSession(numberId, `wa_disconnected`);
+      // Preserve auth: attempt silent restore before falling back to full invalidation.
+      this._scheduleReconnect(numberId, state, `wa_disconnected_${reason || 'empty'}`);
     });
 
     state.client.on('auth_failure', async (msg: string) => {
       beat();
+      this.logger.warn(`[WA_EVENT_ORDER] auth_failure — ${numberId} prevState=${state.waState} msg="${msg}" ts=${new Date().toISOString()}`);
       if (state.terminating) return;
       if (state.authTimeoutId) { clearTimeout(state.authTimeoutId); state.authTimeoutId = null; }
       state.qrDataUrl = null;
@@ -827,62 +1430,34 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
         from.endsWith('@newsletter')
       ) return;
 
-      const notifyName: string | undefined = (msg as any)?.notifyName ?? undefined;
-
-      // ── Phone resolution with E.164 validation ──────────────────────────────
-      // IMPORTANT: @lid user segments are WhatsApp internal identifiers, NOT phones.
-      // They happen to be 15-digit numbers and will pass digit-length checks, so
-      // fromUser is NEVER used as a phone candidate for @lid sources.
-      // Priority:
-      //   A) from_field  (only for @c.us, never @lid)
-      //   B) contact.number
-      //   C) contact.id.user
-      const isLid = from.includes('@lid');
-      let contactNumber: string | undefined;
-      let contactUser: string | undefined;
-
-      // Always attempt contact resolution; @lid requires it, @c.us uses it as fallback
+      // ── Strict phone resolution — only @c.us JIDs accepted ─────────────────
+      // contact is fetched for name resolution and as a @c.us fallback.
+      // contact.number is logged for diagnostics but NEVER used as a phone source.
+      let contact: any = null;
       try {
-        const contact = await msg.getContact();
-        contactNumber = contact?.number   ?? undefined;
-        contactUser   = contact?.id?.user ?? undefined;
+        contact = await msg.getContact();
       } catch (contactErr: any) {
-        this.logger.warn(
-          `[MKT_INBOX_MESSAGE] getContact() failed for from=${from}: ${contactErr?.message}`,
-        );
+        this.logger.warn(`[MKT_INBOX_MESSAGE] getContact() failed for from=${from}: ${contactErr?.message}`);
       }
 
-      // fromUser is only a valid phone candidate when coming from @c.us (not @lid)
-      const fromUser: string | null = isLid
-        ? null  // LID segment is never a real phone — suppress entirely
-        : from.replace(/:\d+(?=@)/, '').split('@')[0];
-
-      // Walk priority chain — first valid E.164 wins
-      let resolved: string | null = null;
-      let resolutionSource = 'none';
-      if (!isLid && isRealPhone(fromUser))   { resolved = fromUser!;      resolutionSource = 'from_field'; }
-      else if (isRealPhone(contactNumber))   { resolved = contactNumber!; resolutionSource = 'contact.number'; }
-      else if (isRealPhone(contactUser))     { resolved = contactUser!;   resolutionSource = 'contact.id.user'; }
+      const { phone, source: phoneSource, reason: phoneReason } = resolveCustomerPhone(msg, contact);
 
       this.logger.log(
-        `[MKT_INBOX_TRACE] numberId=${numberId} raw_from=${from} is_lid=${isLid} ` +
-        `from_me=${msg.fromMe ?? false} type=${(msg as any)?.type ?? 'unknown'} ` +
-        `from_user=${fromUser ?? 'suppressed'} contact_number=${contactNumber ?? 'n/a'} ` +
-        `contact_user=${contactUser ?? 'n/a'} resolved=${resolved ?? 'NONE'} ` +
-        `resolution_source=${resolutionSource} is_valid=${resolved !== null} ` +
-        `message_body="${String(msg.body ?? '').slice(0, 60)}"`,
+        `[MKT_PHONE_RESOLVE] numberId=${numberId} rawFrom=${from} ` +
+        `contactId=${contact?.id?._serialized ?? 'n/a'} contactNumber=${contact?.number ?? 'n/a'} ` +
+        `resolvedPhone=${phone ?? 'NONE'} source=${phoneSource} reason=${phoneReason}`,
       );
 
-      if (!resolved) {
+      if (!phone) {
         this.logger.warn(
-          `[MKT_INBOX_SKIP_INVALID_PHONE] numberId=${numberId} raw_from=${from} is_lid=${isLid} ` +
-          `from_user=${fromUser ?? 'n/a'} contact_number=${contactNumber ?? 'n/a'} ` +
-          `contact_user=${contactUser ?? 'n/a'} — no valid E.164 candidate; dropping`,
+          `[MKT_INBOX_SKIP_INVALID_PHONE] numberId=${numberId} rawFrom=${from} ` +
+          `reason=${phoneReason} — dropping`,
         );
         return;
       }
 
-      const phone = normalizeWhatsAppSender(resolved);
+      const notifyName: string | undefined =
+        contact?.pushname ?? (msg as any)?._data?.notifyName ?? (msg as any)?.notifyName ?? undefined;
 
       // ── Body extraction ──────────────────────────────────────────────────────
       const messageBody = this._extractMessageBody(msg);
@@ -930,23 +1505,58 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
               ? { status: QueueStatus.READ, read_at: new Date() }
               : { status: QueueStatus.DELIVERED, delivered_at: new Date() };
 
-          // Verify row exists before updating — ACK can arrive extremely fast
+          // Fast path: map entry registered synchronously by sender/inbox before DB write commits.
+          // Entry is kept alive across ack=2 so that ack=3 can also use the map.
+          // Only removed here on final ACK (>=3); sender/inbox deregisters after DB commit.
+          const mappedLogId = this._pendingAckMap.get(waMessageId);
+          this.logger.log(
+            `[MKT_ACK_LOOKUP] waMessageId=${waMessageId} ack=${ack} via=map found=${!!mappedLogId}`,
+          );
+          if (mappedLogId) {
+            if (ack >= 3) {
+              this._pendingAckMap.delete(waMessageId);
+              this.logger.log(
+                `[MKT_ACK_MAP_DELETE] waMessageId=${waMessageId} reason=final_ack ack=${ack}`,
+              );
+            }
+            await this.logRepo.update(mappedLogId, updatePayload);
+            this.logger.log(
+              `[MKT_ACK_UPDATE] waMessageId=${waMessageId} ack=${ack} new_status=${newStatus} ` +
+              `log_id=${mappedLogId} via=map`,
+            );
+            return;
+          }
+
+          // DB fallback: map entry already deregistered (DB committed) or was never registered.
           const existing = await this.logRepo.findOne({ where: { wa_message_id: waMessageId } });
+          this.logger.log(
+            `[MKT_ACK_LOOKUP] waMessageId=${waMessageId} ack=${ack} via=db found=${!!existing}`,
+          );
           if (!existing) {
-            this.logger.warn(`[MKT_ACK_MISSING_ROW] waMessageId=${waMessageId} ack=${ack} — no log row found, ACK dropped`);
+            this.logger.debug(
+              `[MKT_ACK_IGNORED] waMessageId=${waMessageId} ack=${ack} reason=no_matching_outbound_message`,
+            );
             return;
           }
 
           const result = await this.logRepo.update({ wa_message_id: waMessageId }, updatePayload);
           this.logger.log(
             `[MKT_ACK_UPDATE] waMessageId=${waMessageId} ack=${ack} new_status=${newStatus} ` +
-            `log_id=${existing.id} rows_affected=${(result as any)?.affected ?? 'unknown'}`,
+            `log_id=${existing.id} rows_affected=${(result as any)?.affected ?? 'unknown'} via=db`,
           );
         }
       } catch (ackErr: any) {
         this.logger.warn(`[MKT_WA_ACK_ERROR] waMessageId=${waMessageId} ack=${ack} error="${ackErr?.message}"`);
       }
     });
+
+    // Mark listeners as attached and log per-event counts.
+    state.listenersAttached = true;
+    const postCounts: Record<string, number> = {};
+    for (const e of WA_TRACKED_EVENTS) { postCounts[e] = state.client.listenerCount(e) ?? 0; }
+    for (const e of WA_TRACKED_EVENTS) {
+      this.logger.log(`[WA_LISTENER_ATTACH] event=${e} numberId=${numberId} count=${postCounts[e]}`);
+    }
 
     // ── initialize() — release init lock on first event, NOT on ready ─────────
     // initialize() stays pending while user scans QR. QR_READY is a valid stable state.
@@ -955,106 +1565,287 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     const initStart = Date.now();
     this.logger.log(`[WA_INIT] initialize start — ${numberId}`);
 
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      let bootTimeoutId: ReturnType<typeof setTimeout> | null = null;
-      let deadBrowserId: ReturnType<typeof setTimeout> | null = null;
+    // True only when initialize() resolves — proving inject() completed and all three bridge
+    // functions (onQRChangedEvent, onAppStateHasSyncedEvent, onOfflineProgressUpdateEvent) and
+    // the framenavigated re-injection listener are registered in Chrome. Used by the stuck guard
+    // to decide whether to preserve or delete auth files on timeout.
+    let bridgeEstablished = false;
 
-      const settle = (err?: Error) => {
-        if (settled) return;
-        settled = true;
-        if (bootTimeoutId) { clearTimeout(bootTimeoutId); bootTimeoutId = null; }
-        if (deadBrowserId) { clearTimeout(deadBrowserId); deadBrowserId = null; }
-        if (err) reject(err); else resolve();
-      };
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        let bootTimeoutId: ReturnType<typeof setTimeout> | null = null;
+        let deadBrowserId: ReturnType<typeof setTimeout> | null = null;
 
-      // Release init lock on the first WA event — client runs autonomously after this.
-      // loading_screen is included so that a session-restore navigation happening between
-      // Chrome boot and the first auth event doesn't leave settled=false when initialize()
-      // rejects with "Execution context was destroyed" (a normal WhatsApp navigation artifact).
-      const onFirstEvent = (evtName: string) => () => {
-        this.logger.log(`[WA_INIT_STAGE] first_event=${evtName} numberId=${numberId} elapsed=${Date.now() - initStart}ms — releasing init lock`);
-        settle();
-      };
-      state.client.once('loading_screen', onFirstEvent('loading_screen'));
-      state.client.once('qr',             onFirstEvent('qr'));
-      state.client.once('authenticated',  onFirstEvent('authenticated'));
-      state.client.once('ready',          onFirstEvent('ready'));
-      state.client.once('auth_failure',   onFirstEvent('auth_failure'));
+        const settle = (err?: Error) => {
+          if (settled) return;
+          settled = true;
+          if (bootTimeoutId) { clearTimeout(bootTimeoutId); bootTimeoutId = null; }
+          if (deadBrowserId) { clearTimeout(deadBrowserId); deadBrowserId = null; }
+          if (err) reject(err); else resolve();
+        };
 
-      // 90s early abort: if Chromium launched but the browser process died before any WA event
-      deadBrowserId = setTimeout(() => {
-        if (settled) return;
-        const browser = state.client?.pupBrowser;
-        if (!browser) return; // Chromium not yet attached — too early to judge
-        if (!browser.isConnected()) {
-          this.logger.error(`[WA_BOOT] 90s dead-browser checkpoint — process died — ${numberId}`);
-          settle(new Error('Browser dead at 90s checkpoint'));
-        }
-      }, 90_000);
-
-      // Hard abort only if Chromium boots but produces no event at all
-      this.logger.log(`[WA_BOOT] timeout=${BOOT_TIMEOUT_MS}`);
-      bootTimeoutId = setTimeout(() => {
-        settle(new Error(`Chromium boot timeout — no WA event in ${BOOT_TIMEOUT_MS / 1000}s`));
-      }, BOOT_TIMEOUT_MS);
-
-      // Start Chromium — runs indefinitely in background after init lock releases
-      this.logger.log(`[WA_INIT_STAGE] initialize_called numberId=${numberId}`);
-      state.client.initialize()
-        .then(() => {
-          this.logger.log(`[WA_INIT_STAGE] initialize_resolved numberId=${numberId} elapsed=${Date.now() - initStart}ms`);
-          settle();
-        })
-        .catch((e: any) => {
-          const msg: string = e?.message ?? '';
-
-          // "Execution context was destroyed" / "Cannot find context" = WhatsApp Web page
-          // navigated during initialization. This is EXPECTED during a session restore:
-          // WhatsApp loads → navigates to chat view → Puppeteer's internal eval is interrupted.
-          // The browser and WA event listeners are still alive; authenticated+ready will fire
-          // normally. Release the init lock without error and let the event flow complete.
-          const isNavigationArtifact =
-            msg.includes('Execution context was destroyed') ||
-            msg.includes('Cannot find context with specified id');
-
-          if (isNavigationArtifact) {
-            this.logger.warn(
-              `[WA_RESTORE_RECOVER] numberId=${numberId} — navigation artifact: "${msg}" ` +
-              `— releasing init lock; WA events will complete the session`,
-            );
-            if (!settled) settle(); // resolve: no error, event flow continues
-            return;
-          }
-
-          if (state.terminating && (
-            msg.includes('Target closed') || msg.includes('Session closed') ||
-            msg.includes('Protocol error')
-          )) {
-            this.logger.log(`[WA_CLEANUP] ${numberId} — expected browser shutdown during teardown`);
-            if (!settled) settle();
-            return;
-          }
-
-          this.logger.error(`[WA_INIT_STAGE] initialize_rejected numberId=${numberId} error="${msg}"`);
-          if (!settled) {
-            // No event received yet — Chromium boot genuinely failed
-            settle(e instanceof Error ? e : new Error(String(e?.message ?? 'Unknown')));
-          } else {
-            // Late rejection after session was running — invalidate, no auto-reconnect.
-            this.logger.warn(`[WA_INIT_STAGE] late_rejection_after_first_event numberId=${numberId} error="${msg}"`);
-            if (!state.manualDisconnect && !state.destroyed && !state.terminating) {
-              this.forceInvalidateSession(numberId, 'late_initialize_rejection').catch(() => {});
+        // Release init lock on the first WA event — client runs autonomously after this.
+        // settled=false when navigate artifact fires → bridge NOT established → retry.
+        // settled=true when navigate artifact fires → event fired first → bridge established → continue.
+        let navListenerAttached = false;
+        const onFirstEvent = (evtName: string) => () => {
+          this.logger.log(`[WA_INIT_STAGE] first_event=${evtName} numberId=${numberId} elapsed=${Date.now() - initStart}ms — releasing init lock`);
+          // Attach framenavigated diagnostic the moment pupPage is confirmed live.
+          // Captures every navigation that occurs after the first WA event fires —
+          // the critical window for inject() context-destruction race conditions.
+          if (!navListenerAttached) {
+            navListenerAttached = true;
+            const page = state.client?.pupPage;
+            if (page) {
+              page.on('framenavigated', (frame: any) => {
+                this.logger.log(
+                  `[WA_NAVIGATION] numberId=${numberId} url="${frame.url()}" duringState=${state.waState}`,
+                );
+              });
+            } else {
+              this.logger.warn(`[WA_NAVIGATION] numberId=${numberId} pupPage unavailable at first_event=${evtName} — navigation logging skipped`);
             }
           }
-        });
-    });
+          settle();
+        };
+        state.client.once('loading_screen', onFirstEvent('loading_screen'));
+        state.client.once('qr',             onFirstEvent('qr'));
+        state.client.once('authenticated',  onFirstEvent('authenticated'));
+        state.client.once('ready',          onFirstEvent('ready'));
+        state.client.once('auth_failure',   onFirstEvent('auth_failure'));
+
+        // 90s early abort: if Chromium launched but the browser process died before any WA event
+        deadBrowserId = setTimeout(() => {
+          if (settled) return;
+          const browser = state.client?.pupBrowser;
+          if (!browser) return; // Chromium not yet attached — too early to judge
+          if (!browser.isConnected()) {
+            this.logger.error(`[WA_BOOT] 90s dead-browser checkpoint — process died — ${numberId}`);
+            settle(new Error('Browser dead at 90s checkpoint'));
+          }
+        }, 90_000);
+
+        // Hard abort only if Chromium boots but produces no event at all
+        this.logger.log(`[WA_BOOT] timeout=${BOOT_TIMEOUT_MS}`);
+        bootTimeoutId = setTimeout(() => {
+          settle(new Error(`Chromium boot timeout — no WA event in ${BOOT_TIMEOUT_MS / 1000}s`));
+        }, BOOT_TIMEOUT_MS);
+
+        // [WA_AUTH_PATH] — session directory state immediately before Chromium launch
+        {
+          const authPath = this._getSessionDir(numberId);
+          const authExists = fs.existsSync(authPath);
+          let rootFiles: string[] = [];
+          if (authExists) {
+            try { rootFiles = fs.readdirSync(authPath); } catch { /* unreadable */ }
+          }
+          const waBase = path.join(authPath, 'Default', 'IndexedDB', 'https_web.whatsapp.com_0.indexeddb');
+          const blobExists   = fs.existsSync(`${waBase}.blob`);
+          const leveldbDir   = `${waBase}.leveldb`;
+          const leveldbExists = fs.existsSync(leveldbDir);
+          let ldbFiles: string[] = [];
+          if (leveldbExists) {
+            try { ldbFiles = fs.readdirSync(leveldbDir).filter((f: string) => f.endsWith('.ldb') || f.endsWith('.log')); } catch { /* unreadable */ }
+          }
+          this.logger.log(
+            `[WA_AUTH_PATH] numberId=${numberId} path=${authPath} exists=${authExists} ` +
+            `root_files=${JSON.stringify(rootFiles)} ` +
+            `has_blob=${blobExists} leveldb_exists=${leveldbExists} ` +
+            `ldb_files=${JSON.stringify(ldbFiles)} ` +
+            `hasRestorableSession=${this._hasRestorableSession(numberId)}`,
+          );
+        }
+
+        // Start Chromium — runs indefinitely in background after init lock releases
+        this.logger.log(`[WA_INIT_STAGE] initialize_called numberId=${numberId}`);
+        state.client.initialize()
+          .then(() => {
+            // initialize() resolved → inject() completed → bridge fully established.
+            bridgeEstablished = true;
+            this.logger.log(
+              `[WA_BRIDGE_READY] numberId=${numberId} — initialize() resolved; bridge fully established` +
+              (_restoreRetry > 0 ? ` after retry ${_restoreRetry}` : ''),
+            );
+            if (_restoreRetry > 0) {
+              this.logger.log(`[WA_INIT_SUCCESS_AFTER_RETRY] numberId=${numberId} attempt=${_restoreRetry}`);
+            }
+            settle();
+          })
+          .catch((e: any) => {
+            const msg: string = e?.message ?? '';
+
+            // "Execution context was destroyed" / "Cannot find context" = Puppeteer threw because
+            // WhatsApp's internal page navigated during inject()'s needAuthentication evaluate.
+            //
+            // Whether this is recoverable depends on settled:
+            //   settled=false → inject() threw before ANY WA event fired → bridge NOT established.
+            //     onQRChangedEvent / onAppStateHasSyncedEvent / onOfflineProgressUpdateEvent were
+            //     never exposed in Chrome. No WA event can reach Node.js. Retry initialization.
+            //   settled=true → a WA event (loading_screen/qr/authenticated) fired before the throw.
+            //     All three bridge functions must exist for loading_screen/qr to fire (Steps 5-7 of
+            //     inject()). Bridge IS established. Late nav cleanup noise — release and continue.
+            const isNavigationArtifact =
+              msg.includes('Execution context was destroyed') ||
+              msg.includes('Cannot find context with specified id');
+
+            if (isNavigationArtifact) {
+              if (!settled) {
+                // Bridge never established — reject with a sentinel so the outer catch block
+                // can destroy the partial Chromium process and retry initialization cleanly.
+                const MAX_RESTORE_RETRIES = 2;
+                if (_restoreRetry < MAX_RESTORE_RETRIES) {
+                  this.logger.warn(
+                    `[WA_RESTORE_RETRY] numberId=${numberId} attempt=${_restoreRetry + 1}/${MAX_RESTORE_RETRIES} ` +
+                    `— inject() failed before bridge registration: "${msg.slice(0, 80)}" — scheduling retry`,
+                  );
+                  settle(new Error('__WA_RESTORE_RETRY__'));
+                } else {
+                  this.logger.error(
+                    `[WA_RESTORE_RETRY_LIMIT] numberId=${numberId} — bridge never established after ` +
+                    `${MAX_RESTORE_RETRIES} retries: "${msg.slice(0, 80)}" — marking failed, preserving auth`,
+                  );
+                  settle(new Error('__WA_RESTORE_LIMIT__'));
+                }
+              } else {
+                // Bridge established (event fired first) — late navigation cleanup noise.
+                // Release and let the authenticated/ready event flow complete normally.
+                this.logger.warn(
+                  `[WA_RESTORE_RECOVER] numberId=${numberId} — navigation artifact after first event: ` +
+                  `"${msg.slice(0, 80)}" — bridge established, event flow continues`,
+                );
+                // settled is already true — Promise already resolved, no settle() call needed.
+              }
+              return;
+            }
+
+            if (state.terminating && (
+              msg.includes('Target closed') || msg.includes('Session closed') ||
+              msg.includes('Protocol error')
+            )) {
+              this.logger.log(`[WA_CLEANUP] ${numberId} — expected browser shutdown during teardown`);
+              if (!settled) settle();
+              return;
+            }
+
+            this.logger.error(`[WA_INIT_STAGE] initialize_rejected numberId=${numberId} error="${msg}"`);
+            if (!settled) {
+              // No event received yet — Chromium boot genuinely failed
+              settle(e instanceof Error ? e : new Error(String(e?.message ?? 'Unknown')));
+            } else {
+              // Late rejection after session was running — invalidate, no auto-reconnect.
+              this.logger.warn(`[WA_INIT_STAGE] late_rejection_after_first_event numberId=${numberId} error="${msg}"`);
+              if (!state.manualDisconnect && !state.destroyed && !state.terminating) {
+                this.forceInvalidateSession(numberId, 'late_initialize_rejection').catch(() => {});
+              }
+            }
+          });
+      });
+    } catch (promiseErr: any) {
+      const errMsg: string = promiseErr?.message ?? '';
+
+      if (errMsg === '__WA_RESTORE_RETRY__') {
+        this.logger.log(
+          `[WA_RETRY_REASON] numberId=${numberId} attempt=${_restoreRetry + 1}/3 ` +
+          `duringState=${state.waState} ` +
+          `browserConnected=${!!(state.client?.pupBrowser?.isConnected?.())} ` +
+          `pageExists=${!!(state.client?.pupPage)} ` +
+          `pageOpen=${state.client?.pupPage ? !(state.client.pupPage.isClosed() as boolean) : false}`,
+        );
+        this.logger.log(
+          `[WA_RESTORE_RETRY] numberId=${numberId} — destroying partial client; ` +
+          `waiting 3s before attempt ${_restoreRetry + 1}`,
+        );
+        // Retry-safe teardown: close browser only — never call client.destroy() or
+        // authStrategy.destroy() which could delegate to auth-file operations.
+        // Session files (blob, leveldb) must survive across retries.
+        {
+          const retryClient = state.client;
+          if (retryClient && !state.destroying) {
+            state.destroying = true;
+            try { retryClient.removeAllListeners(); } catch { }
+            state.client = null;
+            state.listenersAttached = false;
+            state.lastHeartbeat = null;
+            try {
+              const browser = retryClient.pupBrowser;
+              if (browser?.isConnected?.()) { await browser.close(); }
+            } catch { }
+            state.destroying = false;
+          }
+        }
+        this.logger.log(
+          `[WA_RETRY_SAFE_DESTROY] numberId=${numberId} retry=${_restoreRetry + 1} ` +
+          `logoutSkipped=true sessionDeletionSkipped=true`,
+        );
+        await new Promise<void>((r) => setTimeout(r, 3_000));
+        return this._initClient(numberId, state, _restoreRetry + 1);
+      }
+
+      if (errMsg === '__WA_RESTORE_LIMIT__') {
+        this.logger.error(
+          `[WA_INIT_FAILED_BEFORE_BRIDGE] numberId=${numberId} — restore retry limit exhausted; ` +
+          `marking failed, preserving auth files`,
+        );
+        await this._destroyClient(numberId, state);
+        this._transitionState(numberId, state, 'failed', 'restore_retry_exhausted');
+        await this._updateNumberWaState(numberId, 'failed');
+        state.qrSubject.next(JSON.stringify({ type: 'error', reason: 'restore_retry_exhausted', timestamp: new Date().toISOString() }));
+        return;
+      }
+
+      throw promiseErr;
+    }
 
     if (state.terminating) {
       this.logger.log(`[WA_CLEANUP] ${numberId} — init aborted due to teardown`);
       return;
     }
     this.logger.log(`[WA_INIT] init lock released — ${numberId} — client live, awaiting user action`);
+    this.logger.log(`[WA_INIT_EXIT] numberId=${numberId} waState=${state.waState} elapsed=${Date.now() - initStart}ms ts=${new Date().toISOString()}`);
+    // [WA_ISOLATION] init_completed — log final state and all clients post-init.
+    this._logIsolation('init_completed', numberId, {
+      waState:               state.waState,
+      bridgeEstablished,
+      activeClientsSnapshot: this._clientsSnapshot(),
+    });
+
+    // Post-init stuck guard: loading_screen (the most common first event during a session
+    // restore) releases the init lock and clears the boot timeout, but does NOT advance
+    // waState. If no subsequent WA event (qr / authenticated / ready) fires, the number
+    // stays 'initializing' indefinitely — the watchdog skips non-ready states and the
+    // disconnected('') handler defers when waState=initializing. This guard is the only
+    // safety net once the boot timeout has been cleared.
+    if (state.waState === 'initializing' && !state.destroyed) {
+      const postInitGuardMs = BOOT_TIMEOUT_MS;
+      this.logger.warn(
+        `[WA_INIT_STUCK] numberId=${numberId} — still initializing after init lock released; ` +
+        `arming ${postInitGuardMs / 1000}s post-init stuck-guard bridgeEstablished=${bridgeEstablished}`,
+      );
+      state.postInitGuardId = setTimeout(() => {
+        state.postInitGuardId = null;
+        if (state.waState === 'initializing' && !state.destroyed && !state.terminating) {
+          if (!bridgeEstablished) {
+            // Bridge was never established — Chrome event bridge does not exist.
+            // Preserve auth files: credentials may still be valid; failure was a navigation
+            // race during inject(), not a server-side session invalidation.
+            this.logger.error(
+              `[WA_INIT_FAILED_BEFORE_BRIDGE] numberId=${numberId} — stuck in initializing; ` +
+              `bridge never established — marking failed, preserving auth`,
+            );
+            this._transitionState(numberId, state, 'failed', 'post_init_stuck_no_bridge');
+            this._updateNumberWaState(numberId, 'failed').catch(() => {});
+            state.qrSubject.next(JSON.stringify({ type: 'error', reason: 'post_init_stuck_no_bridge', timestamp: new Date().toISOString() }));
+          } else {
+            this.logger.error(
+              `[WA_INIT_STUCK] numberId=${numberId} — stuck in initializing for ` +
+              `${postInitGuardMs / 1000}s after first event with no state advance — forcing invalidation`,
+            );
+            this.forceInvalidateSession(numberId, 'post_init_stuck_initializing').catch(() => {});
+          }
+        }
+      }, postInitGuardMs);
+    }
 
     // ── Chromium disconnect detection ─────────────────────────────────────────
     // pupBrowser is available after first event (Chromium is running at this point)
@@ -1071,9 +1862,8 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
           return;
         }
         if (state.manualDisconnect || state.destroyed) return;
-        this.logger.warn(`[WA_BROWSER_DISCONNECT] ${numberId} — unexpected disconnect, invalidating session`);
-        // Stability rule: browser gone → invalidate session, no auto-reconnect.
-        this.forceInvalidateSession(numberId, 'browser_disconnected').catch(() => {});
+        this.logger.warn(`[WA_BROWSER_DISCONNECT] ${numberId} — unexpected disconnect, scheduling reconnect`);
+        this._scheduleReconnect(numberId, state, 'browser_disconnected');
       });
       this.logger.log(`[WA_INIT_STAGE] browser_disconnect_listener_attached numberId=${numberId}`);
     } else {
@@ -1083,20 +1873,78 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   // ── Private helpers ───────────────────────────────────────────────────────────
 
-  // ── Sequential init lock ─────────────────────────────────────────────────────
-  // Ensures only one Chromium process is launching at a time. Additional inits queue
-  // and execute in order once the current one resolves or rejects.
+  // ── Auto-reconnect without auth wipe ─────────────────────────────────────────
+  // Called instead of forceInvalidateSession for transient disconnects (WA server
+  // disconnect, Chromium crash). Preserves LocalAuth files so the next attempt can
+  // restore the session silently. Falls back to forceInvalidateSession only after
+  // MAX_AUTO_RECONNECTS consecutive failures, or if teardown itself throws.
+  private _scheduleReconnect(numberId: string, state: NumberClientState, reason: string): void {
+    if (state.autoReconnectAttempts >= MAX_AUTO_RECONNECTS) {
+      this.logger.warn(
+        `[WA_RECONNECT_LIMIT] numberId=${numberId} attempt=${state.autoReconnectAttempts} ` +
+        `— limit reached after "${reason}"; falling back to full invalidation`,
+      );
+      this.forceInvalidateSession(numberId, reason).catch(() => {});
+      return;
+    }
+
+    state.autoReconnectAttempts++;
+    this.logger.log(
+      `[WA_RECONNECT_SCHEDULED] numberId=${numberId} attempt=${state.autoReconnectAttempts}/${MAX_AUTO_RECONNECTS} ` +
+      `reason="${reason}" delay=${RECONNECT_DELAY_MS / 1000}s — auth files preserved`,
+    );
+
+    state.terminating = true;
+    this._clearTimers(state);
+
+    (async () => {
+      try {
+        await this._destroyClient(numberId, state);
+        await this._updateNumberWaState(numberId, 'idle');
+        this._transitionState(numberId, state, 'idle', 'reconnect_teardown');
+        state.lastDisconnectedAt = new Date();
+        state.terminating = false;
+
+        state.reconnectTimerId = setTimeout(() => {
+          state.reconnectTimerId = null;
+          if (state.destroyed || state.terminating) return;
+          this.logger.log(
+            `[WA_RECONNECT_ATTEMPT] numberId=${numberId} attempt=${state.autoReconnectAttempts}/${MAX_AUTO_RECONNECTS}`,
+          );
+          this.connectNumber(numberId).catch((e: any) => {
+            this.logger.error(`[WA_RECONNECT_FAILED] numberId=${numberId} error="${e?.message}"`);
+          });
+        }, RECONNECT_DELAY_MS);
+      } catch (e: any) {
+        this.logger.error(`[WA_RECONNECT_TEARDOWN_FAILED] numberId=${numberId} error="${e?.message}"`);
+        state.terminating = false;
+        this.forceInvalidateSession(numberId, reason).catch(() => {});
+      }
+    })();
+  }
+
+  // ── Per-number init lock ─────────────────────────────────────────────────────
+  // Ensures only one Chromium process is launching per number at a time.
+  // Different numbers can launch concurrently — they hold independent locks.
   private _withInitLock(numberId: string, fn: () => Promise<void>): Promise<void> {
     let resolveSlot!: () => void;
     const slot = new Promise<void>((r) => { resolveSlot = r; });
-    const previous = this._initQueue;
-    this._initQueue = slot;
+    const previous = this._initLocks.get(numberId) ?? Promise.resolve();
+    this._initLocks.set(numberId, slot);
     return previous.then(async () => {
-      this.logger.log(`[WA_LOCK] ${numberId} — acquired init lock`);
+      this.logger.log(`[WA_INIT_LOCK_ACQUIRED] numberId=${numberId} — lock acquired, starting init`);
+      // [WA_ISOLATION] lock_acquired — confirm no other number holds a lock for this slot.
+      this._logIsolation('lock_acquired', numberId, {
+        pendingLockCount: this._initLocks.size,
+      });
       try {
         await fn();
       } finally {
-        this.logger.log(`[WA_LOCK] ${numberId} — released init lock`);
+        this.logger.log(`[WA_INIT_LOCK_RELEASED] numberId=${numberId} — init lock released`);
+        // [WA_ISOLATION] lock_released
+        this._logIsolation('lock_released', numberId, {
+          pendingLockCount: this._initLocks.size,
+        });
         resolveSlot();
       }
     });
@@ -1105,15 +1953,31 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
   // Destroys a client and nulls refs — safe to call when client is already null.
   // destroying flag prevents concurrent calls from racing.
   private async _destroyClient(numberId: string, state: NumberClientState): Promise<void> {
+    this.logger.log(
+      `[WA_DESTROY_REASON] numberId=${numberId} duringState=${state.waState} ` +
+      `terminating=${state.terminating} manualDisconnect=${state.manualDisconnect} ` +
+      `browserConnected=${!!(state.client?.pupBrowser?.isConnected?.())}`,
+    );
     const client = state.client;
     if (!client) { this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — no client, skip`); return; }
     if (state.destroying) { this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — already destroying, skip`); return; }
     state.destroying = true;
+    // [WA_ISOLATION] client_removed — null the client ref; log snapshot before destruction.
+    this._logIsolation('client_removed', numberId, {
+      waState:               state.waState,
+      activeClientsSnapshot: this._clientsSnapshot(),
+    });
     state.client = null;
+    state.listenersAttached = false;
     state.lastHeartbeat = null;
     this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — removing listeners`);
     try { client.removeAllListeners(); } catch { }
     this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — calling client.destroy()`);
+    // [WA_ISOLATION] browser_destroyed — Chromium process is about to be killed.
+    this._logIsolation('browser_destroyed', numberId, {
+      waState:               state.waState,
+      browserWasConnected:   !!(client?.pupBrowser?.isConnected?.()),
+    });
     try { await client.destroy(); } catch { }
     this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — done`);
     state.destroying = false;
@@ -1128,17 +1992,68 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     return this.clients.get(numberId)!;
   }
 
-  private _transitionState(numberId: string, state: NumberClientState, next: WaState): void {
+  // Returns true when the transition current → next is a valid forward move.
+  // Rules (in priority order):
+  //   1. Same state → false (no-op).
+  //   2. → disconnecting: always allowed — teardown can be triggered from any state.
+  //   3. → idle: always allowed — only teardown paths (forceInvalidateSession, disconnectNumber,
+  //      resetNumber) ever call _transitionState(idle), so this is safe.
+  //   4. disconnecting → anything except idle: blocked (teardown overlay exits only to idle).
+  //   5. failed → anything except idle: blocked (failed is terminal; reset/invalidate → idle).
+  //   6. Monotonic rank check: next rank must be strictly greater than current rank.
+  //      This catches all backward regressions including ready → authenticating.
+  private _canTransition(current: WaState, next: WaState): boolean {
+    if (current === next) return false;
+    if (next === 'disconnecting') return true;
+    if (next === 'idle') return true;
+    if (current === 'disconnecting') return false;
+    if (current === 'failed') return false;
+    const currentRank = WA_STATE_ORDER[current] ?? -1;
+    const nextRank    = WA_STATE_ORDER[next]    ?? -1;
+    return nextRank > currentRank;
+  }
+
+  private _transitionState(numberId: string, state: NumberClientState, next: WaState, reason = 'unspecified'): void {
     const prev = state.waState;
     if (prev === next) return;
+
+    if (!this._canTransition(prev, next)) {
+      this.logger.warn(
+        `[WA_STATE_REGRESSION_BLOCKED] ${JSON.stringify({ id: numberId, prev, attempted: next, reason, ts: new Date().toISOString() })}`,
+      );
+      return;
+    }
+
+    // Session-restore note: some wwebjs versions skip 'authenticated' for saved sessions and emit
+    // 'ready' directly from 'initializing'. Log the unusual path — transition is valid (forward move).
+    if (next === 'ready' && prev === 'initializing') {
+      this.logger.warn(
+        `[WA_READY_FROM_INITIALIZING] ${numberId} — ready fired without prior authenticated event ` +
+        `(session-restore shortcut) reason=${reason} ts=${new Date().toISOString()}`,
+      );
+    }
+
     state.waState = next;
-    state.qrSubject.next(JSON.stringify({ type: 'state_change', state: next, prev, timestamp: new Date().toISOString() }));
+    this.logger.log(`[WA_STATE_TRANSITION] ${JSON.stringify({ id: numberId, prev, next, reason, timestamp: new Date().toISOString() })}`);
+    state.qrSubject.next(JSON.stringify({ type: 'state_change', state: next, prev, reason, timestamp: new Date().toISOString() }));
   }
 
   private _clearTimers(state: NumberClientState, stopWatchdog = false): void {
     if (state.authTimeoutId) {
       clearTimeout(state.authTimeoutId);
       state.authTimeoutId = null;
+    }
+    if (state.readyWatchdogTimeoutId) {
+      clearTimeout(state.readyWatchdogTimeoutId);
+      state.readyWatchdogTimeoutId = null;
+    }
+    if (state.postInitGuardId) {
+      clearTimeout(state.postInitGuardId);
+      state.postInitGuardId = null;
+    }
+    if (state.reconnectTimerId) {
+      clearTimeout(state.reconnectTimerId);
+      state.reconnectTimerId = null;
     }
     if (stopWatchdog && state.watchdogTimer) {
       clearInterval(state.watchdogTimer);
@@ -1166,6 +2081,68 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     return path.join(process.cwd(), WA_AUTH_DATA_PATH, `session-marketing-${numberId}`);
   }
 
+  /**
+   * Returns true only when the LocalAuth directory contains evidence that WhatsApp Web
+   * actually authenticated in this Chrome profile. Folder existence alone is NOT sufficient:
+   * Chromium creates the full profile directory on its very first launch, even during a
+   * QR-scan flow that the user never completed. That leaves a bare Chrome profile on disk
+   * which is mistaken for a restorable session.
+   *
+   * Two authoritative signals (either is sufficient):
+   *   1. blob dir — created by WA when it stores encrypted credential blobs (WANoiseInfo,
+   *      media keys). Written only after successful authentication; never present for an
+   *      unauthenticated Chrome profile.
+   *   2. .ldb files — leveldb compacts write-ahead .log files into .ldb sstable files once
+   *      real data is committed. An unauthenticated profile's WA leveldb contains only the
+   *      initial .log file (0 .ldb). Multiple .ldb files indicate actual WA session data.
+   */
+  private _hasRestorableSession(numberId: string): boolean {
+    const sessionDir = this._getSessionDir(numberId);
+    if (!fs.existsSync(sessionDir)) {
+      this.logger.warn(
+        `[WA_SESSION_DIAG] numberId=${numberId} blobExists=false ldbExists=false ` +
+        `leveldbDir=n/a waBase=n/a`,
+      );
+      return false;
+    }
+
+    const waBase = path.join(sessionDir, 'Default', 'IndexedDB', 'https_web.whatsapp.com_0.indexeddb');
+
+    // Signal 1: blob directory — authoritative WA auth credential storage
+    const blobExists = fs.existsSync(`${waBase}.blob`);
+
+    // Signal 2: compacted leveldb .ldb files — real WA session data was written
+    const leveldbDir = `${waBase}.leveldb`;
+    let ldbExists = false;
+    if (fs.existsSync(leveldbDir)) {
+      try {
+        ldbExists = fs.readdirSync(leveldbDir).some((f) => f.endsWith('.ldb'));
+      } catch {
+        ldbExists = false;
+      }
+    }
+
+    // Both signals required — either alone indicates a partial/corrupted profile.
+    // blob-only: leveldb was wiped; ldb-only: blob dir never written (session incomplete).
+    if (!blobExists || !ldbExists) {
+      this.logger.warn(
+        `[WA_SESSION_INVALID] numberId=${numberId} reason=missing_blob_storage ` +
+        `blobExists=${blobExists} ldbExists=${ldbExists} — treating as non-restorable`,
+      );
+      this.logger.warn(
+        `[WA_SESSION_DIAG] numberId=${numberId} blobExists=${blobExists} ldbExists=${ldbExists} ` +
+        `leveldbDir=${leveldbDir} waBase=${waBase}`,
+      );
+      return false;
+    }
+
+    this.logger.warn(
+      `[WA_SESSION_DIAG] numberId=${numberId} blobExists=${blobExists} ldbExists=${ldbExists} ` +
+      `leveldbDir=${leveldbDir} waBase=${waBase}`,
+    );
+    return true;
+  }
+
   private async _cleanupInvalidInboxRows(): Promise<void> {
     this.logger.log(
       '[MKT_INBOX_CLEANUP_START] entity=WhatsappReply table=whatsapp_replies — ' +
@@ -1173,9 +2150,11 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     );
     try {
       // Delete rows with invalid customer_phone:
-      //   - contains '@lid' or '@'
-      //   - digit count < 10 or > 15
+      //   - contains '@' (raw JID identifiers)
+      //   - digit count outside 10–15
       //   - null / empty
+      //   - "+1..." longer than 12 chars (WA @lid numeric IDs stored as US numbers)
+      //   - "+20..." longer than 13 chars (WA @lid numeric IDs stored as Egypt numbers)
       const phoneResult = await this.ds.query<{ deleted: string }[]>(`
         WITH deleted AS (
           DELETE FROM whatsapp_replies
@@ -1186,6 +2165,8 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
             OR customer_phone NOT LIKE '+%'
             OR LENGTH(REGEXP_REPLACE(customer_phone, '[^0-9]', '', 'g')) < 10
             OR LENGTH(REGEXP_REPLACE(customer_phone, '[^0-9]', '', 'g')) > 15
+            OR (customer_phone LIKE '+1%'  AND LENGTH(customer_phone) > 12)
+            OR (customer_phone LIKE '+20%' AND LENGTH(customer_phone) > 13)
           RETURNING id
         )
         SELECT COUNT(*)::text AS deleted FROM deleted
@@ -1274,6 +2255,11 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     try {
       const state = this.clients.get(numberId);
       if (state) {
+        if (!['idle', 'disconnecting'].includes(state.waState)) {
+          state.reconnectCount++;
+          state.lastDisconnectedAt = new Date();
+          state.sessionStartedAt = null;
+        }
         state.terminating = true;
         this._clearTimers(state);
         await this._destroyClient(numberId, state);
@@ -1289,12 +2275,14 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       await this._updateNumberWaState(numberId, 'idle', reason);
 
       if (state) {
-        this._transitionState(numberId, state, 'idle');
+        this._transitionState(numberId, state, 'idle', reason);
         state.qrDataUrl = null;
         state.qrGeneratedAt = null;
+        state.firstQrGeneratedAt = null;
         state.terminating = false;
         state.destroying = false;
         state.starting = false;
+        state.autoReconnectAttempts = 0;
       }
 
       this.logger.log(`[WA_FORCE_INVALIDATE_DONE] ${JSON.stringify({ id: numberId, reason, ts: new Date().toISOString() })}`);
@@ -1303,6 +2291,89 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     } finally {
       this._invalidatingIds.delete(numberId);
     }
+  }
+
+  // ── Isolation instrumentation helpers ────────────────────────────────────────
+  // TEMPORARY — diagnostic only. No logic changes. Remove after validation phase.
+
+  /** Emits a [WA_ISOLATION] structured log with full snapshot context. */
+  private _logIsolation(event: string, numberId: string, extra: Record<string, unknown> = {}): void {
+    const phone = this._phoneCache.get(numberId) ?? 'n/a';
+    const activeBrowserCount = [...this.clients.values()]
+      .filter((s) => !!(s.client?.pupBrowser?.isConnected?.())).length;
+    const sessionPath = this._getSessionDir(numberId);
+    this.logger.log(
+      `[WA_ISOLATION] ${JSON.stringify({
+        event,
+        numberId,
+        phone,
+        memoryClientCount: this.clients.size,
+        activeBrowserCount,
+        sessionPath,
+        ts: new Date().toISOString(),
+        ...extra,
+      })}`,
+    );
+  }
+
+  /**
+   * Emits [WA_ISOLATION_VIOLATION] if any other number is mid-teardown during a
+   * connect operation, or if two numbers resolve to the same session folder.
+   * This is a warning — it does NOT block the operation.
+   */
+  private _checkIsolationViolations(requestedId: string, operation: string): void {
+    const requestedPath = this._getSessionDir(requestedId);
+    for (const [otherId, s] of this.clients) {
+      if (otherId === requestedId) continue;
+
+      // Concurrent teardown on a different number while a connect is in progress.
+      // Theoretically harmless (all state is keyed by numberId) but worth tracking.
+      if (s.terminating || s.destroying) {
+        this.logger.warn(
+          `[WA_ISOLATION_VIOLATION] ${JSON.stringify({
+            type: 'concurrent_teardown_on_connect',
+            requestedNumberId: requestedId,
+            requestedPhone:    this._phoneCache.get(requestedId) ?? 'n/a',
+            affectedNumberId:  otherId,
+            affectedPhone:     this._phoneCache.get(otherId)     ?? 'n/a',
+            affectedWaState:   s.waState,
+            flags: { terminating: s.terminating, destroying: s.destroying },
+            operation,
+            ts: new Date().toISOString(),
+          })}`,
+        );
+      }
+
+      // Session-folder collision — should never happen because clientId is per-number.
+      const otherPath = this._getSessionDir(otherId);
+      if (requestedPath === otherPath) {
+        this.logger.error(
+          `[WA_ISOLATION_VIOLATION] ${JSON.stringify({
+            type: 'SESSION_FOLDER_COLLISION',
+            requestedNumberId: requestedId,
+            affectedNumberId:  otherId,
+            sharedPath:        requestedPath,
+            operation,
+            ts: new Date().toISOString(),
+          })}`,
+        );
+      }
+    }
+  }
+
+  /** Returns a compact snapshot of all in-map clients for inclusion in isolation logs. */
+  private _clientsSnapshot(): Array<Record<string, unknown>> {
+    return [...this.clients.entries()].map(([id, s]) => ({
+      id,
+      phone:        this._phoneCache.get(id) ?? 'n/a',
+      waState:      s.waState,
+      clientExists: !!s.client,
+      browserAlive: !!(s.client?.pupBrowser?.isConnected?.()),
+      terminating:  s.terminating,
+      destroying:   s.destroying,
+      starting:     s.starting,
+      hasReconnectTimer: !!s.reconnectTimerId,
+    }));
   }
 
   // Returns the number ID that currently holds the active session slot, or null.
@@ -1354,7 +2425,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       whatsappTitle,
       navigatorOnline,
       visibilityState,
-      qrActive:        state?.waState === 'qr_ready',
+      qrActive:        state?.waState === 'awaiting_scan',
       lastReadyAt:     state?.lastReadyAt?.toISOString()   ?? null,
       lastHeartbeatAt: state?.lastHeartbeat?.toISOString() ?? null,
       authFolderExists,
@@ -1373,7 +2444,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
   }
 
   private _getActiveNumberId(): string | null {
-    const ACTIVE: WaState[] = ['booting', 'qr_ready', 'authenticating', 'ready'];
+    const ACTIVE: WaState[] = ['initializing', 'awaiting_scan', 'authenticating', 'ready'];
     for (const [id, s] of this.clients) {
       if (ACTIVE.includes(s.waState)) return id;
     }

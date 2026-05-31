@@ -6,7 +6,7 @@ import {
   UpdateDateColumn,
   Index,
 } from 'typeorm';
-import { CTAType, MessageType } from './enums';
+import { CTAType, MessageType, TemplateMode } from './enums';
 
 @Entity('marketing_templates')
 @Index('idx_mt_is_active', ['is_active'])
@@ -46,6 +46,27 @@ export class MarketingTemplate {
 
   @Column({ type: 'varchar', nullable: true })
   product_category: string | null;
+
+  @Column({ type: 'varchar', default: TemplateMode.MANUAL })
+  template_mode: TemplateMode;
+
+  @Column({ type: 'boolean', default: false })
+  offer_enabled: boolean;
+
+  @Column({ type: 'varchar', nullable: true })
+  offer_title: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  offer_text: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  offer_start_date: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  offer_end_date: Date | null;
+
+  @Column({ type: 'boolean', default: false })
+  is_auto: boolean;
 
   @Column({ type: 'boolean', default: true })
   is_active: boolean;

@@ -2,11 +2,13 @@ import { Injectable, Logger } from '@nestjs/common';
 import { OnEvent } from '@nestjs/event-emitter';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { InboxService } from './inbox.service';
 import { AudienceAiService } from '../ai/audience-ai.service';
 import { LeadSource } from '../../../crm/entities/lead.entity';
 import { MessageType } from '../entities/enums';
+import { WhatsappMessageLog } from '../entities/whatsapp-message-log.entity';
 
 @Injectable()
 export class ReplyIntelligenceService {
@@ -18,6 +20,8 @@ export class ReplyIntelligenceService {
   constructor(
     @InjectDataSource()
     private readonly ds: DataSource,
+    @InjectRepository(WhatsappMessageLog)
+    private readonly logRepo: Repository<WhatsappMessageLog>,
     private readonly inboxService: InboxService,
     private readonly eventEmitter: EventEmitter2,
     private readonly audienceAi: AudienceAiService,
@@ -33,7 +37,7 @@ export class ReplyIntelligenceService {
     name?: string;
     numberId?: string;
   }): Promise<void> {
-    const { phone, body, chatId, name } = payload;
+    const { phone, body, chatId, name, numberId } = payload;
 
     // Hard gate — last-resort firewall before any DB write, websocket, or lead creation.
     // Rejects: empty, @-containing strings, <10 digits, >15 digits, or non-E164 patterns.
@@ -59,10 +63,28 @@ export class ReplyIntelligenceService {
         message: body,
         message_type: MessageType.TEXT,
         received_at: new Date(),
+        number_id: numberId ?? null,
       });
       this.logger.log(`[MKT_INBOX_DB_SAVE] phone=${phone} message="${body.slice(0, 80)}"`);
     } catch (err: any) {
       this.logger.warn(`[ReplyIntelligence] Failed to save reply for ${phone}: ${err?.message}`);
+    }
+
+    // 1b. Link reply back to the most recent sent log row for this phone
+    try {
+      const recentLog = await this.logRepo.findOne({
+        where: { customer_phone: phone },
+        order: { sent_at: 'DESC' },
+      });
+      if (recentLog) {
+        await this.logRepo.update(recentLog.id, {
+          reply_received: true,
+          reply_message: body.slice(0, 500),
+        });
+        this.logger.log(`[MKT_INBOX_LOG_LINKBACK] log_id=${recentLog.id} phone=${phone}`);
+      }
+    } catch (err: any) {
+      this.logger.warn(`[ReplyIntelligence] Log linkback failed for ${phone}: ${err?.message}`);
     }
 
     // 2. Classify intent

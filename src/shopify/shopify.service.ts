@@ -72,30 +72,39 @@ let syncStatus = {
   manualSync: null as SyncRecord | null,
 };
 
+export function isShopifyConfigured(): boolean {
+  return !!(process.env.SHOPIFY_STORE && process.env.SHOPIFY_ACCESS_TOKEN);
+}
+
 export function getSyncStatus() {
-  return { ...syncStatus };
+  return { ...syncStatus, shopifyConfigured: isShopifyConfigured() };
 }
 
 // ── Classify axios/network errors into readable operational messages ─────────
 function classifyError(err: any): string {
+  const msg    = err?.message ?? '';
   const code   = err?.code ?? '';
   const status = err?.response?.status ?? 0;
-  if (code === 'ECONNABORTED' || code === 'ETIMEDOUT' || (err?.message ?? '').includes('timeout')) {
+  // Configuration missing — check this first so it is never masked by other branches
+  if (msg.includes('SHOPIFY_STORE') || msg.includes('SHOPIFY_ACCESS_TOKEN') || !isShopifyConfigured()) {
+    return 'Shopify not configured — set SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN on the server (see ecosystem.config.js)';
+  }
+  if (code === 'ECONNABORTED' || code === 'ETIMEDOUT' || msg.includes('timeout')) {
     return 'Shopify API timeout — network slow or Shopify unreachable';
   }
   if (status === 401 || status === 403) {
-    return 'Authentication failed — verify SHOPIFY_ACCESS_TOKEN in .env';
+    return 'Authentication failed — verify SHOPIFY_ACCESS_TOKEN is correct';
   }
   if (status === 429) {
     return 'Rate limited by Shopify API — retry in a few minutes';
   }
   if (code === 'ENOTFOUND' || code === 'ECONNREFUSED') {
-    return 'Cannot reach Shopify — check network or SHOPIFY_STORE in .env';
+    return 'Cannot reach Shopify — check network or SHOPIFY_STORE value';
   }
   if (status >= 500) {
     return `Shopify server error (HTTP ${status}) — may be a temporary outage`;
   }
-  return err?.message ?? 'Unknown sync error';
+  return msg || 'Unknown sync error';
 }
 
 @Injectable()

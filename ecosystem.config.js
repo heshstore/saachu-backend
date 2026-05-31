@@ -16,6 +16,15 @@ module.exports = {
         // Default (/usr/bin/google-chrome-stable) works after: apt install google-chrome-stable
         // CHROME_PATH: '/usr/bin/google-chrome-stable',
 
+        // ── Shopify integration ────────────────────────────────────────────────
+        // REQUIRED for Shopify catalog sync. These vars are NOT in .env (gitignored).
+        // Set them here OR export them as system env vars before running pm2 start.
+        // Without these, sync endpoints return "Shopify not configured" and the
+        // dashboard chip shows a warning instead of crashing.
+        //
+        // SHOPIFY_STORE: 'your-store.myshopify.com',       // ← uncomment + fill
+        // SHOPIFY_ACCESS_TOKEN: 'shpat_xxxxxxxxxxxx',      // ← uncomment + fill
+
         // Phase 8 — Production Pilot (real audience, tighter limits, pilot safety active)
         WHATSAPP_ENGINE_ENABLED: 'true',
         WHATSAPP_ENGINE_DRY_RUN: 'false',

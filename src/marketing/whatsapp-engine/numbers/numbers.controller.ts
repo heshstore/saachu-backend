@@ -9,6 +9,7 @@ import {
   Sse,
   MessageEvent,
   HttpCode,
+  Logger,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { NumbersService } from './numbers.service';
@@ -17,14 +18,20 @@ import { WhatsappNumber } from '../entities/whatsapp-number.entity';
 
 @Controller('marketing/whatsapp-engine/numbers')
 export class NumbersController {
+  private readonly logger = new Logger(NumbersController.name);
+
   constructor(
     private readonly numbersService: NumbersService,
     private readonly marketingWa: MarketingWhatsAppService,
   ) {}
 
   @Get()
-  findAll() {
-    return this.numbersService.findAll();
+  async findAll() {
+    const numbers = await this.numbersService.findAll();
+    return numbers.map((n) => ({
+      ...n,
+      ...this.marketingWa.getNumberWaStatus(n.id),
+    }));
   }
 
   @Get(':id')
@@ -81,8 +88,10 @@ export class NumbersController {
   @Post(':id/connect')
   @HttpCode(200)
   async connect(@Param('id') id: string) {
+    this.logger.warn(`[CONNECT_ENDPOINT_HIT] numberId=${id} ts=${new Date().toISOString()}`);
     await this.numbersService.findOne(id); // 404 guard
     await this.marketingWa.connectNumber(id);
+    this.logger.warn(`[CONNECT_ENDPOINT_DONE] numberId=${id} ts=${new Date().toISOString()}`);
     return { ok: true, message: 'Connect initiated — scan QR at /numbers/:id/qr' };
   }
 

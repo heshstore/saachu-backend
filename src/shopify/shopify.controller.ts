@@ -1,5 +1,5 @@
 import { Controller, Get, Post, Param, Logger } from '@nestjs/common';
-import { ShopifyService, getSyncStatus } from './shopify.service';
+import { ShopifyService, getSyncStatus, isShopifyConfigured } from './shopify.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
 @Controller('shopify')
@@ -19,6 +19,10 @@ export class ShopifyController {
   @Post('sync/start')
   @RequirePermission('item.shopify_sync')
   startSync() {
+    if (!isShopifyConfigured()) {
+      this.logger.warn('[SHOPIFY] startSync called but Shopify env vars are not configured');
+      return { started: false, reason: 'Shopify not configured — set SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN on the server' };
+    }
     const current = getSyncStatus();
     if (current.status === 'running') {
       this.logger.warn('[SHOPIFY] startSync called but sync already running — attaching caller to existing run');

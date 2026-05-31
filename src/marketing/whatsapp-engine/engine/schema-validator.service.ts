@@ -21,6 +21,7 @@ const REQUIRED_COLUMNS: Record<string, string[]> = {
   whatsapp_message_queue: ['attempt_count', 'priority', 'message_payload', 'number_id'],
   whatsapp_message_logs:  ['delivered_at', 'read_at', 'reply_received', 'reply_message', 'number_id'],
   engine_audit_logs:      ['metadata', 'score'],
+  whatsapp_replies:       ['conversation_key'],
 };
 
 // Probing queries — each one selects only the critical column(s) with LIMIT 0.
