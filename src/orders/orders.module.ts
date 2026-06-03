@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CrmWhatsAppModule } from '../crm-whatsapp/crm-whatsapp.module';
+import { TransactionalEmailModule } from '../email-transactional/transactional-email.module';
 
 import { OrdersService } from './orders.service';
 import { OrdersController } from './orders.controller';
@@ -32,6 +33,7 @@ import { ProductionCommandService } from './production-command.service';
       Customer, User,
     ]),
     CrmWhatsAppModule,
+    TransactionalEmailModule,
   ],
   controllers: [OrdersController, ProductionController, PaymentsController, AccountsController],
   providers: [OrdersService, PaymentService, ProductionService, ProductionWhatsappService, ProductionCommandService, OrderExplosionService],

@@ -132,6 +132,11 @@ interface NumberClientState {
   qrRefreshCount: number;
   sessionStartedAt: Date | null;
   lastDisconnectedAt: Date | null;
+  // Cached result of _hasRestorableSession() — updated at lifecycle events only, never during polling.
+  // Eliminates repeated filesystem I/O from health-endpoint calls.
+  sessionAvailable: boolean;
+  // Last composite status key emitted via [WA_STATUS_RESOLVE] — suppresses duplicate log lines.
+  _lastStatusKey: string | null;
 }
 
 function makeState(): NumberClientState {
@@ -161,6 +166,8 @@ function makeState(): NumberClientState {
     qrRefreshCount: 0,
     sessionStartedAt: null,
     lastDisconnectedAt: null,
+    sessionAvailable: false,
+    _lastStatusKey: null,
   };
 }
 
@@ -407,11 +414,22 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       state = makeState();
       this.clients.set(numberId, state);
       this._startWatchdog(numberId, state);
+      // Cache session availability once at state creation — avoids repeated filesystem reads during
+      // health polls. Updated again at ready, forceInvalidateSession, and reset flows.
+      state.sessionAvailable = this._hasRestorableSession(numberId);
       // [WA_ISOLATION] New state registered — log the clients map after insertion.
       this._logIsolation('client_registered', numberId, {
         isNew: true,
         activeClientsSnapshot: this._clientsSnapshot(),
       });
+    } else if (!state.watchdogTimer) {
+      // Watchdog may have self-cleared: its setInterval callback sets watchdogTimer=null and
+      // returns when it detects state.terminating=true (set by forceInvalidateSession).
+      // forceInvalidateSession resets terminating=false at the end, but the watchdog is gone.
+      // connectNumber only calls _startWatchdog for new states, so without this guard the
+      // reconnected session runs permanently without browser-crash detection.
+      this.logger.log(`[WA_WATCHDOG_RESTART] numberId=${numberId} — watchdog was missing after prior invalidation; restarting`);
+      this._startWatchdog(numberId, state);
     }
     if (state.destroyed) {
       this.logger.warn(`[WA_INIT_SKIPPED] ${numberId} — state destroyed`);
@@ -601,6 +619,8 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       this._transitionState(numberId, state, 'idle', 'manual_hard_reset');
       state.terminating = false;
       state.destroying = false;
+      state.sessionAvailable = false;
+      state._lastStatusKey = null;
     }
 
     this.logger.log(`[MKT_RESET] true reset complete — phone must re-scan QR — ${numberId}`);
@@ -883,7 +903,6 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     liveAndReady: boolean;
   } {
     const state = this.clients.get(numberId);
-    const sessionAvailable = this._hasRestorableSession(numberId);
 
     // clientExists: the WA client object is alive in memory (not destroyed/null).
     // browserConnected: the Chrome DevTools WebSocket is open (browser process running).
@@ -893,9 +912,12 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       : false;
 
     if (!state) {
-      this.logger.log(`[WA_STATUS_RESOLVE] ${JSON.stringify({ id: numberId, memoryState: 'none', sessionAvailable, browserConnected: false, clientExists: false, finalState: 'idle' })}`);
-      return { waState: 'idle', effectiveState: 'idle', connected: false, booting: false, qrActive: false, lastHeartbeat: null, lastReadyAt: null, browserConnected: false, clientExists: false, reconnectCount: 0, qrRefreshCount: 0, sessionStartedAt: null, lastDisconnectedAt: null, firstQrGeneratedAt: null, sessionAvailable, liveAndReady: false };
+      return { waState: 'idle', effectiveState: 'idle', connected: false, booting: false, qrActive: false, lastHeartbeat: null, lastReadyAt: null, browserConnected: false, clientExists: false, reconnectCount: 0, qrRefreshCount: 0, sessionStartedAt: null, lastDisconnectedAt: null, firstQrGeneratedAt: null, sessionAvailable: false, liveAndReady: false };
     }
+
+    // Read cached session availability — populated at state creation, ready event, and auth wipes.
+    // Never calls _hasRestorableSession() here to avoid filesystem I/O on every health poll.
+    const sessionAvailable = state.sessionAvailable;
 
     const memoryState: WaState = state.waState;
 
@@ -916,8 +938,11 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       ? 'ready'
       : memoryState;
 
-    // Only log when something non-trivial is happening (avoids 15s-interval log spam).
-    if (memoryState !== 'idle') {
+    // Only log when the combined status actually changed — prevents identical lines on every
+    // health poll. The key encodes every value visible in the log so any real change is captured.
+    const statusKey = `${memoryState}:${String(connected)}:${String(liveAndReady)}:${String(browserConnected)}`;
+    if (memoryState !== 'idle' && state._lastStatusKey !== statusKey) {
+      state._lastStatusKey = statusKey;
       this.logger.log(`[WA_STATUS_RESOLVE] ${JSON.stringify({
         id: numberId, memoryState, browserConnected, clientExists,
         destroyed: state.destroyed, liveAndReady, connected,
@@ -1322,6 +1347,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`[WA_QR_LOOP_STOPPED] numberId=${numberId} trigger=ready qrRefreshCount=${state.qrRefreshCount}`);
       state.lastReadyAt = new Date();
       state.sessionStartedAt = state.sessionStartedAt ?? new Date();
+      state.sessionAvailable = true;
       this._transitionState(numberId, state, 'ready', 'ready_event');
       this.logger.log(`[WA_READY_LOCK] numberId=${numberId} — session ready; future QR events will be suppressed`);
       this.logger.log(`[WA_READY_DEBUG] state_transitioned — ${numberId} waState=${state.waState}`);
@@ -2283,6 +2309,8 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
         state.destroying = false;
         state.starting = false;
         state.autoReconnectAttempts = 0;
+        state.sessionAvailable = false;
+        state._lastStatusKey = null;
       }
 
       this.logger.log(`[WA_FORCE_INVALIDATE_DONE] ${JSON.stringify({ id: numberId, reason, ts: new Date().toISOString() })}`);

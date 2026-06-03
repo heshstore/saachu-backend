@@ -6,12 +6,14 @@ import { Quotation } from './quotation.entity';
 import { QuotationItem } from './quotation-item.entity';
 import { OrdersModule } from '../orders/orders.module';
 import { ItemsModule } from '../items/items.module';
+import { TransactionalEmailModule } from '../email-transactional/transactional-email.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Quotation, QuotationItem]),
     forwardRef(() => OrdersModule),
     ItemsModule,
+    TransactionalEmailModule,
   ],
   controllers: [QuotationController],
   providers: [QuotationService],

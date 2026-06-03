@@ -3,7 +3,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, LessThan } from 'typeorm';
 import { Interval } from '@nestjs/schedule';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
-import { QueueStatus } from '../entities/enums';
+import { MarketingCampaign } from '../entities/marketing-campaign.entity';
+import { QueueStatus, CampaignStatus } from '../entities/enums';
 import { EngineAuditService, AuditEvent } from './engine-audit.service';
 
 // Items stuck in PROCESSING beyond this threshold are considered orphaned
@@ -18,6 +19,8 @@ export class ProcessingWatchdogService {
   constructor(
     @InjectRepository(WhatsappMessageQueue)
     private readonly queueRepo: Repository<WhatsappMessageQueue>,
+    @InjectRepository(MarketingCampaign)
+    private readonly campaignRepo: Repository<MarketingCampaign>,
     private readonly auditService: EngineAuditService,
   ) {}
 
@@ -31,8 +34,40 @@ export class ProcessingWatchdogService {
     this._running = true;
     try {
       await this._recoverStuckItemsInternal();
+      await this._completeDrainedCampaigns();
     } finally {
       this._running = false;
+    }
+  }
+
+  /**
+   * Auto-completes broadcast campaigns (is_promotion=false) whose queue has fully
+   * drained: no PENDING or PROCESSING items remain, and at least one SENT item exists
+   * (proving the campaign actually ran). Promotion campaigns (is_promotion=true) are
+   * excluded — they are designed to refill daily from the autonomous engine.
+   *
+   * Runs inside the existing 5-minute watchdog interval. No new cron needed.
+   */
+  private async _completeDrainedCampaigns(): Promise<void> {
+    const running = await this.campaignRepo.find({
+      where: { status: CampaignStatus.RUNNING, is_promotion: false },
+    });
+    if (!running.length) return;
+
+    for (const campaign of running) {
+      const [pending, processing, sent] = await Promise.all([
+        this.queueRepo.count({ where: { campaign_id: campaign.id, status: QueueStatus.PENDING } }),
+        this.queueRepo.count({ where: { campaign_id: campaign.id, status: QueueStatus.PROCESSING } }),
+        this.queueRepo.count({ where: { campaign_id: campaign.id, status: QueueStatus.SENT } }),
+      ]);
+
+      if (pending === 0 && processing === 0 && sent >= 1) {
+        await this.campaignRepo.update(campaign.id, { status: CampaignStatus.COMPLETED });
+        this.logger.log(
+          `[CAMPAIGN_AUTO_COMPLETED] id=${campaign.id} name="${campaign.campaign_name}" ` +
+          `sent=${sent} — broadcast queue drained, status → COMPLETED`,
+        );
+      }
     }
   }
 

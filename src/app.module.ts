@@ -57,6 +57,7 @@ import { FinanceOpsModule } from './finance-ops/finance-ops.module';
 import { WorkforceOpsModule } from './workforce-ops/workforce-ops.module';
 import { AppShutdownService } from './common/app-shutdown.service';
 import { MarketingModule } from './marketing/marketing.module';
+import { TransactionalEmailModule } from './email-transactional/transactional-email.module';
 
 const _rawDbUrl      = process.env.DATABASE_URL || '';
 const databaseUrl    = sanitizeDatabaseUrl(_rawDbUrl);
@@ -139,6 +140,7 @@ new Logger('AppModule').log(
     FinanceOpsModule,
     WorkforceOpsModule,
     MarketingModule,
+    TransactionalEmailModule,
   ],
   providers: [
     AppShutdownService,

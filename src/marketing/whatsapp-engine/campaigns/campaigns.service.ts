@@ -97,13 +97,28 @@ export class CampaignsService {
     return { campaign: await this.findOne(id), queued };
   }
 
-  async pause(id: string): Promise<MarketingCampaign> {
+  /**
+   * Pause semantics: sets campaign status to PAUSED and stops future autonomous
+   * queue builds for this campaign. It does NOT cancel existing PENDING items —
+   * the sender tick continues processing them until the queue drains.
+   * Use cancel() to immediately stop all sends (marks PENDING items as SKIPPED).
+   */
+  async pause(id: string): Promise<{ campaign: MarketingCampaign; warning: string }> {
     const campaign = await this.findOne(id);
     if (campaign.status !== CampaignStatus.RUNNING) {
       throw new BadRequestException('Campaign is not running');
     }
     await this.repo.update(id, { status: CampaignStatus.PAUSED });
-    return this.findOne(id);
+    const updated = await this.findOne(id);
+    this.logger.warn(
+      `[CAMPAIGN_PAUSED] id=${id} name="${campaign.campaign_name}" — ` +
+      `status=PAUSED. Existing PENDING queue items WILL CONTINUE TO SEND. ` +
+      `Use Cancel to immediately stop all sends (marks PENDING as SKIPPED).`,
+    );
+    return {
+      campaign: updated,
+      warning: 'Pause stops future queue creation. Existing pending messages will continue to send. Use Cancel to immediately stop all sends.',
+    };
   }
 
   async resume(id: string): Promise<{ campaign: MarketingCampaign; queued: number }> {

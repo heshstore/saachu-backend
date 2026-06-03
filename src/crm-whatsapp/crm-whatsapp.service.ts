@@ -17,8 +17,8 @@ const SESSION_NAME   = 'crm-main';
 const LOCK_FILES = ['SingletonLock', 'SingletonSocket', 'SingletonCookie', 'DevToolsActivePort'] as const;
 
 const CHROME_PATH     = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-// 60s: if no WA lifecycle event fires by then, the session is a hydration deadlock.
-const BOOT_TIMEOUT_MS = 60_000;
+// 180s: match marketing engine timeout — VPS Chrome launch can take 60-120s under load.
+const BOOT_TIMEOUT_MS = 180_000;
 
 function isValidWAPhone(raw: string): boolean {
   if (!/^\d{8,15}$/.test(raw)) return false;
@@ -436,7 +436,9 @@ export class CrmWhatsAppService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn('[WA_CONNECT] Already connected — skipped');
       return;
     }
-    this.logger.log('[WA_CONNECT] User triggered connect — clearing stale auth for fresh QR');
+    const sessionDir = this.getSessionDir();
+    const hadSession = fs.existsSync(sessionDir);
+    this.logger.log(`[WA_CONNECT] session_path=${sessionDir} had_session=${hadSession} — clearing for fresh QR`);
     // QR-first: wipe any existing LocalAuth so we always start with a clean QR scan.
     await this.clearAuthFiles().catch((e: any) =>
       this.logger.warn(`[WA_CONNECT] clearAuthFiles failed (non-fatal): ${e?.message}`),

@@ -21,6 +21,7 @@ import { MailService } from '../shared/mail.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 import { SendEmailDto } from '../shared/dto/send-email.dto';
 import { appConfig } from '../config/config';
+import { TransactionalEmailService } from '../email-transactional/transactional-email.service';
 
 @Controller('orders')
 export class OrdersController {
@@ -32,6 +33,7 @@ export class OrdersController {
     private readonly explosionService: OrderExplosionService,
     private readonly pdfService: PdfService,
     private readonly mailService: MailService,
+    private readonly transactionalEmailService: TransactionalEmailService,
   ) {}
 
   @Post()
@@ -165,106 +167,10 @@ export class OrdersController {
     @Param('id') id: string,
     @Body() body: SendEmailDto & { publicUrl?: string },
   ) {
-    const data     = await this.ordersService.findOne(Number(id));
-    const filePath = await this.pdfService.generateAndSave('order', Number(id), data);
-    const orderNo  = (data as any).order_no || (data as any).order_number || id;
-    const custName = (data as any).customer_name || 'Customer';
-    const amount   = `₹${Number((data as any).total_amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`;
-    const dateStr  = new Date((data as any).created_at || Date.now()).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-    const status   = (data as any).status || '';
-    const pdfLink  = body.publicUrl || '';
-    const co       = appConfig.companyName;
-
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="margin:0;padding:20px;background:#f1f5f9;font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
-  <div style="max-width:580px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,.1);">
-
-    <!-- Header -->
-    <div style="background:#005fb8;color:#fff;padding:22px 28px;">
-      <div style="font-size:18px;font-weight:700;">${co}</div>
-      <div style="font-size:12px;opacity:.8;margin-top:4px;">Order Confirmation</div>
-    </div>
-
-    <!-- Body -->
-    <div style="padding:28px;">
-      <p style="margin:0 0 16px;font-size:15px;">Dear <strong>${custName}</strong>,</p>
-      <p style="margin:0 0 20px;color:#475569;">Your order has been confirmed by <strong>${co}</strong>. Please find the order details below.</p>
-
-      <!-- Summary card -->
-      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:18px 20px;margin-bottom:24px;">
-        <table style="width:100%;border-collapse:collapse;font-size:14px;">
-          <tr>
-            <td style="padding:4px 0;color:#64748b;width:140px;">Order No.</td>
-            <td style="padding:4px 0;font-weight:700;color:#0f172a;">${orderNo}</td>
-          </tr>
-          <tr>
-            <td style="padding:4px 0;color:#64748b;">Date</td>
-            <td style="padding:4px 0;color:#0f172a;">${dateStr}</td>
-          </tr>
-          <tr>
-            <td style="padding:4px 0;color:#64748b;">Amount</td>
-            <td style="padding:4px 0;font-weight:700;font-size:16px;color:#005fb8;">${amount}</td>
-          </tr>
-          ${status ? `<tr>
-            <td style="padding:4px 0;color:#64748b;">Status</td>
-            <td style="padding:4px 0;font-weight:600;color:#0f172a;">${status.replace(/_/g, ' ')}</td>
-          </tr>` : ''}
-        </table>
-      </div>
-
-      ${pdfLink ? `
-      <!-- PDF link -->
-      <div style="text-align:center;margin-bottom:24px;">
-        <a href="${pdfLink}" target="_blank"
-           style="display:inline-block;background:#005fb8;color:#fff;text-decoration:none;padding:11px 28px;border-radius:6px;font-weight:600;font-size:14px;">
-          ⬇ View / Download PDF
-        </a>
-        <div style="font-size:11px;color:#94a3b8;margin-top:8px;">
-          Or copy: <a href="${pdfLink}" style="color:#3b82f6;word-break:break-all;">${pdfLink}</a>
-        </div>
-      </div>
-      ` : ''}
-
-      <p style="margin:0;color:#475569;font-size:14px;">
-        The order confirmation PDF is also attached to this email.
-      </p>
-
-      <hr style="border:none;border-top:1px solid #e2e8f0;margin:24px 0 16px;">
-      <p style="margin:0;font-size:14px;">Regards,<br><strong>${co}</strong></p>
-    </div>
-
-    <!-- Footer -->
-    <div style="background:#f8fafc;padding:12px 28px;font-size:11px;color:#94a3b8;text-align:center;border-top:1px solid #e2e8f0;">
-      This is an automated email. Please do not reply directly.
-    </div>
-  </div>
-</body>
-</html>`;
-
-    const text = [
-      `Dear ${custName},`,
-      '',
-      `Your order has been confirmed by ${co}.`,
-      '',
-      `Order No: ${orderNo}`,
-      `Date: ${dateStr}`,
-      `Amount: ${amount}`,
-      status ? `Status: ${status.replace(/_/g, ' ')}` : '',
-      pdfLink ? `\nDownload PDF:\n${pdfLink}` : '',
-      '',
-      `Regards,`,
-      co,
-    ].filter((l) => l !== null).join('\n');
-
-    await this.mailService.sendHtml({
-      to:      body.to,
-      subject: `Order Confirmation ${orderNo} from ${co}`,
-      html,
-      text,
-      pdfPath: filePath,
-    });
+    const data = await this.ordersService.findOne(Number(id));
+    await this.transactionalEmailService.sendOrderEmail(
+      Number(id), body.to, data, { publicUrl: body.publicUrl },
+    );
     return { ok: true };
   }
 }

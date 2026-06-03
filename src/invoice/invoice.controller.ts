@@ -4,6 +4,7 @@ import { InvoiceService } from './invoice.service';
 import { PdfService } from '../shared/pdf.service';
 import { MailService } from '../shared/mail.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
+import { TransactionalEmailService } from '../email-transactional/transactional-email.service';
 
 @Controller('invoice')
 export class InvoiceController {
@@ -11,6 +12,7 @@ export class InvoiceController {
     private readonly invoiceService: InvoiceService,
     private readonly pdfService: PdfService,
     private readonly mailService: MailService,
+    private readonly transactionalEmailService: TransactionalEmailService,
   ) {}
 
   @Get('test')
@@ -57,12 +59,7 @@ export class InvoiceController {
   @RequirePermission('invoice.view')
   async sendEmail(@Param('id') id: string, @Body() body: { to: string }) {
     const data = await this.invoiceService.findOne(Number(id));
-    const filePath = await this.pdfService.generateAndSave('invoice', Number(id), data);
-    await this.mailService.sendDocument(
-      body.to,
-      `Invoice ${(data as any).invoice_no || id}`,
-      filePath,
-    );
+    await this.transactionalEmailService.sendInvoiceEmail(Number(id), body.to, data);
     return { ok: true };
   }
 }
