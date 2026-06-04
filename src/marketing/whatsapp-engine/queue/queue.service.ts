@@ -132,22 +132,26 @@ export class QueueService {
 
   async markProcessing(id: string): Promise<void> {
     this.logger.log(`[MKT_QUEUE_STATUS_UPDATE] id=${id} old=PENDING new=PROCESSING`);
+    this.logger.log(`[QUEUE_AUDIT] status_transition: id=${id} PENDING→PROCESSING`);
     await this.repo.update(id, { status: QueueStatus.PROCESSING });
   }
 
   async markSent(id: string): Promise<void> {
     this.logger.log(`[MKT_QUEUE_STATUS_UPDATE] id=${id} old=PROCESSING new=SENT`);
+    this.logger.log(`[QUEUE_AUDIT] status_transition: id=${id} PROCESSING→SENT`);
     await this.repo.update(id, { status: QueueStatus.SENT, sent_at: new Date() });
   }
 
   async markFailed(id: string, error: string): Promise<void> {
     this.logger.log(`[MKT_QUEUE_STATUS_UPDATE] id=${id} old=PROCESSING new=FAILED error="${error.slice(0, 80)}"`);
+    this.logger.warn(`[QUEUE_AUDIT] status_transition: id=${id} PROCESSING→FAILED error="${error.slice(0, 120)}"`);
     await this.repo.increment({ id }, 'attempt_count', 1);
     await this.repo.update(id, { status: QueueStatus.FAILED, error_message: error });
   }
 
   async markSkipped(id: string, reason: string): Promise<void> {
     this.logger.log(`[MKT_QUEUE_STATUS_UPDATE] id=${id} old=PROCESSING new=SKIPPED reason="${reason.slice(0, 80)}"`);
+    this.logger.warn(`[QUEUE_AUDIT] status_transition: id=${id} PROCESSING→SKIPPED reason="${reason.slice(0, 120)}"`);
     await this.repo.update(id, { status: QueueStatus.SKIPPED, error_message: reason });
   }
 
@@ -206,6 +210,12 @@ export class QueueService {
   // Build queue items from eligible audience for a campaign launch
   async buildFromCampaign(campaign: MarketingCampaign): Promise<number> {
     this.logger.log(
+      `[QUEUE_AUDIT] buildFromCampaign entry: campaign_id=${campaign.id} name="${campaign.campaign_name}" ` +
+      `status=${campaign.status} test_mode=${campaign.test_mode} ` +
+      `daily_target=${campaign.daily_target} is_promotion=${campaign.is_promotion} ` +
+      `random_delay_min=${campaign.random_delay_min} random_delay_max=${campaign.random_delay_max}`,
+    );
+    this.logger.log(
       `[MKT_QUEUE_BUILD_START] campaign_id=${campaign.id} test_mode=${campaign.test_mode} ` +
       `daily_target=${campaign.daily_target} is_promotion=${campaign.is_promotion} ` +
       `random_delay_min=${campaign.random_delay_min} random_delay_max=${campaign.random_delay_max}`,
@@ -215,20 +225,25 @@ export class QueueService {
 
     // Round-robin assignment — only numbers with a live, verified WA session
     const allNumbers = await this.numbersService.findAll();
+    // wa_state === 'ready' DB check intentionally removed: the DB value lags behind
+    // in-memory state during startup pre-reset and _scheduleReconnect teardown, causing
+    // queue builds to skip numbers that are actually connected. isConnected() is the
+    // authoritative in-memory check and is sufficient here.
     const sendableNumbers = allNumbers.filter(
       (n) =>
         n.is_active &&
         n.status === WhatsAppNumberStatus.ACTIVE &&
         n.daily_sent < n.daily_limit &&
-        n.wa_state === 'ready' &&
         this.whatsAppService.isConnected(n.id),
     );
     this.logger.log(
       `[MKT_QUEUE_GATE] campaign=${campaign.id} numbers_total=${allNumbers.length} ` +
-      `sendable=${sendableNumbers.length} ready_in_db=${allNumbers.filter(n => n.wa_state === 'ready').length}`,
+      `sendable=${sendableNumbers.length} db_ready=${allNumbers.filter(n => n.wa_state === 'ready').length} ` +
+      `in_memory_connected=${sendableNumbers.length}`,
     );
     if (!sendableNumbers.length) {
       this.logger.warn('[MKT_QUEUE_GATE] reason=no_connected_numbers — zero sendable numbers; skipping campaign queue build');
+      this.logger.warn(`[QUEUE_AUDIT] buildFromCampaign BLOCKED: campaign_id=${campaign.id} reason=no_sendable_numbers total_numbers=${allNumbers.length}`);
       return 0;
     }
 
@@ -311,7 +326,10 @@ export class QueueService {
       cursor = new Date(cursor.getTime() + delayMs);
     }
 
-    if (!items.length) return 0;
+    if (!items.length) {
+      this.logger.warn(`[QUEUE_AUDIT] buildFromCampaign ZERO_ITEMS: campaign_id=${campaign.id} audience_fetched=${audience.length} remaining_quota=${remaining} reason=all_phones_already_queued_or_audience_empty`);
+      return 0;
+    }
     await this.repo
       .createQueryBuilder()
       .insert()
@@ -319,6 +337,11 @@ export class QueueService {
       .values(items as any)
       .execute();
 
+    this.logger.log(
+      `[QUEUE_AUDIT] buildFromCampaign SUCCESS: campaign_id=${campaign.id} ` +
+      `inserted=${items.length} audience_total=${audience.length} ` +
+      `deduped_phones=${audience.length - items.length} sendable_numbers=${sendableNumbers.length}`,
+    );
     this.logger.log(
       `[PROMOTION_QUEUE_CREATED] campaign_id=${campaign.id} ` +
       `audience_count=${items.length} connected_numbers=${sendableNumbers.length} ` +

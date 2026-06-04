@@ -1523,6 +1523,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       const waMessageId: string = msg?.id?._serialized ?? msg?.id ?? '';
       if (!waMessageId) return;
       this.logger.log(`[MKT_WA_ACK] numberId=${numberId} waMessageId=${waMessageId} ack=${ack}`);
+      this.logger.log(`[ACK_AUDIT] received: numberId=${numberId} waMessageId=${waMessageId} ack=${ack} ack_meaning=${ack === 1 ? 'server_queued' : ack === 2 ? 'device_delivered' : ack === 3 ? 'read' : ack === 4 ? 'played' : 'unknown'}`);
       try {
         if (ack === 2 || ack >= 3) {
           const newStatus = ack >= 3 ? QueueStatus.READ : QueueStatus.DELIVERED;
@@ -1550,6 +1551,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
               `[MKT_ACK_UPDATE] waMessageId=${waMessageId} ack=${ack} new_status=${newStatus} ` +
               `log_id=${mappedLogId} via=map`,
             );
+            this.logger.log(`[ACK_AUDIT] status_updated: waMessageId=${waMessageId} ack=${ack} new_status=${newStatus} log_id=${mappedLogId} via=map`);
             return;
           }
 
@@ -1562,6 +1564,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
             this.logger.debug(
               `[MKT_ACK_IGNORED] waMessageId=${waMessageId} ack=${ack} reason=no_matching_outbound_message`,
             );
+            this.logger.warn(`[ACK_AUDIT] ack_ignored: waMessageId=${waMessageId} ack=${ack} reason=no_matching_log_row — message not in map or DB; may be a non-campaign message`);
             return;
           }
 
@@ -1570,9 +1573,11 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
             `[MKT_ACK_UPDATE] waMessageId=${waMessageId} ack=${ack} new_status=${newStatus} ` +
             `log_id=${existing.id} rows_affected=${(result as any)?.affected ?? 'unknown'} via=db`,
           );
+          this.logger.log(`[ACK_AUDIT] status_updated: waMessageId=${waMessageId} ack=${ack} new_status=${newStatus} log_id=${existing.id} rows_affected=${(result as any)?.affected ?? 'unknown'} via=db`);
         }
       } catch (ackErr: any) {
         this.logger.warn(`[MKT_WA_ACK_ERROR] waMessageId=${waMessageId} ack=${ack} error="${ackErr?.message}"`);
+        this.logger.error(`[ACK_AUDIT] ack_handler_exception: waMessageId=${waMessageId} ack=${ack} error="${ackErr?.message}"`);
       }
     });
 
@@ -1926,10 +1931,14 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     (async () => {
       try {
         await this._destroyClient(numberId, state);
-        await this._updateNumberWaState(numberId, 'idle');
+        // Transition in-memory FIRST so the UI and isConnected() immediately reflect
+        // the disconnected state. Writing DB second avoids the window where DB=idle
+        // but memory=ready, which caused the UI to show "Connected" while the sender
+        // read wa_state=idle from DB and dropped the number at Stage 3.
         this._transitionState(numberId, state, 'idle', 'reconnect_teardown');
         state.lastDisconnectedAt = new Date();
         state.terminating = false;
+        await this._updateNumberWaState(numberId, 'idle');
 
         state.reconnectTimerId = setTimeout(() => {
           state.reconnectTimerId = null;

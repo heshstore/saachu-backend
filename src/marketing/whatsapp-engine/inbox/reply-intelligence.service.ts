@@ -52,8 +52,11 @@ export class ReplyIntelligenceService {
         `[MKT_INBOX_BLOCK_INVALID_PHONE] raw=${payload.chatId ?? 'n/a'} resolved=${phone} ` +
         `digit_count=${phoneDigits.length} — rejected at hard gate; no row inserted`,
       );
+      this.logger.warn(`[INBOX_AUDIT] message_dropped: chatId=${payload.chatId ?? 'n/a'} resolved_phone="${phone}" reason=invalid_phone_format digit_count=${phoneDigits.length}`);
       return;
     }
+
+    this.logger.log(`[INBOX_AUDIT] message_received: phone=${phone} number_id=${numberId ?? 'none'} body_len=${body.length} body="${body.slice(0, 80)}"`);
 
     // 1. Save reply to marketing inbox
     try {
@@ -66,8 +69,10 @@ export class ReplyIntelligenceService {
         number_id: numberId ?? null,
       });
       this.logger.log(`[MKT_INBOX_DB_SAVE] phone=${phone} message="${body.slice(0, 80)}"`);
+      this.logger.log(`[INBOX_AUDIT] message_saved: phone=${phone} number_id=${numberId ?? 'none'}`);
     } catch (err: any) {
       this.logger.warn(`[ReplyIntelligence] Failed to save reply for ${phone}: ${err?.message}`);
+      this.logger.error(`[INBOX_AUDIT] message_save_failed: phone=${phone} error="${err?.message}"`);
     }
 
     // 1b. Link reply back to the most recent sent log row for this phone
@@ -82,9 +87,13 @@ export class ReplyIntelligenceService {
           reply_message: body.slice(0, 500),
         });
         this.logger.log(`[MKT_INBOX_LOG_LINKBACK] log_id=${recentLog.id} phone=${phone}`);
+        this.logger.log(`[INBOX_AUDIT] log_linkback_ok: phone=${phone} linked_log_id=${recentLog.id}`);
+      } else {
+        this.logger.log(`[INBOX_AUDIT] log_linkback_miss: phone=${phone} — no prior outbound log found (unsolicited reply or new contact)`);
       }
     } catch (err: any) {
       this.logger.warn(`[ReplyIntelligence] Log linkback failed for ${phone}: ${err?.message}`);
+      this.logger.warn(`[INBOX_AUDIT] log_linkback_failed: phone=${phone} error="${err?.message}"`);
     }
 
     // 2. Classify intent
@@ -95,6 +104,8 @@ export class ReplyIntelligenceService {
       this.logger.log(`[ReplyIntelligence] Opt-out detected for ${phone}`);
       return;
     }
+
+    this.logger.log(`[INBOX_AUDIT] intent_classified: phone=${phone} intent=${intent}`);
 
     // 4. If interested: reset cooldown, then create CRM lead via event bus (no direct module coupling)
     if (intent === 'interested') {

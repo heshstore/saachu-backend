@@ -93,6 +93,17 @@ export class CampaignsService {
       `[CAMPAIGN_LAUNCH] id=${id} name="${campaign.campaign_name}" ` +
       `is_promotion=${campaign.is_promotion} test_mode=${campaign.test_mode} queued=${queued}`,
     );
+    this.logger.log(
+      `[CAMPAIGN_AUDIT] launch_complete: id=${id} name="${campaign.campaign_name}" ` +
+      `template_id=${campaign.template_id ?? 'none'} test_mode=${campaign.test_mode} ` +
+      `is_promotion=${campaign.is_promotion} queued_items=${queued}`,
+    );
+    if (queued === 0) {
+      this.logger.warn(
+        `[CAMPAIGN_AUDIT] launch_zero_queue: id=${id} name="${campaign.campaign_name}" — ` +
+        `campaign launched but ZERO items were queued. Check: audience eligibility, number connectivity, daily_target cap.`,
+      );
+    }
 
     return { campaign: await this.findOne(id), queued };
   }

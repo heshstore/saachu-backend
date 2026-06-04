@@ -139,10 +139,10 @@ export class SenderService implements OnModuleInit {
       `source=${testBypass ? 'bypassed_test_mode' : delayMs > 0 ? 'human_delay_active' : 'clear'}`,
     );
 
-    if (!enabled)            { this.logger.log('[MKT_SENDER_TICK_SKIP] reason=engine_disabled'); return; }
+    if (!enabled)            { this.logger.log('[MKT_SENDER_TICK_SKIP] reason=engine_disabled'); this.logger.warn('[SENDER_AUDIT] tick_blocked: reason=WHATSAPP_ENGINE_ENABLED=false'); return; }
     if (this._tickSelecting) { this.logger.log('[MKT_SENDER_TICK_SKIP] reason=tick_selecting'); return; }
     if (delayPending)        { this.logger.log(`[MKT_SENDER_TICK_SKIP] reason=human_delay until=${this._nextAllowedSend.toISOString()}`); return; }
-    if (!connected)          { this.logger.log('[MKT_SENDER_TICK_SKIP] reason=no_wa_connection — waiting for client ready'); return; }
+    if (!connected)          { this.logger.log('[MKT_SENDER_TICK_SKIP] reason=no_wa_connection — waiting for client ready'); this.logger.warn('[SENDER_AUDIT] tick_blocked: reason=no_connected_wa_number'); return; }
 
     // Window check: outside business hours blocks live sends but not test_mode campaigns.
     let windowBypassed = false;
@@ -210,15 +210,18 @@ export class SenderService implements OnModuleInit {
         }
         this.logger.log(`[MKT_POOL_STAGE_2] after_active=${s2.length} dropped=${allNumbers.length - s2.length}`);
 
-        // ── STAGE 3: after wa_state='ready' filter ────────────────────────────
-        const s3: typeof allNumbers = [];
+        // ── STAGE 3: log DB wa_state for diagnostics, but do NOT filter here.
+        // The DB wa_state can lag behind the in-memory state during backend startup
+        // (pre-reset window) and during _scheduleReconnect teardown. Filtering on it
+        // drops numbers that are actually connected, causing after_ready=0 while the
+        // UI shows "Connected". Stage 4 (isConnected) is the authoritative check.
         for (const n of s2) {
-          if (n.wa_state === 'ready') { s3.push(n); }
-          else { this.logger.log(`[MKT_POOL_STAGE_3_DROP] id=${n.id} phone=${n.phone} reason=wa_state=${n.wa_state ?? 'null'}`); }
+          this.logger.log(`[MKT_POOL_STAGE_3_DIAG] id=${n.id} phone=${n.phone} db_wa_state=${n.wa_state ?? 'null'}`);
         }
-        this.logger.log(`[MKT_POOL_STAGE_3] after_ready=${s3.length} dropped=${s2.length - s3.length}`);
+        const s3 = s2; // pass-through; Stage 4 is the authoritative connection filter
+        this.logger.log(`[MKT_POOL_STAGE_3] after_diag=${s3.length} (db_wa_state check removed — Stage 4 isConnected() is authoritative)`);
 
-        // ── STAGE 4: after isConnected() filter ───────────────────────────────
+        // ── STAGE 4: after isConnected() filter — authoritative in-memory check ─
         const s4: typeof allNumbers = [];
         for (const n of s3) {
           const diag = this.whatsAppService.getConnectionDiagnostics(n.id);
@@ -282,6 +285,7 @@ export class SenderService implements OnModuleInit {
         }
       } else {
         this.logger.log('[MKT_SENDER_TICK_SKIP] reason=queue_empty');
+        this.logger.log('[SENDER_AUDIT] tick_result: queue_empty — no PENDING items with scheduled_at <= now');
       }
     } catch (err: any) {
       this.logger.error(`[MKT_SCHEDULER_FATAL] tick selection crashed: ${err?.message}\n${err?.stack}`);
@@ -357,9 +361,10 @@ export class SenderService implements OnModuleInit {
 
       if (!number) {
         const allNumbers = await this.numbersService.findAll();
+        // wa_state DB check removed: isConnected() is the authoritative in-memory check.
+        // DB wa_state can lag during startup pre-reset and _scheduleReconnect teardown.
         const eligibleNumbers = allNumbers.filter(n => {
           if (!n.is_active) return false;
-          if (n.wa_state !== 'ready') return false;
           if (!this.whatsAppService.isConnected(n.id)) return false;
           const nLimits = getActiveLimits(n.warmup_level);
           return n.daily_sent < nLimits.daily;
@@ -548,6 +553,10 @@ export class SenderService implements OnModuleInit {
           `result_type=${typeof waResult} ` +
           `result_keys=${Object.keys(waResult ?? {}).join(',') || 'empty'}`,
         );
+        this.logger.log(
+          `[SENDER_AUDIT] wa_send_ok: queue_id=${item.id} phone=${item.customer_phone} ` +
+          `number_id=${number.id} wa_message_id=${waResult?.id?._serialized ?? waResult?.id ?? 'null'}`,
+        );
       } catch (sendErr: any) {
         const errMsg: string = sendErr?.message ?? 'Unknown WA error';
         this.logger.error(
@@ -560,6 +569,7 @@ export class SenderService implements OnModuleInit {
 
         // SEND_SKIPPED = WA client unavailable at send time → classify as SKIPPED (not a true failure)
         // Any other error = transport/delivery failure → classify as FAILED
+        this.logger.error(`[SENDER_AUDIT] wa_send_fail: queue_id=${item.id} phone=${item.customer_phone} number_id=${number?.id ?? 'none'} error="${errMsg.slice(0, 120)}"`);
         const isTransportSkip = errMsg.startsWith('[SEND_SKIPPED]') || errMsg.includes('INVALID_WA_NUMBER');
         const mappedStatus = isTransportSkip ? QueueStatus.SKIPPED : QueueStatus.FAILED;
         this.logger.warn(

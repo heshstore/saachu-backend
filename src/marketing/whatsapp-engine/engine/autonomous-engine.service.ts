@@ -123,18 +123,21 @@ export class AutonomousEngineService implements OnModuleInit {
     );
 
     const allNumbers = await this.numbersService.findAll();
+    // wa_state === 'ready' DB check intentionally removed: DB value can lag in-memory
+    // state during startup pre-reset and _scheduleReconnect teardown. isConnected()
+    // is the authoritative check and is sufficient.
     const sendableNumbers = allNumbers.filter(
       (n) =>
         n.is_active &&
         n.status === WhatsAppNumberStatus.ACTIVE &&
         n.daily_sent < n.daily_limit &&
-        n.wa_state === 'ready' &&
         this.whatsAppService.isConnected(n.id),
     );
 
     this.logger.log(
       `[MKT_QUEUE_GATE] numbers: total=${allNumbers.length} sendable=${sendableNumbers.length} ` +
-      `ready_in_db=${allNumbers.filter(n => n.wa_state === 'ready').length}`,
+      `db_ready=${allNumbers.filter(n => n.wa_state === 'ready').length} ` +
+      `in_memory_connected=${sendableNumbers.length}`,
     );
     if (!sendableNumbers.length) {
       this.logger.warn('[MKT_QUEUE_GATE] reason=no_connected_numbers — zero sendable numbers (is_active+ready+liveAndReady); skipping build');

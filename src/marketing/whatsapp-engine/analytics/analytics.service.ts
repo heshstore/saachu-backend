@@ -27,9 +27,11 @@ export class AnalyticsService {
 
   async getCampaignStats(campaignId: string): Promise<Record<string, number>> {
     // Three-tier resolution for historical data where campaign_id was not persisted on queue rows:
-    // 1. Log row has campaign_id directly
+    // 1. Log row has campaign_id directly (current path)
     // 2. Log row's queue_id points to a queue item with campaign_id set
-    // 3. Log row's queue_id points to a queue item whose template_id matches the campaign's template_id
+    // 3. (Historical fallback) queue item has no campaign_id but template matches this campaign.
+    //    IMPORTANT: tier-3 is scoped to q.campaign_id IS NULL to prevent double-counting
+    //    messages from other campaigns that happen to use the same template.
     const rows = await this.ds.query<StatusRow[]>(`
       SELECT l.status, COUNT(*)::text AS count
       FROM whatsapp_message_logs l
@@ -38,10 +40,13 @@ export class AnalyticsService {
            SELECT q.id
            FROM whatsapp_message_queue q
            WHERE q.campaign_id = $1
-              OR q.template_id IN (
-                SELECT c.template_id
-                FROM marketing_campaigns c
-                WHERE c.id = $1 AND c.template_id IS NOT NULL
+              OR (
+                q.campaign_id IS NULL
+                AND q.template_id IN (
+                  SELECT c.template_id
+                  FROM marketing_campaigns c
+                  WHERE c.id = $1 AND c.template_id IS NOT NULL
+                )
               )
          )
       GROUP BY l.status
@@ -103,6 +108,9 @@ export class AnalyticsService {
     try {
       // Use sent_at for ALL date filters — it is always set on log rows and avoids
       // the delivered_at / read_at columns that may be absent in older DB schemas.
+      // [CAMPAIGN_AUDIT] Use cumulative IN-list counts so that a message at READ
+      // is also counted as delivered and sent. This matches the _buildStats rollup
+      // and prevents sent_today < read_today on the dashboard.
       [
         active_numbers,
         queue_pending,
@@ -113,10 +121,18 @@ export class AnalyticsService {
       ] = await Promise.all([
         this.numberRepo.count({ where: { is_active: true } }),
         this.queueRepo.count({ where: { status: QueueStatus.PENDING } }),
-        this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.SENT      }).andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
-        this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.DELIVERED }).andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
-        this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.READ      }).andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
-        this.repo.createQueryBuilder('l').where('l.status = :s', { s: QueueStatus.REPLIED   }).andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
+        this.repo.createQueryBuilder('l')
+          .where('l.status IN (:...ss)', { ss: [QueueStatus.SENT, QueueStatus.DELIVERED, QueueStatus.READ, QueueStatus.REPLIED] })
+          .andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
+        this.repo.createQueryBuilder('l')
+          .where('l.status IN (:...ss)', { ss: [QueueStatus.DELIVERED, QueueStatus.READ, QueueStatus.REPLIED] })
+          .andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
+        this.repo.createQueryBuilder('l')
+          .where('l.status IN (:...ss)', { ss: [QueueStatus.READ, QueueStatus.REPLIED] })
+          .andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
+        this.repo.createQueryBuilder('l')
+          .where('l.status = :s', { s: QueueStatus.REPLIED })
+          .andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
       ]);
     } catch (err: any) {
       this.logger.error(`[MKT_DASHBOARD] endpoint=engine/dashboard fail=stats_query reason=${err?.message}`);
@@ -348,12 +364,38 @@ export class AnalyticsService {
   }
 
   private _buildStats(rows: StatusRow[]): Record<string, number> {
-    const stats: Record<string, number> = { sent: 0, delivered: 0, read: 0, replied: 0, failed: 0, skipped: 0, total: 0 };
+    // Count raw exclusive per-status first
+    const raw: Record<string, number> = {};
+    let total = 0;
     for (const r of rows) {
       const n = parseInt(r.count, 10);
-      stats[r.status] = (stats[r.status] ?? 0) + n;
-      stats.total += n;
+      raw[r.status] = (raw[r.status] ?? 0) + n;
+      total += n;
     }
-    return stats;
+
+    // [CAMPAIGN_AUDIT] Cumulative funnel: a message at READ was also DELIVERED and SENT.
+    // Status upgrades (SENT → DELIVERED → READ) mean the DB row holds only the latest
+    // status. Without this rollup, sent_count falls as messages progress, causing read > sent.
+    const replied   = raw['replied']   ?? 0;
+    const read      = (raw['read']     ?? 0) + replied;
+    const delivered = (raw['delivered'] ?? 0) + read;
+    const sent      = (raw['sent']     ?? 0) + delivered;
+
+    this.logger.log(
+      `[CAMPAIGN_AUDIT] _buildStats cumulative rollup: ` +
+      `raw={sent:${raw['sent'] ?? 0},delivered:${raw['delivered'] ?? 0},read:${raw['read'] ?? 0},replied:${replied}} ` +
+      `cumulative={sent:${sent},delivered:${delivered},read:${read},replied:${replied}} ` +
+      `failed:${raw['failed'] ?? 0} skipped:${raw['skipped'] ?? 0} total:${total}`,
+    );
+
+    return {
+      sent,
+      delivered,
+      read,
+      replied,
+      failed:  raw['failed']  ?? 0,
+      skipped: raw['skipped'] ?? 0,
+      total,
+    };
   }
 }
