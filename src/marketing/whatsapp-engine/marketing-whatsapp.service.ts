@@ -103,6 +103,11 @@ interface NumberClientState {
   // True after _initClient attaches .on() listeners to this client instance.
   // Cleared by _destroyClient when state.client is nulled.
   listenersAttached: boolean;
+  // True only after BOTH initialize() resolved (inject/bridge functions registered in Chrome)
+  // AND waState transitioned to 'ready' — meaning listener attached + page alive + receive confirmed.
+  // Reset to false on every _destroyClient call (covers all teardown/reconnect paths) and explicitly
+  // in forceInvalidateSession. Never set via initialize().then() alone.
+  bridgeReady: boolean;
   manualDisconnect: boolean;
   destroyed: boolean;
   terminating: boolean;
@@ -145,6 +150,7 @@ function makeState(): NumberClientState {
     waState: 'idle',
     starting: false,
     listenersAttached: false,
+    bridgeReady: false,
     manualDisconnect: false,
     destroyed: false,
     terminating: false,
@@ -901,6 +907,9 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     firstQrGeneratedAt: string | null;
     sessionAvailable: boolean;
     liveAndReady: boolean;
+    bridgeReady: boolean;
+    sendCapable: boolean;
+    fullyOperational: boolean;
   } {
     const state = this.clients.get(numberId);
 
@@ -912,7 +921,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       : false;
 
     if (!state) {
-      return { waState: 'idle', effectiveState: 'idle', connected: false, booting: false, qrActive: false, lastHeartbeat: null, lastReadyAt: null, browserConnected: false, clientExists: false, reconnectCount: 0, qrRefreshCount: 0, sessionStartedAt: null, lastDisconnectedAt: null, firstQrGeneratedAt: null, sessionAvailable: false, liveAndReady: false };
+      return { waState: 'idle', effectiveState: 'idle', connected: false, booting: false, qrActive: false, lastHeartbeat: null, lastReadyAt: null, browserConnected: false, clientExists: false, reconnectCount: 0, qrRefreshCount: 0, sessionStartedAt: null, lastDisconnectedAt: null, firstQrGeneratedAt: null, sessionAvailable: false, liveAndReady: false, bridgeReady: false, sendCapable: false, fullyOperational: false };
     }
 
     // Read cached session availability — populated at state creation, ready event, and auth wipes.
@@ -938,9 +947,15 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       ? 'ready'
       : memoryState;
 
+    // sendCapable: session is ready and the client can send messages.
+    // fullyOperational: send capable AND receive bridge confirmed (initialize() resolved + ready).
+    const bridgeReady      = state.bridgeReady;
+    const sendCapable      = effectiveState === 'ready' && !state.destroyed && clientExists && browserConnected;
+    const fullyOperational = sendCapable && bridgeReady;
+
     // Only log when the combined status actually changed — prevents identical lines on every
     // health poll. The key encodes every value visible in the log so any real change is captured.
-    const statusKey = `${memoryState}:${String(connected)}:${String(liveAndReady)}:${String(browserConnected)}`;
+    const statusKey = `${memoryState}:${String(connected)}:${String(liveAndReady)}:${String(browserConnected)}:${String(bridgeReady)}`;
     if (memoryState !== 'idle' && state._lastStatusKey !== statusKey) {
       state._lastStatusKey = statusKey;
       this.logger.log(`[WA_STATUS_RESOLVE] ${JSON.stringify({
@@ -976,6 +991,9 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       firstQrGeneratedAt:  state.firstQrGeneratedAt?.toISOString() ?? null,
       sessionAvailable,
       liveAndReady,
+      bridgeReady,
+      sendCapable,
+      fullyOperational,
     };
   }
 
@@ -1289,6 +1307,13 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
               state.lastReadyAt = new Date();
               state.sessionStartedAt = state.sessionStartedAt ?? new Date();
               this._transitionState(numberId, state, 'ready', 'ready_watchdog_recovery');
+              if (bridgeEstablished && state.listenersAttached) {
+                const _rwp = state.client?.pupPage;
+                if (_rwp && !_rwp.isClosed()) {
+                  state.bridgeReady = true;
+                  this.logger.log(`[WA_BRIDGE_CONFIRMED] numberId=${numberId} — bridgeReady=true via ready_watchdog`);
+                }
+              }
               this.logger.log(`[WA_READY_LOCK] numberId=${numberId} — session ready (watchdog); future QR events will be suppressed`);
               this._metrics.qrToReadySuccesses++;
               this._metrics.successfulReadySessions++;
@@ -1349,6 +1374,15 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       state.sessionStartedAt = state.sessionStartedAt ?? new Date();
       state.sessionAvailable = true;
       this._transitionState(numberId, state, 'ready', 'ready_event');
+      // Bridge confirmation: both conditions required — bridge functions registered in Chrome
+      // (bridgeEstablished) AND listeners attached. Page liveness is an extra safety check.
+      if (bridgeEstablished && state.listenersAttached) {
+        const _rp = state.client?.pupPage;
+        if (_rp && !_rp.isClosed()) {
+          state.bridgeReady = true;
+          this.logger.log(`[WA_BRIDGE_CONFIRMED] numberId=${numberId} — bridgeReady=true via ready_event`);
+        }
+      }
       this.logger.log(`[WA_READY_LOCK] numberId=${numberId} — session ready; future QR events will be suppressed`);
       this.logger.log(`[WA_READY_DEBUG] state_transitioned — ${numberId} waState=${state.waState}`);
       this._metrics.qrToReadySuccesses++;
@@ -1701,6 +1735,14 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
             if (_restoreRetry > 0) {
               this.logger.log(`[WA_INIT_SUCCESS_AFTER_RETRY] numberId=${numberId} attempt=${_restoreRetry}`);
             }
+            // Fallback: if ready event fired before initialize() resolved, confirm bridge now.
+            if (state.waState === 'ready' && state.listenersAttached && !state.destroyed && !state.bridgeReady) {
+              const _bp = state.client?.pupPage;
+              if (_bp && !_bp.isClosed()) {
+                state.bridgeReady = true;
+                this.logger.log(`[WA_BRIDGE_CONFIRMED] numberId=${numberId} — bridgeReady=true via init_resolved_after_ready`);
+              }
+            }
             settle();
           })
           .catch((e: any) => {
@@ -2004,6 +2046,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     });
     state.client = null;
     state.listenersAttached = false;
+    state.bridgeReady = false;
     state.lastHeartbeat = null;
     this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — removing listeners`);
     try { client.removeAllListeners(); } catch { }
@@ -2319,6 +2362,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
         state.starting = false;
         state.autoReconnectAttempts = 0;
         state.sessionAvailable = false;
+        state.bridgeReady = false;
         state._lastStatusKey = null;
       }
 
