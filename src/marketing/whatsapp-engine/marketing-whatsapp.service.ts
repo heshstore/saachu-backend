@@ -66,6 +66,9 @@ const BOOT_TIMEOUT_MS      = 180_000;
 const AUTH_TIMEOUT_MS      = 180_000;
 const MAX_AUTO_RECONNECTS  = 3;
 const RECONNECT_DELAY_MS   = 5_000;
+// Max QR codes shown per manual Connect click. After this many WA-issued QR refreshes
+// the lifecycle stops and waState→awaiting_manual_reconnect. User must click Connect again.
+const MAX_QR_REFRESH_ATTEMPTS = 1;
 
 const CHROME_PATH = process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 
@@ -76,24 +79,28 @@ const CHROMIUM_LOCK_FILES = [
 // Strict linear state machine — no cyclic recovery transitions.
 // idle → initializing → awaiting_scan → authenticating → ready
 // Any failure from any state → failed → idle (via forceInvalidateSession)
+// QR blocked / restore failed → awaiting_manual_reconnect (user must click Connect)
 type WaState =
-  | 'idle'           // Not connected — Connect button visible
-  | 'initializing'   // Chromium launching (formerly: booting)
-  | 'awaiting_scan'  // QR displayed, waiting for user scan (formerly: qr_ready)
-  | 'authenticating' // QR scanned, WA establishing session
-  | 'ready'          // Session active — can send messages
-  | 'failed'         // Init or auth failure — auto-resets to idle
-  | 'disconnecting'; // Manual disconnect or teardown in progress
+  | 'idle'                      // Not connected — Connect button visible
+  | 'initializing'              // Chromium launching
+  | 'awaiting_scan'             // QR displayed, waiting for user scan
+  | 'authenticating'            // QR scanned, WA establishing session
+  | 'ready'                     // Session active — can send messages
+  | 'failed'                    // Init or auth failure — auto-resets to idle
+  | 'disconnecting'             // Manual disconnect or teardown in progress
+  | 'awaiting_manual_reconnect'; // Restore failed or QR expired — no Chrome running; user action required
 
 // Monotonic rank for forward-only lifecycle enforcement.
-// disconnecting is a teardown overlay — not a linear step — so it is absent from this map.
+// disconnecting and awaiting_manual_reconnect are teardown/terminal overlays absent from the
+// linear chain; both allow _canTransition to exit back to idle/initializing.
 const WA_STATE_ORDER: Partial<Record<WaState, number>> = {
-  idle:           0,
-  initializing:   1,
-  awaiting_scan:  2,
-  authenticating: 3,
-  ready:          4,
-  failed:         5,
+  idle:                       0,
+  initializing:               1,
+  awaiting_scan:              2,
+  authenticating:             3,
+  ready:                      4,
+  failed:                     5,
+  awaiting_manual_reconnect:  6,
 };
 
 interface NumberClientState {
@@ -103,6 +110,11 @@ interface NumberClientState {
   // True after _initClient attaches .on() listeners to this client instance.
   // Cleared by _destroyClient when state.client is nulled.
   listenersAttached: boolean;
+  // True when connectNumber was called by a user action (HTTP /connect endpoint).
+  // False for auto-restore and auto-reconnect paths. QR generation is only permitted
+  // when this is true; auto-initiated connections that produce a QR gate to
+  // awaiting_manual_reconnect instead.
+  isManualConnect: boolean;
   // True only after BOTH initialize() resolved (inject/bridge functions registered in Chrome)
   // AND waState transitioned to 'ready' — meaning listener attached + page alive + receive confirmed.
   // Reset to false on every _destroyClient call (covers all teardown/reconnect paths) and explicitly
@@ -150,6 +162,7 @@ function makeState(): NumberClientState {
     waState: 'idle',
     starting: false,
     listenersAttached: false,
+    isManualConnect: false,
     bridgeReady: false,
     manualDisconnect: false,
     destroyed: false,
@@ -274,39 +287,37 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
           }
         }
       }
-      // Active numbers whose session failed validation → skip restore, start fresh QR flow.
-      // These were excluded from restoreTargets above; without this block they would stay
-      // stuck in whatever wa_state the DB recorded from the previous run.
-      const freshQrTargets = rows.filter(
+      // Active numbers with no restorable session → await_manual_reconnect.
+      // QR generation at boot is forbidden — it generates unattended QR loops that
+      // burn Meta trust signals. The user must explicitly press Connect.
+      const noSessionTargets = rows.filter(
         (r) => r.is_active && !this._hasRestorableSession(r.id),
       );
-      if (freshQrTargets.length) {
+      if (noSessionTargets.length) {
         this.logger.log(
-          `[MKT_BOOT] ${freshQrTargets.length} active number(s) have invalid sessions — starting fresh QR flow`,
+          `[MKT_BOOT] ${noSessionTargets.length} active number(s) have no restorable session ` +
+          `— setting awaiting_manual_reconnect (NO automatic QR)`,
         );
-        for (const r of freshQrTargets) {
-          // Ensure clean in-memory state before initializing — guards against any
-          // partial state left by a previous connect attempt this process.
-          const staleState = this.clients.get(r.id);
-          if (staleState) {
-            staleState.client = null;
-            staleState.listenersAttached = false;
-            staleState.destroyed = false;
+        for (const r of noSessionTargets) {
+          let st = this.clients.get(r.id);
+          if (!st) {
+            st = makeState();
+            this.clients.set(r.id, st);
+            this._startWatchdog(r.id, st);
+          } else {
+            // Clean any partial state from a previous lifecycle without launching Chrome.
+            st.client            = null;
+            st.listenersAttached = false;
+            st.bridgeReady       = false;
+            st.destroyed         = false;
           }
-          // Wipe any partial/corrupt session directory before launching Chrome.
-          // blobExists=false + ldbExists=false means the profile was never authenticated
-          // or left in an unknown state. Clean slate avoids Chrome reusing broken data.
-          await this._clearAuthFiles(r.id).catch((e: any) => {
-            this.logger.warn(`[WA_FRESH_SESSION_INIT] numberId=${r.id} auth_wipe_failed="${e?.message}" — continuing anyway`);
-          });
+          st.sessionAvailable = false;
           this.logger.log(
-            `[WA_FRESH_SESSION_INIT] numberId=${r.id} reason=non_restorable_session auth_wiped=true starting_qr_flow=true`,
+            `[RESTORE_FAILED_MANUAL_REQUIRED] numberId=${r.id} phone=${r.phone} ` +
+            `reason=no_restorable_session_at_boot — user must click Connect`,
           );
-          // connectNumber creates a fresh makeState(), sets wa_state=initializing in DB,
-          // launches Chrome, and WA (finding no valid session) generates a QR.
-          this.connectNumber(r.id).catch((e: any) => {
-            this.logger.warn(`[WA_FORCE_FRESH_SESSION_FAIL] numberId=${r.id} error="${e?.message}"`);
-          });
+          this._transitionState(r.id, st, 'awaiting_manual_reconnect', 'no_session_at_boot');
+          await this._updateNumberWaState(r.id, 'awaiting_manual_reconnect');
         }
       }
     } catch (e: any) {
@@ -330,10 +341,13 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   private async _autoRestoreNumber(numberId: string, phone: string): Promise<void> {
     const RESTORE_TIMEOUT_MS = 90_000;
-    this.logger.log(`[WA_AUTO_RESTORE_BEGIN] numberId=${numberId} phone=${phone} sessionExists=true`);
+    this.logger.log(
+      `[RESTORE_ATTEMPT] numberId=${numberId} phone=${phone} sessionExists=true — attempting silent restore`,
+    );
 
     // connectNumber() is synchronous up to its first await — state is in clients Map before we yield.
-    this.connectNumber(numberId).catch(() => {});
+    // isManual=false: auto-restore must NEVER generate a QR. The qr gate handles that.
+    this.connectNumber(numberId, false).catch(() => {});
 
     const state = this.clients.get(numberId);
     if (!state) {
@@ -341,7 +355,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const result = await new Promise<'success' | 'fallback_qr' | 'failed'>((resolve) => {
+    const result = await new Promise<'success' | 'failed'>((resolve) => {
       if (state.waState === 'ready') { resolve('success'); return; }
 
       const subRef: { current: { unsubscribe(): void } | null } = { current: null };
@@ -356,15 +370,16 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
           const msg = JSON.parse(json) as { type: string; state?: string };
           if (msg.type === 'ready') {
             clearTimeout(timer); subRef.current?.unsubscribe(); resolve('success');
-          } else if (msg.type === 'qr') {
-            // QR = stored session expired server-side. waState has already transitioned to
-            // awaiting_scan in the qr event handler. Client and browser are alive.
-            // Resolve immediately so we don't block the restore queue for 90s.
-            clearTimeout(timer); subRef.current?.unsubscribe(); resolve('fallback_qr');
           } else if (
             msg.type === 'error' ||
-            (msg.type === 'state_change' && (msg.state === 'idle' || msg.state === 'failed'))
+            (msg.type === 'state_change' && (
+              msg.state === 'idle' ||
+              msg.state === 'failed' ||
+              msg.state === 'awaiting_manual_reconnect'
+            ))
           ) {
+            // awaiting_manual_reconnect means the QR gate fired (session expired server-side)
+            // or a hard error occurred — either way, manual action is required.
             clearTimeout(timer); subRef.current?.unsubscribe(); resolve('failed');
           }
         } catch {}
@@ -376,34 +391,37 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    if (result === 'fallback_qr') {
-      // Client is alive, browser running, waState=awaiting_scan.
-      // Do not destroy — allow the user to scan the QR and complete authentication normally.
-      this.logger.log(
-        `[WA_RESTORE_QR_FALLBACK] numberId=${numberId} phone=${phone} waState=${state.waState} ` +
-        `— restore produced QR; keeping session alive for manual scan`,
-      );
-      return;
-    }
-
-    // 'failed': timeout or hard error — clean up Chromium so the next restore can start cleanly.
+    // 'failed': session expired server-side (QR gate fired → already awaiting_manual_reconnect),
+    // restore timeout, or hard error. Auth files are PRESERVED — the session may be recoverable
+    // on the next attempt. Chrome is already torn down by the QR gate; if not, tear down here.
     this.logger.warn(
-      `[WA_AUTO_RESTORE_FAILED] numberId=${numberId} phone=${phone} waState=${state.waState} reason=timeout_or_error`,
+      `[RESTORE_FAILED_MANUAL_REQUIRED] numberId=${numberId} phone=${phone} ` +
+      `waState=${state.waState} — restore failed; manual reconnect required`,
     );
 
-    try {
-      await this.disconnectNumber(numberId);
-    } catch (e: any) {
-      this.logger.warn(`[WA_RESTORE_CLEANUP] numberId=${numberId} disconnect threw: ${e?.message} — continuing`);
+    if (state.waState !== 'awaiting_manual_reconnect') {
+      // QR gate did not fire (e.g. timeout before any QR) — clean up Chrome and set state.
+      try {
+        state.terminating = true;
+        this._clearTimers(state);
+        await this._destroyClient(numberId, state);
+        this._transitionState(numberId, state, 'awaiting_manual_reconnect', 'auto_restore_failed');
+        await this._updateNumberWaState(numberId, 'awaiting_manual_reconnect');
+        state.terminating = false;
+      } catch (e: any) {
+        this.logger.warn(`[WA_RESTORE_CLEANUP] numberId=${numberId} error: ${e?.message}`);
+        state.terminating = false;
+      }
     }
     this.logger.log(
-      `[WA_RESTORE_CLEANUP_COMPLETE] numberId=${numberId} phone=${phone} — Chromium destroyed, idle`,
+      `[WA_RESTORE_CLEANUP_COMPLETE] numberId=${numberId} phone=${phone} ` +
+      `waState=${state.waState} — Chrome stopped; awaiting manual Connect click`,
     );
   }
 
   // ── Public API ───────────────────────────────────────────────────────────────
 
-  async connectNumber(numberId: string): Promise<void> {
+  async connectNumber(numberId: string, isManual = false): Promise<void> {
     // [WA_ISOLATION] Step 1 — log connect entry with full snapshot before any mutation.
     this._logIsolation('connect_requested', numberId, {
       activeClientsSnapshot: this._clientsSnapshot(),
@@ -461,6 +479,13 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
     this._metrics.qrToReadyAttempts++;
     state.starting = true;
+    // Record whether this connect was triggered manually (user action) or automatically
+    // (restore/reconnect). The qr event handler uses this to gate QR generation.
+    state.isManualConnect = isManual;
+    if (isManual) {
+      // Manual click resets the auto-reconnect chain and starts fresh.
+      state.autoReconnectAttempts = 0;
+    }
     state.qrRefreshCount = 0;
     state.firstQrGeneratedAt = null;
     this._transitionState(numberId, state, 'initializing', 'connect_requested');
@@ -1002,6 +1027,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     const counts: Record<string, number> = {
       idle: 0, initializing: 0, awaiting_scan: 0,
       authenticating: 0, ready: 0, failed: 0, disconnecting: 0,
+      awaiting_manual_reconnect: 0,
     };
     for (const [, s] of this.clients) {
       counts[s.waState] = (counts[s.waState] ?? 0) + 1;
@@ -1174,6 +1200,55 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
+      // ── GATE 1: Auto-connect QR block ──────────────────────────────────────────
+      // QR generation is only allowed when the user explicitly clicked Connect.
+      // Auto-restore and auto-reconnect paths must NEVER generate a QR — session
+      // failure on those paths means the user must intervene manually.
+      if (!state.isManualConnect) {
+        this.logger.warn(
+          `[RESTORE_FAILED_MANUAL_REQUIRED] numberId=${numberId} qrRefreshCount=${state.qrRefreshCount} ` +
+          `waState=${state.waState} — QR blocked on auto-connect; transitioning to awaiting_manual_reconnect`,
+        );
+        if (!state.terminating && !state.destroyed) {
+          this._transitionState(numberId, state, 'awaiting_manual_reconnect', 'auto_connect_qr_blocked');
+          this._updateNumberWaState(numberId, 'awaiting_manual_reconnect').catch(() => {});
+          state.terminating = true;
+          this._clearTimers(state);
+          this._destroyClient(numberId, state)
+            .then(() => { state.terminating = false; })
+            .catch(() => { state.terminating = false; });
+          state.qrSubject.next(JSON.stringify({
+            type: 'state_change', state: 'awaiting_manual_reconnect',
+            reason: 'auto_connect_qr_blocked', timestamp: new Date().toISOString(),
+          }));
+        }
+        return;
+      }
+
+      // ── GATE 2: QR refresh hard limit ──────────────────────────────────────────
+      // Each manual Connect generates at most MAX_QR_REFRESH_ATTEMPTS QR codes.
+      // Once the limit is reached the lifecycle stops completely — user must click
+      // Connect again to get a fresh session attempt.
+      if (state.qrRefreshCount >= MAX_QR_REFRESH_ATTEMPTS) {
+        this.logger.warn(
+          `[QR_LIMIT_REACHED_STOPPING] numberId=${numberId} qrRefreshCount=${state.qrRefreshCount} ` +
+          `limit=${MAX_QR_REFRESH_ATTEMPTS} — hard limit exceeded; stopping lifecycle`,
+        );
+        if (!state.terminating && !state.destroyed) {
+          this._transitionState(numberId, state, 'awaiting_manual_reconnect', 'qr_limit_reached');
+          this._updateNumberWaState(numberId, 'awaiting_manual_reconnect').catch(() => {});
+          state.terminating = true;
+          this._clearTimers(state);
+          this._destroyClient(numberId, state)
+            .then(() => { state.terminating = false; })
+            .catch(() => { state.terminating = false; });
+          state.qrSubject.next(JSON.stringify({
+            type: 'qr_limit_reached', timestamp: new Date().toISOString(),
+          }));
+        }
+        return;
+      }
+
       state.lastReadyAt = null;
 
       // qrcode@1.5.4 is pure CJS — (await import('qrcode')).default is undefined; require() gives the real module
@@ -1207,6 +1282,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       if (state.qrRefreshCount === 1) {
         state.firstQrGeneratedAt = new Date();
         this.logger.log(`[WA_QR_CREATED] ${numberId} — first QR generated and ready for scan`);
+        this.logger.log(`[QR_GENERATED_MANUAL] numberId=${numberId} isManualConnect=${state.isManualConnect} qrRefreshCount=${state.qrRefreshCount} limit=${MAX_QR_REFRESH_ATTEMPTS}`);
         await this._updateNumberWaState(numberId, 'awaiting_scan');
       } else {
         this.logger.log(`[WA_QR_REFRESH] ${numberId} — QR refresh #${state.qrRefreshCount} waState=${state.waState} — display updated`);
@@ -2074,18 +2150,18 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
   // Rules (in priority order):
   //   1. Same state → false (no-op).
   //   2. → disconnecting: always allowed — teardown can be triggered from any state.
-  //   3. → idle: always allowed — only teardown paths (forceInvalidateSession, disconnectNumber,
-  //      resetNumber) ever call _transitionState(idle), so this is safe.
+  //   3. → idle: always allowed — only teardown paths ever call _transitionState(idle).
   //   4. disconnecting → anything except idle: blocked (teardown overlay exits only to idle).
   //   5. failed → anything except idle: blocked (failed is terminal; reset/invalidate → idle).
-  //   6. Monotonic rank check: next rank must be strictly greater than current rank.
-  //      This catches all backward regressions including ready → authenticating.
+  //   6. awaiting_manual_reconnect → anything: allowed — user manually broke the deadlock.
+  //   7. Monotonic rank check: next rank must be strictly greater than current rank.
   private _canTransition(current: WaState, next: WaState): boolean {
     if (current === next) return false;
     if (next === 'disconnecting') return true;
     if (next === 'idle') return true;
     if (current === 'disconnecting') return false;
     if (current === 'failed') return false;
+    if (current === 'awaiting_manual_reconnect') return true;
     const currentRank = WA_STATE_ORDER[current] ?? -1;
     const nextRank    = WA_STATE_ORDER[next]    ?? -1;
     return nextRank > currentRank;

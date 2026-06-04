@@ -90,7 +90,7 @@ export class NumbersController {
   async connect(@Param('id') id: string) {
     this.logger.warn(`[CONNECT_ENDPOINT_HIT] numberId=${id} ts=${new Date().toISOString()}`);
     await this.numbersService.findOne(id); // 404 guard
-    await this.marketingWa.connectNumber(id);
+    await this.marketingWa.connectNumber(id, true /* isManual — user initiated */)
     this.logger.warn(`[CONNECT_ENDPOINT_DONE] numberId=${id} ts=${new Date().toISOString()}`);
     return { ok: true, message: 'Connect initiated — scan QR at /numbers/:id/qr' };
   }
