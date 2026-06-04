@@ -140,8 +140,11 @@ export class AnalyticsService {
 
     try {
       const rows: { count: string }[] = await this.ds.query(
-        `SELECT COUNT(*) AS count FROM leads WHERE source = $1 AND context LIKE $2 AND created_at >= $3`,
-        ['WHATSAPP', '%Marketing Engine%', todayMidnight],
+        // Match all WHATSAPP-source leads created today.
+        // Previously used context LIKE '%Marketing Engine%' which never matched the actual
+        // stored context value ('WHATSAPP – Inbound Message' from LeadContext.WHATSAPP_INBOUND).
+        `SELECT COUNT(*) AS count FROM leads WHERE source = $1 AND created_at >= $2`,
+        ['WHATSAPP', todayMidnight],
       );
       crm_leads_today = parseInt(rows[0]?.count ?? '0', 10);
     } catch { crm_leads_today = 0; }

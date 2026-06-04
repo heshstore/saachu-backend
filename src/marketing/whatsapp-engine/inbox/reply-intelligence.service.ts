@@ -144,13 +144,14 @@ export class ReplyIntelligenceService {
 
     // Emit lead.incoming — consumed by LeadService.handleIncomingLead() in CRM module.
     // This avoids a direct service import (LeadService) which would couple WhatsappEngineModule → CrmModule.
+    // raw_payload.body is what LeadService.handleIncomingLead reads for the notes field.
+    // The top-level `notes` key is not in the handler's payload type and was silently ignored.
     this.eventEmitter.emit('lead.incoming', {
       phone,
       name,
       source:           LeadSource.WHATSAPP,
-      notes:            `Marketing reply: "${body.slice(0, 200)}"`,
-      context:          'WhatsApp Marketing Engine',
       whatsapp_chat_id: chatId,
+      raw_payload:      { body, message: body },
     });
 
     this.logger.log(`[ReplyIntelligence] lead.incoming emitted for ${phone}`);
