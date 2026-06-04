@@ -1,9 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 const WINDOW_START_HOUR = 10;   // 10:00 AM
-const WINDOW_END_HOUR = 17;     // 17:30 (5:30 PM)
-const WINDOW_END_MINUTE = 30;
-const WINDOW_MINUTES = 450;     // 7.5 hours = 450 min
+const WINDOW_END_HOUR = 18;     // 18:00 (6:00 PM)
+const WINDOW_END_MINUTE = 0;
+const WINDOW_MINUTES = 480;     // 8 hours = 480 min
 
 @Injectable()
 export class TimingAiService {
@@ -48,7 +48,7 @@ export class TimingAiService {
     const startMinutes = WINDOW_START_HOUR * 60;
     const endMinutes = WINDOW_END_HOUR * 60 + WINDOW_END_MINUTE;
     const result = totalMinutes >= startMinutes && totalMinutes <= endMinutes;
-    this.logger.log(`[MKT_WINDOW_CHECK] bypass=false time=${hours}:${String(minutes).padStart(2, '0')} window=10:00–17:30 result=${result}`);
+    this.logger.log(`[MKT_WINDOW_CHECK] bypass=false time=${hours}:${String(minutes).padStart(2, '0')} window=10:00–18:00 result=${result}`);
     return result;
   }
 

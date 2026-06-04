@@ -69,7 +69,7 @@ export interface ValidationReport {
 }
 
 const WINDOW_START = 10 * 60;
-const WINDOW_END   = 17 * 60 + 30;
+const WINDOW_END   = 18 * 60;
 const STUCK_PROCESSING_MS = 5 * 60 * 1000; // 5 minutes
 
 @Injectable()
