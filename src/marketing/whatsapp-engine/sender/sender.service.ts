@@ -15,6 +15,7 @@ import { EngineAuditService, AuditEvent } from '../engine/engine-audit.service';
 import { AudienceService } from '../audience/audience.service';
 import { PromotionProductSelectionService } from '../promotion/promotion-product-selection.service';
 import { PromotionAiTemplateService } from '../promotion/promotion-ai-template.service';
+import { CampaignsService } from '../campaigns/campaigns.service';
 import { WhatsappNumber } from '../entities/whatsapp-number.entity';
 
 // Hard limits per warmup level (1=COLD, 2=WARM, 3=HOT, 4=SEASONED)
@@ -38,7 +39,10 @@ function getActiveLimits(warmupLevel: number): { daily: number; hourly: number }
   return table[warmupLevel] ?? table[1];
 }
 
-const CONTENT_FINGERPRINT_DAYS = 3;
+const CONTENT_FINGERPRINT_DAYS       = 3;
+// Test-mode campaigns use a 1-hour window so the same template can be resent quickly
+// during QA. Production behavior (3 days) is unaffected.
+const CONTENT_FINGERPRINT_HOURS_TEST = 1;
 
 // Human-like inter-send delay: 30s–5min; 10% chance of 15–30min idle window
 const MIN_DELAY_MS  = 30_000;
@@ -89,6 +93,7 @@ export class SenderService implements OnModuleInit {
     private readonly audienceService: AudienceService,
     private readonly promotionProductService: PromotionProductSelectionService,
     private readonly promotionAiService: PromotionAiTemplateService,
+    private readonly campaignsService: CampaignsService,
   ) {
     this.logger.log('[MKT_SENDER_CONSTRUCTED] SenderService constructor called');
   }
@@ -447,9 +452,22 @@ export class SenderService implements OnModuleInit {
         : false;
 
       if (item.template_id && !isAiTemplate) {
-        const fingerprintCutoff = new Date(
-          Date.now() - CONTENT_FINGERPRINT_DAYS * 24 * 3600 * 1000,
+        // Test-mode campaigns use a 1-hour lookback so the same template can be resent
+        // during QA without waiting 3 days. Production behavior is unchanged.
+        const isTestCampaign = item.campaign_id
+          ? (await this.campaignsService.findOne(item.campaign_id).catch(() => null))?.test_mode === true
+          : false;
+        const windowMs = isTestCampaign
+          ? CONTENT_FINGERPRINT_HOURS_TEST * 3600 * 1000
+          : CONTENT_FINGERPRINT_DAYS       * 24 * 3600 * 1000;
+        const fingerprintCutoff = new Date(Date.now() - windowMs);
+
+        this.logger.log(
+          `[MKT_FINGERPRINT_WINDOW] queue_id=${item.id} test_mode=${isTestCampaign} ` +
+          `window=${isTestCampaign ? `${CONTENT_FINGERPRINT_HOURS_TEST}h` : `${CONTENT_FINGERPRINT_DAYS}d`} ` +
+          `cutoff=${fingerprintCutoff.toISOString()}`,
         );
+
         const recentSame = await this.logRepo
           .createQueryBuilder('l')
           .where('l.customer_phone = :phone', { phone: item.customer_phone })
@@ -464,10 +482,13 @@ export class SenderService implements OnModuleInit {
           .getCount();
 
         if (recentSame > 0) {
+          const windowLabel = isTestCampaign
+            ? `${CONTENT_FINGERPRINT_HOURS_TEST} hour`
+            : `${CONTENT_FINGERPRINT_DAYS} days`;
           this.logger.warn(
             `[MKT_SKIP_DECISION] queue_id=${item.id} phone=${item.customer_phone} ` +
-            `rule=CONTENT_FINGERPRINT reason="same template sent within ${CONTENT_FINGERPRINT_DAYS} days" ` +
-            `condition_values="template_id=${item.template_id} recent_matches=${recentSame}"`,
+            `rule=CONTENT_FINGERPRINT reason="same template sent within ${windowLabel}" ` +
+            `condition_values="template_id=${item.template_id} recent_matches=${recentSame} test_mode=${isTestCampaign}"`,
           );
           await this.queueService.markSkipped(item.id, `Content fingerprint: same template sent recently`);
           await this.auditService.log({
@@ -475,7 +496,7 @@ export class SenderService implements OnModuleInit {
             number_id: item.number_id ?? undefined,
             customer_phone: item.customer_phone,
             template_id: item.template_id,
-            reason: `Template already sent to this phone within ${CONTENT_FINGERPRINT_DAYS} days`,
+            reason: `Template already sent to this phone within ${windowLabel}`,
           });
           this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=skipped attempts=${item.attempt_count ?? 0} failure_reason="FINGERPRINT: template_id=${item.template_id}"`);
           return;
