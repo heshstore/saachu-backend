@@ -173,13 +173,27 @@ export class CampaignsService {
       terminal = CampaignStatus.FAILED;
     }
 
-    await this.repo.update(
+    // Atomic: WHERE status='running' means only the first concurrent caller wins.
+    // A second concurrent call that also reached this point will find status already
+    // terminal and affect 0 rows — a safe no-op. This is the race-condition guard.
+    const result = await this.repo.update(
       { id: campaignId, status: CampaignStatus.RUNNING },
       { status: terminal },
     );
+    const affected = (result as any)?.affected ?? null;
+    if (affected === 0) {
+      // Race guard fired: a concurrent evaluateCompletion already wrote the terminal status.
+      // No action needed — the campaign is already in its correct terminal state.
+      this.logger.log(
+        `[CAMPAIGN_COMPLETION_RACE_GUARD] id=${campaignId} — WHERE status=running matched 0 rows; ` +
+        `concurrent evaluation already transitioned campaign (no-op)`,
+      );
+      return;
+    }
     this.logger.log(
       `[CAMPAIGN_COMPLETION] id=${campaignId} name="${campaign.campaign_name}" ` +
-      `→ ${terminal} (sent=${counts.sent} failed=${counts.failed} skipped=${counts.skipped})`,
+      `→ ${terminal} (sent=${counts.sent} failed=${counts.failed} skipped=${counts.skipped} ` +
+      `affected=${affected ?? 'unknown'})`,
     );
   }
 }
