@@ -12,6 +12,7 @@ import { WhatsappMessageQueue } from './entities/whatsapp-message-queue.entity';
 import { WhatsappMessageLog } from './entities/whatsapp-message-log.entity';
 import { WhatsappReply } from './entities/whatsapp-reply.entity';
 import { PromotionProductRotation } from './entities/promotion-product-rotation.entity';
+import { PilotDailyMetrics } from './entities/pilot-daily-metrics.entity';
 
 import { CampaignsController } from './campaigns/campaigns.controller';
 import { TemplatesController } from './templates/templates.controller';
@@ -52,6 +53,7 @@ import { SchemaValidatorService } from './engine/schema-validator.service';
 import { PromotionProductSelectionService } from './promotion/promotion-product-selection.service';
 import { PromotionAiTemplateService } from './promotion/promotion-ai-template.service';
 import { EngineSettingsService } from './engine/engine-settings.service';
+import { PilotMonitoringService } from './engine/pilot-monitoring.service';
 
 @Module({
   imports: [
@@ -65,6 +67,7 @@ import { EngineSettingsService } from './engine/engine-settings.service';
       WhatsappReply,
       ShopifyCatalogItem,
       PromotionProductRotation,
+      PilotDailyMetrics,
     ]),
   ],
   controllers: [
@@ -107,6 +110,7 @@ import { EngineSettingsService } from './engine/engine-settings.service';
     PromotionProductSelectionService,
     PromotionAiTemplateService,
     EngineSettingsService,
+    PilotMonitoringService,
   ],
   exports: [
     CampaignsService,

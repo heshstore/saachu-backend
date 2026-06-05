@@ -6,6 +6,7 @@ import { EngineAuditService, AuditEvent } from './engine-audit.service';
 import { EngineSettingsService } from './engine-settings.service';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 import { ValidateService } from '../validate/validate.service';
+import { PilotMonitoringService } from './pilot-monitoring.service';
 
 @Controller('marketing/whatsapp-engine')
 export class EngineHealthController {
@@ -17,7 +18,22 @@ export class EngineHealthController {
     private readonly engineSettings: EngineSettingsService,
     private readonly marketingWa: MarketingWhatsAppService,
     private readonly validateService: ValidateService,
+    private readonly pilotMonitoring: PilotMonitoringService,
   ) {}
+
+  // ── Pilot monitoring ─────────────────────────────────────────────────────
+
+  /** Real-time pilot dashboard: metrics, health checks, alerts, GREEN/YELLOW/RED */
+  @Get('pilot/dashboard')
+  getPilotDashboard() {
+    return this.pilotMonitoring.getDashboard();
+  }
+
+  /** Historical daily pilot metrics (last 7 days by default, ?days=N for more) */
+  @Get('pilot/metrics')
+  getPilotMetrics(@Query('days') days?: string) {
+    return this.pilotMonitoring.getDailyMetrics(days ? parseInt(days, 10) : 7);
+  }
 
   // Audience pipeline diagnostics: exact DB rows, per-contact filter verdict, queue/number/template status
   @Get('debug/test-audience')
