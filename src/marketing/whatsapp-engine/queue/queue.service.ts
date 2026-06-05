@@ -189,6 +189,30 @@ export class QueueService {
   }
 
   // Cancel all PENDING items for a campaign (called when campaign is cancelled)
+  /** Returns terminal and active row counts for a campaign — used by completion evaluation. */
+  async getCampaignQueueCounts(campaignId: string): Promise<{
+    pending: number; processing: number;
+    sent: number; failed: number; skipped: number;
+  }> {
+    const rows: { status: string; cnt: string }[] = await this.repo
+      .createQueryBuilder('q')
+      .select('q.status', 'status')
+      .addSelect('COUNT(*)', 'cnt')
+      .where('q.campaign_id = :id', { id: campaignId })
+      .groupBy('q.status')
+      .getRawMany();
+    const m: Record<string, number> = {};
+    for (const r of rows) m[r.status] = parseInt(r.cnt, 10);
+    return {
+      pending:    m[QueueStatus.PENDING]    ?? 0,
+      processing: m[QueueStatus.PROCESSING] ?? 0,
+      sent:       (m[QueueStatus.SENT] ?? 0) + (m[QueueStatus.DELIVERED] ?? 0)
+                + (m[QueueStatus.READ] ?? 0) + (m[QueueStatus.REPLIED] ?? 0),
+      failed:     m[QueueStatus.FAILED]  ?? 0,
+      skipped:    m[QueueStatus.SKIPPED] ?? 0,
+    };
+  }
+
   async cancelCampaignQueue(campaignId: string): Promise<void> {
     await this.repo.update(
       { campaign_id: campaignId, status: QueueStatus.PENDING },

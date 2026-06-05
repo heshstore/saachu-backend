@@ -315,7 +315,9 @@ export class SenderService implements OnModuleInit {
     }
   }
 
-  // Outer shell: guarantees [MKT_PROCESS_COMPLETE] fires regardless of outcome
+  // Outer shell: guarantees [MKT_PROCESS_COMPLETE] fires regardless of outcome.
+  // After _processNextInternal returns (item is in a terminal state), trigger
+  // campaign completion evaluation if the item belonged to a campaign.
   async processNext(item: WhatsappMessageQueue, preselectedNumber?: WhatsappNumber): Promise<void> {
     this.logger.log(
       `[MKT_PROCESS_START] id=${item.id} phone=${item.customer_phone} ` +
@@ -326,6 +328,11 @@ export class SenderService implements OnModuleInit {
       await this._processNextInternal(item, preselectedNumber);
     } finally {
       this.logger.log(`[MKT_PROCESS_COMPLETE] id=${item.id} phone=${item.customer_phone}`);
+      if (item.campaign_id) {
+        this.campaignsService.evaluateCompletion(item.campaign_id).catch((e: any) => {
+          this.logger.warn(`[CAMPAIGN_COMPLETION_FAIL] campaignId=${item.campaign_id} error="${e?.message}"`);
+        });
+      }
     }
   }
 

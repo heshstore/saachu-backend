@@ -6,12 +6,14 @@ export enum WhatsAppNumberStatus {
 }
 
 export enum CampaignStatus {
-  DRAFT = 'draft',
-  SCHEDULED = 'scheduled',
-  RUNNING = 'running',
-  PAUSED = 'paused',
-  COMPLETED = 'completed',
-  CANCELLED = 'cancelled',
+  DRAFT               = 'draft',
+  SCHEDULED           = 'scheduled',
+  RUNNING             = 'running',
+  PAUSED              = 'paused',
+  COMPLETED           = 'completed',           // all items sent, 0 failed, 0 skipped
+  PARTIALLY_COMPLETED = 'partially_completed',  // ≥1 sent + some failed/skipped
+  FAILED              = 'failed',              // 0 sent (all failed or all skipped)
+  CANCELLED           = 'cancelled',           // manually cancelled + queue voided
 }
 
 export enum QueueStatus {

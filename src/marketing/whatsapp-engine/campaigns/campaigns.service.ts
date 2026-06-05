@@ -69,10 +69,13 @@ export class CampaignsService {
   async launch(id: string): Promise<{ campaign: MarketingCampaign; queued: number }> {
     const campaign = await this.findOne(id);
 
-    const launchable = [CampaignStatus.DRAFT, CampaignStatus.PAUSED, CampaignStatus.SCHEDULED];
+    const launchable = [
+      CampaignStatus.DRAFT, CampaignStatus.PAUSED, CampaignStatus.SCHEDULED,
+      CampaignStatus.COMPLETED, CampaignStatus.PARTIALLY_COMPLETED, CampaignStatus.FAILED,
+    ];
     if (!launchable.includes(campaign.status)) {
       throw new BadRequestException(
-        `Campaign is ${campaign.status} — can only launch from DRAFT, PAUSED, or SCHEDULED`,
+        `Campaign is ${campaign.status} — can only launch from DRAFT, PAUSED, SCHEDULED, COMPLETED, PARTIALLY_COMPLETED, or FAILED`,
       );
     }
     if (!campaign.template_id) {
@@ -141,5 +144,42 @@ export class CampaignsService {
     await this.repo.update(id, { status: CampaignStatus.CANCELLED });
     await this.queueService.cancelCampaignQueue(id);
     return this.findOne(id);
+  }
+
+  /**
+   * Automatic completion evaluation — called after every queue item reaches a terminal state.
+   * Only transitions campaigns that are currently RUNNING; all other statuses are left untouched.
+   *
+   * Decision table (after remainingActive = 0):
+   *   sent > 0 AND failed = 0 AND skipped = 0  →  COMPLETED
+   *   sent > 0 AND (failed > 0 OR skipped > 0)  →  PARTIALLY_COMPLETED
+   *   sent = 0                                   →  FAILED
+   */
+  async evaluateCompletion(campaignId: string): Promise<void> {
+    const campaign = await this.repo.findOne({ where: { id: campaignId } });
+    if (!campaign || campaign.status !== CampaignStatus.RUNNING) return;
+
+    const counts = await this.queueService.getCampaignQueueCounts(campaignId);
+    const remainingActive = counts.pending + counts.processing;
+
+    if (remainingActive > 0) return; // still work to do
+
+    let terminal: CampaignStatus;
+    if (counts.sent > 0 && counts.failed === 0 && counts.skipped === 0) {
+      terminal = CampaignStatus.COMPLETED;
+    } else if (counts.sent > 0) {
+      terminal = CampaignStatus.PARTIALLY_COMPLETED;
+    } else {
+      terminal = CampaignStatus.FAILED;
+    }
+
+    await this.repo.update(
+      { id: campaignId, status: CampaignStatus.RUNNING },
+      { status: terminal },
+    );
+    this.logger.log(
+      `[CAMPAIGN_COMPLETION] id=${campaignId} name="${campaign.campaign_name}" ` +
+      `→ ${terminal} (sent=${counts.sent} failed=${counts.failed} skipped=${counts.skipped})`,
+    );
   }
 }
