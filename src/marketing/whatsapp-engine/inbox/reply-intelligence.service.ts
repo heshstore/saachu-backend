@@ -75,10 +75,17 @@ export class ReplyIntelligenceService {
       this.logger.error(`[INBOX_AUDIT] message_save_failed: phone=${phone} error="${err?.message}"`);
     }
 
-    // 1b. Link reply back to the most recent sent log row for this phone
+    // 1b. Link reply back to the most recent sent log row for this phone.
+    // Outbound queue items store phones without leading + (e.g. "917010366206") while the
+    // inbox resolves canonical E.164 with + ("+917010366206"). Match both forms so the
+    // reply_received flag is set correctly and the replied analytics count is non-zero.
     try {
+      const phoneStripped = phone.replace(/^\+/, '');
       const recentLog = await this.logRepo.findOne({
-        where: { customer_phone: phone },
+        where: [
+          { customer_phone: phone },
+          { customer_phone: phoneStripped },
+        ],
         order: { sent_at: 'DESC' },
       });
       if (recentLog) {
