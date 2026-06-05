@@ -30,8 +30,10 @@ export class AnalyticsService {
     // 1. Log row has campaign_id directly (current path)
     // 2. Log row's queue_id points to a queue item with campaign_id set
     // 3. (Historical fallback) queue item has no campaign_id but template matches this campaign.
-    //    IMPORTANT: tier-3 is scoped to q.campaign_id IS NULL to prevent double-counting
-    //    messages from other campaigns that happen to use the same template.
+    //    Scoped to q.campaign_id IS NULL AND q.created_at >= campaign.created_at.
+    //    The date guard prevents pre-campaign autonomous-engine sends (which use null campaign_id
+    //    for templates not linked to a running campaign) from being incorrectly attributed to this
+    //    campaign just because they share the same template_id.
     const rows = await this.ds.query<StatusRow[]>(`
       SELECT l.status, COUNT(*)::text AS count
       FROM whatsapp_message_logs l
@@ -42,6 +44,7 @@ export class AnalyticsService {
            WHERE q.campaign_id = $1
               OR (
                 q.campaign_id IS NULL
+                AND q.created_at >= (SELECT c2.created_at FROM marketing_campaigns c2 WHERE c2.id = $1)
                 AND q.template_id IN (
                   SELECT c.template_id
                   FROM marketing_campaigns c
