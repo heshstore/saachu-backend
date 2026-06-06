@@ -29,10 +29,10 @@ module.exports = {
         // Phase 8 — Connection Testing (TEST_ONLY=true, flip to false at pilot go-live)
         WHATSAPP_ENGINE_ENABLED: 'true',
         WHATSAPP_ENGINE_DRY_RUN: 'false',
-        WHATSAPP_ENGINE_TEST_ONLY: 'true',
+        WHATSAPP_ENGINE_TEST_ONLY: 'false',
         WHATSAPP_ENGINE_PILOT_MODE: 'true',
         WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE: '25',
-        MARKETING_TEST_BYPASS_SEND_WINDOW: 'true',
+        MARKETING_TEST_BYPASS_SEND_WINDOW: 'false',
       },
 
       // Logs
