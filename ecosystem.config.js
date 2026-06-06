@@ -26,12 +26,13 @@ module.exports = {
         // SHOPIFY_STORE: 'your-store.myshopify.com',       // ← uncomment + fill
         // SHOPIFY_ACCESS_TOKEN: 'shpat_xxxxxxxxxxxx',      // ← uncomment + fill
 
-        // Phase 8 — Production Pilot (real audience, tighter limits, pilot safety active)
+        // Phase 8 — Connection Testing (TEST_ONLY=true, flip to false at pilot go-live)
         WHATSAPP_ENGINE_ENABLED: 'true',
         WHATSAPP_ENGINE_DRY_RUN: 'false',
-        WHATSAPP_ENGINE_TEST_ONLY: 'false',
+        WHATSAPP_ENGINE_TEST_ONLY: 'true',
         WHATSAPP_ENGINE_PILOT_MODE: 'true',
         WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE: '25',
+        MARKETING_TEST_BYPASS_SEND_WINDOW: 'true',
       },
 
       // Logs
