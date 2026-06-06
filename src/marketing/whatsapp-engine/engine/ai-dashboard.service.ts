@@ -251,7 +251,7 @@ export class AiDashboardService {
         COUNT(*) AS cnt
       FROM whatsapp_message_queue q
       JOIN marketing_campaigns c ON c.id = q.campaign_id
-      LEFT JOIN whatsapp_numbers n ON n.id = q.number_id
+      JOIN whatsapp_numbers n ON n.id = q.number_id
       WHERE c.is_promotion = true
       GROUP BY q.status, n.phone, n.name
       ORDER BY n.phone, q.status
