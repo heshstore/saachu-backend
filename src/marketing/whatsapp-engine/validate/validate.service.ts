@@ -8,6 +8,7 @@ import { WhatsappNumber } from '../entities/whatsapp-number.entity';
 import { QueueStatus } from '../entities/enums';
 import { TimingAiService } from '../ai/timing-ai.service';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
+import { getActiveLimits } from '../shared/number-limits';
 
 export interface QueuePatternReport {
   total_pending: number;
@@ -247,7 +248,7 @@ export class ValidateService {
       ORDER BY created_at DESC
     `);
     const safeNumbers = numbersRows.filter(
-      (n: any) => n.is_active && n.status === 'ACTIVE' && Number(n.daily_sent) < Number(n.daily_limit),
+      (n: any) => n.is_active && n.status === 'ACTIVE' && Number(n.daily_sent) < getActiveLimits(Number(n.warmup_level)).daily,
     );
 
     // 5. Templates eligibility

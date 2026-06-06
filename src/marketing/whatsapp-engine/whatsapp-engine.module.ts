@@ -54,6 +54,7 @@ import { PromotionProductSelectionService } from './promotion/promotion-product-
 import { PromotionAiTemplateService } from './promotion/promotion-ai-template.service';
 import { EngineSettingsService } from './engine/engine-settings.service';
 import { PilotMonitoringService } from './engine/pilot-monitoring.service';
+import { AiDashboardService } from './engine/ai-dashboard.service';
 
 @Module({
   imports: [
@@ -111,6 +112,7 @@ import { PilotMonitoringService } from './engine/pilot-monitoring.service';
     PromotionAiTemplateService,
     EngineSettingsService,
     PilotMonitoringService,
+    AiDashboardService,
   ],
   exports: [
     CampaignsService,

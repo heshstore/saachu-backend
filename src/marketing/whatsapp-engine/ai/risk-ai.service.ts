@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { WhatsappNumber } from '../entities/whatsapp-number.entity';
 import { WhatsappMessageLog } from '../entities/whatsapp-message-log.entity';
 import { WhatsAppNumberStatus } from '../entities/enums';
+import { getActiveLimits } from '../shared/number-limits';
 
 @Injectable()
 export class RiskAiService {
@@ -62,8 +63,9 @@ export class RiskAiService {
       }
     }
 
-    // daily_sent vs daily_limit
-    if (number.daily_limit > 0 && (number.daily_sent / number.daily_limit) >= 0.9) {
+    // daily_sent vs warmup cap
+    const dailyCap = getActiveLimits(number.warmup_level).daily;
+    if (dailyCap > 0 && (number.daily_sent / dailyCap) >= 0.9) {
       score += 15;
     }
 

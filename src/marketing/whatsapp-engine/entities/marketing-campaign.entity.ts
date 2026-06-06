@@ -60,6 +60,10 @@ export class MarketingCampaign {
   @Column({ type: 'boolean', default: false })
   test_mode: boolean;
 
+  /** Human-readable promotion ID: PROMO-YYYYMMDD-XXXX. Set automatically for is_promotion=true. */
+  @Column({ type: 'varchar', length: 20, nullable: true, unique: true })
+  promo_id: string | null;
+
   @Column({ type: 'int', nullable: true })
   created_by: number | null;
 

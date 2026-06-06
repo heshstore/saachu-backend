@@ -42,8 +42,18 @@ export class CampaignsService {
     // Overwrite anything the client may have sent for those fields.
     if (dto.is_promotion) {
       Object.assign(dto, PROMOTION_RULES);
+      if (!dto.promo_id) {
+        dto.promo_id = CampaignsService._generatePromoId();
+      }
     }
     return this.repo.save(this.repo.create(dto));
+  }
+
+  private static _generatePromoId(): string {
+    const d = new Date();
+    const date = d.toISOString().slice(0, 10).replace(/-/g, '');
+    const rand = Math.random().toString(36).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4).padEnd(4, '0');
+    return `PROMO-${date}-${rand}`;
   }
 
   async update(id: string, dto: Partial<MarketingCampaign>): Promise<MarketingCampaign> {

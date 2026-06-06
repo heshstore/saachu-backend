@@ -19,21 +19,51 @@ export class MarketingAudience {
   @Column({ type: 'int', nullable: true })
   customer_id: number | null;
 
+  // phone = mobile_1 (WhatsApp dedup key). Nullable so email-only contacts can be stored.
+  // PostgreSQL unique index treats NULLs as distinct — multiple null phones do not conflict.
   @Index('idx_ma_phone_unique', { unique: true })
-  @Column({ type: 'varchar', unique: true })
-  phone: string;
+  @Column({ type: 'varchar', nullable: true })
+  phone: string | null;
 
+  @Column({ type: 'varchar', nullable: true })
+  mobile_2: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  email: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  customer_name: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  company: string | null;
+
+  // Legacy alias kept for existing campaign/queue logic that references `name`
   @Column({ type: 'varchar', nullable: true })
   name: string | null;
 
+  @Column({ type: 'text', nullable: true })
+  address: string | null;
+
   @Column({ type: 'varchar', nullable: true })
   city: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  state: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  country: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  gst: string | null;
 
   @Column({ type: 'varchar', nullable: true })
   business_type: string | null;
 
   @Column({ type: 'varchar', nullable: true })
   source: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  notes: string | null;
 
   @Column({ type: 'decimal', precision: 5, scale: 2, default: 0 })
   quality_score: number;

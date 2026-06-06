@@ -7,6 +7,7 @@ import { EngineSettingsService } from './engine-settings.service';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 import { ValidateService } from '../validate/validate.service';
 import { PilotMonitoringService } from './pilot-monitoring.service';
+import { AiDashboardService } from './ai-dashboard.service';
 
 @Controller('marketing/whatsapp-engine')
 export class EngineHealthController {
@@ -19,7 +20,16 @@ export class EngineHealthController {
     private readonly marketingWa: MarketingWhatsAppService,
     private readonly validateService: ValidateService,
     private readonly pilotMonitoring: PilotMonitoringService,
+    private readonly aiDashboard: AiDashboardService,
   ) {}
+
+  // ── AI Promotion Dashboard ────────────────────────────────────────────────
+
+  /** Aggregated AI promotion visibility: engine status, today's activity, campaigns, queue, product rotation, numbers, log stream */
+  @Get('ai/dashboard')
+  getAiDashboard() {
+    return this.aiDashboard.getDashboard();
+  }
 
   // ── Pilot monitoring ─────────────────────────────────────────────────────
 

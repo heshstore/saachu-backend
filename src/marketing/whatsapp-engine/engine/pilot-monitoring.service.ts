@@ -10,6 +10,7 @@ import { PilotDailyMetrics } from '../entities/pilot-daily-metrics.entity';
 import { MarketingCampaign } from '../entities/marketing-campaign.entity';
 import { QueueStatus, CampaignStatus } from '../entities/enums';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
+import { getActiveLimits } from '../shared/number-limits';
 
 // ── Thresholds ────────────────────────────────────────────────────────────────
 const FAILURE_RATE_CRITICAL_PCT   = 20;  // fail% above this → CRITICAL alert + YELLOW
@@ -444,11 +445,7 @@ export class PilotMonitoringService {
     return { status: 'GREEN', reasons: ['All health checks passing'] };
   }
 
-  // ── Internal: pilot cap lookup (mirrors sender.service.ts) ───────────────
   private _pilotCap(level: number): { daily: number; hourly: number } {
-    const PILOT = { 1: { daily: 10, hourly: 2 }, 2: { daily: 20, hourly: 5 }, 3: { daily: 30, hourly: 7 }, 4: { daily: 50, hourly: 10 } };
-    const HARD  = { 1: { daily: 30, hourly: 5 }, 2: { daily: 80, hourly: 12 }, 3: { daily: 150, hourly: 20 }, 4: { daily: 200, hourly: 30 } };
-    const table = process.env.WHATSAPP_ENGINE_PILOT_MODE === 'true' ? PILOT : HARD;
-    return (table as any)[level] ?? table[1];
+    return getActiveLimits(level);
   }
 }

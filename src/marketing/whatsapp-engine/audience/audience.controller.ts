@@ -34,6 +34,12 @@ export class AudienceController {
     return this.audienceService.bulkUpsert(body.rows ?? []);
   }
 
+  /** Check which phones already exist — returns existing records for conflict resolution UI. */
+  @Post('check-conflicts')
+  checkConflicts(@Body() body: { phones: string[] }) {
+    return this.audienceService.checkConflicts(body.phones ?? []);
+  }
+
   @Patch(':id')
   update(@Param('id') id: string, @Body() dto: Partial<MarketingAudience>) {
     return this.audienceService.update(id, dto);
@@ -60,6 +66,11 @@ export class AudienceController {
   @Get('stats/health')
   getHealthStats() {
     return this.audienceService.getHealthStats();
+  }
+
+  @Get(':id/history')
+  getContactHistory(@Param('id') id: string) {
+    return this.audienceService.getContactHistory(id);
   }
 
   @Delete(':id')

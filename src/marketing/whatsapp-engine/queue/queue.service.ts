@@ -8,19 +8,9 @@ import { AudienceService } from '../audience/audience.service';
 import { NumbersService } from '../numbers/numbers.service';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 import { ShopifyCatalogItem } from '../../../shopify-catalog/entities/shopify-catalog-item.entity';
+import { getActiveLimits } from '../shared/number-limits';
 
 const STORE_URL = 'https://www.heshstore.in';
-
-// Hardcoded test phones for TEST MODE — bypass customer DB and send only to these numbers.
-// Stored without leading + to match the normalizer in sender.service.ts.
-const TEST_PHONES = [
-  '919884052555',
-  '919940172777',
-  '918939052555',
-  '919952985052',
-  '919940190294',
-  '917010366206',
-];
 
 @Injectable()
 export class QueueService {
@@ -257,7 +247,7 @@ export class QueueService {
       (n) =>
         n.is_active &&
         n.status === WhatsAppNumberStatus.ACTIVE &&
-        n.daily_sent < n.daily_limit &&
+        n.daily_sent < getActiveLimits(n.warmup_level).daily &&
         this.whatsAppService.isConnected(n.id),
     );
     this.logger.log(
@@ -380,28 +370,48 @@ export class QueueService {
     return items.length;
   }
 
-  // Builds exactly 6 queue items targeting hardcoded test phones only.
+  // Builds queue items from dynamic test contacts (is_test_contact=true, opt_out=false,
+  // is_whatsapp_valid=true). Replaces the former hardcoded TEST_PHONES list so recipients
+  // can be managed via the audience table without code deployments.
   private async _buildTestModeQueue(
     campaign: MarketingCampaign,
     sendableNumbers: Awaited<ReturnType<NumbersService['findAll']>>,
   ): Promise<number> {
+    const testContacts = await this.audienceService.findEligible(0, true);
+
+    if (!testContacts.length) {
+      this.logger.warn(
+        `[TEST_MODE_NO_CONTACTS] campaign_id=${campaign.id} name="${campaign.campaign_name}" ` +
+        `— no eligible test contacts found. ` +
+        `Add audience rows with is_test_contact=true, opt_out=false, is_whatsapp_valid=true ` +
+        `to run a test campaign.`,
+      );
+      return 0;
+    }
+
+    this.logger.log(
+      `[TEST_MODE_CONTACTS_FOUND] campaign_id=${campaign.id} count=${testContacts.length} ` +
+      `phones=${JSON.stringify(testContacts.map(c => c.phone))}`,
+    );
+
     const now = new Date();
     // Space test messages 15 seconds apart so they don't all fire simultaneously
-    const items: Partial<WhatsappMessageQueue>[] = TEST_PHONES.map((phone, idx) => {
+    const items: Partial<WhatsappMessageQueue>[] = testContacts.map((contact, idx) => {
       const number = sendableNumbers[idx % sendableNumbers.length];
       return {
         campaign_id:    campaign.id,
         template_id:    campaign.template_id ?? undefined,
         number_id:      number?.id ?? undefined,
-        customer_phone: phone,
+        customer_phone: contact.phone,
+        customer_id:    contact.customer_id ?? undefined,
         scheduled_at:   new Date(now.getTime() + idx * 15_000),
         status:         QueueStatus.PENDING,
         priority:       100,
         message_payload: {
-          name:          'Test Contact',
-          city:          '',
-          business_type: '',
-          sender_phone:  number?.phone ?? '',
+          name:          contact.name          ?? '',
+          city:          contact.city          ?? '',
+          business_type: contact.business_type ?? '',
+          sender_phone:  number?.phone         ?? '',
         },
       };
     });

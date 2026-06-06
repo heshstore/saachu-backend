@@ -17,27 +17,7 @@ import { PromotionProductSelectionService } from '../promotion/promotion-product
 import { PromotionAiTemplateService } from '../promotion/promotion-ai-template.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { WhatsappNumber } from '../entities/whatsapp-number.entity';
-
-// Hard limits per warmup level (1=COLD, 2=WARM, 3=HOT, 4=SEASONED)
-const HARD_LIMITS: Record<number, { daily: number; hourly: number }> = {
-  1: { daily: 30, hourly: 5 },
-  2: { daily: 80, hourly: 12 },
-  3: { daily: 150, hourly: 20 },
-  4: { daily: 200, hourly: 30 },
-};
-
-// Tighter limits for pilot mode (WHATSAPP_ENGINE_PILOT_MODE=true)
-const PILOT_LIMITS: Record<number, { daily: number; hourly: number }> = {
-  1: { daily: 10, hourly: 2 },
-  2: { daily: 20, hourly: 5 },
-  3: { daily: 30, hourly: 7 },
-  4: { daily: 50, hourly: 10 },
-};
-
-function getActiveLimits(warmupLevel: number): { daily: number; hourly: number } {
-  const table = process.env.WHATSAPP_ENGINE_PILOT_MODE === 'true' ? PILOT_LIMITS : HARD_LIMITS;
-  return table[warmupLevel] ?? table[1];
-}
+import { getActiveLimits } from '../shared/number-limits';
 
 const CONTENT_FINGERPRINT_DAYS       = 3;
 // Test-mode campaigns use a 1-hour window so the same template can be resent quickly

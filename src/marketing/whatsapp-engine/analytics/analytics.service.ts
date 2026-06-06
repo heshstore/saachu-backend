@@ -6,6 +6,7 @@ import { WhatsappNumber } from '../entities/whatsapp-number.entity';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
 import { QueueStatus } from '../entities/enums';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
+import { getActiveLimits } from '../shared/number-limits';
 
 type StatusRow = { status: string; count: string };
 
@@ -285,7 +286,7 @@ export class AnalyticsService {
         phone: n.phone,
         name: n.name,
         daily_sent: n.daily_sent,
-        daily_limit: n.daily_limit,
+        daily_cap: getActiveLimits(n.warmup_level).daily,
         risk_score: Number(n.risk_score),
         is_active: n.is_active,
         waState: this.marketingWa.getNumberWaStatus(n.id).waState,

@@ -17,6 +17,7 @@ import { AudienceService } from '../audience/audience.service';
 import { EngineAuditService, AuditEvent } from './engine-audit.service';
 import { EngineSettingsService } from './engine-settings.service';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
+import { getActiveLimits } from '../shared/number-limits';
 
 @Injectable()
 export class AutonomousEngineService implements OnModuleInit {
@@ -130,7 +131,7 @@ export class AutonomousEngineService implements OnModuleInit {
       (n) =>
         n.is_active &&
         n.status === WhatsAppNumberStatus.ACTIVE &&
-        n.daily_sent < n.daily_limit &&
+        n.daily_sent < getActiveLimits(n.warmup_level).daily &&
         this.whatsAppService.isConnected(n.id),
     );
 
@@ -229,7 +230,7 @@ export class AutonomousEngineService implements OnModuleInit {
       const member = audience[i];
       const number = sendableNumbers[i % sendableNumbers.length];
 
-      if (allocatedPerNumber[number.id] >= number.daily_limit) continue;
+      if (allocatedPerNumber[number.id] >= getActiveLimits(number.warmup_level).daily) continue;
 
       // Skip phones already queued today (any status — sent, skipped, failed, or pending)
       if (activePhones.has(member.phone)) {

@@ -38,17 +38,117 @@ export class AudienceService {
     await this.repo.delete(id);
   }
 
-  // Upsert by phone (unique constraint); updates name/city/business_type/source on conflict
-  async bulkUpsert(rows: Partial<MarketingAudience>[]): Promise<{ upserted: number }> {
-    if (!rows.length) return { upserted: 0 };
-    await this.repo
-      .createQueryBuilder()
-      .insert()
-      .into(MarketingAudience)
-      .values(rows as any)
-      .orUpdate(['name', 'city', 'business_type', 'source', 'customer_id'], ['phone'])
-      .execute();
-    return { upserted: rows.length };
+  // Check which phones already exist in the promotional DB.
+  // Returns full existing records so the frontend can present conflict resolution.
+  async checkConflicts(phones: string[]): Promise<{
+    phone: string;
+    id: string;
+    name: string | null;
+    city: string | null;
+    business_type: string | null;
+    customer_id: number | null;  // non-null = customer-linked, never overwrite
+  }[]> {
+    if (!phones.length) return [];
+    const rows: any[] = await this.ds.query(
+      `SELECT id, phone, name, city, business_type, customer_id
+       FROM marketing_audience
+       WHERE phone = ANY($1)`,
+      [phones],
+    );
+    return rows;
+  }
+
+  // Upsert by phone — caller is responsible for pre-resolving conflicts.
+  // Customer-linked rows (customer_id IS NOT NULL) are never overwritten even if passed in.
+  async bulkUpsert(rows: Partial<MarketingAudience>[]): Promise<{
+    total: number; created: number; updated: number; errors: { phone: string; reason: string }[];
+  }> {
+    if (!rows.length) return { total: 0, created: 0, updated: 0, errors: [] };
+
+    const errors: { phone: string; reason: string }[] = [];
+    const valid = rows.filter((r) => {
+      const hasPhone = !!r.phone?.trim();
+      const hasEmail = !!r.email?.trim();
+      if (!hasPhone && !hasEmail) {
+        errors.push({ phone: String(r.phone ?? r.email ?? ''), reason: 'Requires phone or email' });
+        return false;
+      }
+      return true;
+    });
+
+    if (!valid.length) return { total: rows.length, created: 0, updated: 0, errors };
+
+    // Split into phone-keyed rows (dedup on phone) and email-only rows (plain insert, no dedup).
+    const phoneRows  = valid.filter(r => !!r.phone?.trim()).map(r => ({ ...r, phone: r.phone!.trim() }));
+    const emailOnly  = valid.filter(r => !r.phone?.trim());
+
+    let created = emailOnly.length;
+    let updated = 0;
+
+    // Email-only rows: plain insert, no dedup possible without phone.
+    if (emailOnly.length) {
+      await this.repo.save(emailOnly.map(r => this.repo.create(r as any)));
+    }
+
+    if (phoneRows.length) {
+      const phones = phoneRows.map(r => r.phone);
+      const existing: { phone: string; customer_id: number | null }[] = await this.ds.query(
+        `SELECT phone, customer_id FROM marketing_audience WHERE phone = ANY($1)`,
+        [phones],
+      );
+      const existingMap = new Map(existing.map(e => [e.phone, e]));
+
+      // Customer-linked rows are protected — never overwrite.
+      phoneRows.forEach(r => {
+        const ex = existingMap.get(r.phone);
+        if (ex && ex.customer_id != null)
+          errors.push({ phone: r.phone, reason: 'Linked to customer — cannot overwrite' });
+      });
+
+      const safe = phoneRows.filter(r => {
+        const ex = existingMap.get(r.phone);
+        return !ex || ex.customer_id == null;
+      });
+
+      if (safe.length) {
+        await this.repo
+          .createQueryBuilder()
+          .insert()
+          .into(MarketingAudience)
+          .values(safe as any)
+          .orUpdate(
+            ['name', 'customer_name', 'company', 'mobile_2', 'email',
+             'city', 'state', 'country', 'address', 'gst',
+             'business_type', 'source', 'notes'],
+            ['phone'],
+          )
+          .execute();
+        updated = safe.filter(r => existingMap.has(r.phone)).length;
+        created += safe.length - updated;
+      }
+    }
+
+    return { total: rows.length, created, updated, errors };
+  }
+
+  // Promotion history for a contact: all messages sent to this phone number.
+  async getContactHistory(id: string): Promise<{
+    campaign_id: string | null;
+    campaign_name: string | null;
+    status: string;
+    sent_at: string | null;
+    reply_received: boolean;
+  }[]> {
+    const contact = await this.findOne(id);
+    return this.ds.query(
+      `SELECT l.campaign_id, c.campaign_name, l.status, l.sent_at, l.reply_received
+       FROM whatsapp_message_logs l
+       LEFT JOIN marketing_campaigns c ON c.id = l.campaign_id
+       WHERE l.customer_phone = $1
+       ORDER BY l.sent_at DESC
+       LIMIT 100`,
+      [contact.phone],
+    );
   }
 
   async markOptOut(id: string): Promise<MarketingAudience> {

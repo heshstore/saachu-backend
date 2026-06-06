@@ -64,8 +64,6 @@ function resolveCustomerPhone(
 const WATCHDOG_MS          = 60_000;
 const BOOT_TIMEOUT_MS      = 180_000;
 const AUTH_TIMEOUT_MS      = 180_000;
-const MAX_AUTO_RECONNECTS  = 3;
-const RECONNECT_DELAY_MS   = 5_000;
 // Max QR codes shown per manual Connect click. After this many WA-issued QR refreshes
 // the lifecycle stops and waState→awaiting_manual_reconnect. User must click Connect again.
 const MAX_QR_REFRESH_ATTEMPTS = 1;
@@ -144,6 +142,7 @@ interface NumberClientState {
   qrDataUrl: string | null;
   qrGeneratedAt: Date | null;
   firstQrGeneratedAt: Date | null;
+  phoneLinkCode: string | null;
   lastReadyAt: Date | null;
   reconnectCount: number;
   qrRefreshCount: number;
@@ -152,6 +151,10 @@ interface NumberClientState {
   // Cached result of _hasRestorableSession() — updated at lifecycle events only, never during polling.
   // Eliminates repeated filesystem I/O from health-endpoint calls.
   sessionAvailable: boolean;
+  // True when the session dir has leveldb but no blob — the fingerprint of a QR auth that was
+  // interrupted (nodemon restart, crash) after Chrome started writing but before auth completed.
+  // Set once at boot scan; cleared when the number successfully reaches ready.
+  partialSession: boolean;
   // Last composite status key emitted via [WA_STATUS_RESOLVE] — suppresses duplicate log lines.
   _lastStatusKey: string | null;
 }
@@ -180,12 +183,14 @@ function makeState(): NumberClientState {
     qrDataUrl: null,
     qrGeneratedAt: null,
     firstQrGeneratedAt: null,
+    phoneLinkCode: null,
     lastReadyAt: null,
     reconnectCount: 0,
     qrRefreshCount: 0,
     sessionStartedAt: null,
     lastDisconnectedAt: null,
     sessionAvailable: false,
+    partialSession: false,
     _lastStatusKey: null,
   };
 }
@@ -209,8 +214,6 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     qrToReadySuccesses:      0,
   };
 
-  // Populated in onModuleInit from DB rows — best-effort phone lookup for isolation logs.
-  private readonly _phoneCache = new Map<string, string>();
 
   constructor(
     @InjectRepository(WhatsappNumber)
@@ -253,8 +256,6 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       const rows = await this.numberRepo.find();
 
       for (const r of rows) {
-        // Populate phone cache for isolation logging throughout the session lifecycle.
-        this._phoneCache.set(r.id, r.phone);
         const folderExists      = fs.existsSync(this._getSessionDir(r.id));
         const restorableSession = this._hasRestorableSession(r.id);
         this.logger.log(
@@ -312,10 +313,24 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
             st.destroyed         = false;
           }
           st.sessionAvailable = false;
-          this.logger.log(
-            `[RESTORE_FAILED_MANUAL_REQUIRED] numberId=${r.id} phone=${r.phone} ` +
-            `reason=no_restorable_session_at_boot — user must click Connect`,
-          );
+
+          // Detect the partial-session fingerprint: leveldb exists but blob is missing.
+          // This is left behind when a previous QR auth was interrupted (nodemon restart /
+          // process crash) after Chrome started writing but before auth completed.
+          const isPartial = this._isPartialSession(r.id);
+          st.partialSession = isPartial;
+          if (isPartial) {
+            this.logger.warn(
+              `[PARTIAL_SESSION_DETECTED] numberId=${r.id} phone=${r.phone} ` +
+              `— leveldb exists but blob missing; previous QR auth was interrupted. ` +
+              `Click Connect → scan QR to complete auth. Session dir is preserved.`,
+            );
+          } else {
+            this.logger.log(
+              `[RESTORE_FAILED_MANUAL_REQUIRED] numberId=${r.id} phone=${r.phone} ` +
+              `reason=no_restorable_session_at_boot — user must click Connect`,
+            );
+          }
           this._transitionState(r.id, st, 'awaiting_manual_reconnect', 'no_session_at_boot');
           await this._updateNumberWaState(r.id, 'awaiting_manual_reconnect');
         }
@@ -329,6 +344,21 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy() {
     this.logger.log('[MKT_WA] Shutdown — destroying all clients');
+
+    // Warn clearly when a shutdown interrupts an in-flight QR auth.
+    // These numbers will have partial session files (leveldb written, blob not yet created)
+    // and will need manual Connect + QR scan on next boot.
+    const midAuthStates: WaState[] = ['initializing', 'awaiting_scan', 'authenticating'];
+    for (const [id, state] of this.clients) {
+      if (midAuthStates.includes(state.waState)) {
+        this.logger.warn(
+          `[QR_AUTH_INTERRUPTED] numberId=${id} waState=${state.waState} — ` +
+          `process shutting down during QR auth; session dir will have leveldb but no blob. ` +
+          `Next boot: click Connect and scan QR again to complete auth.`,
+        );
+      }
+    }
+
     const shutdowns: Promise<void>[] = [];
     for (const [id, state] of this.clients) {
       state.terminating = true;
@@ -422,11 +452,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
   // ── Public API ───────────────────────────────────────────────────────────────
 
   async connectNumber(numberId: string, isManual = false): Promise<void> {
-    // [WA_ISOLATION] Step 1 — log connect entry with full snapshot before any mutation.
-    this._logIsolation('connect_requested', numberId, {
-      activeClientsSnapshot: this._clientsSnapshot(),
-    });
-    this._checkIsolationViolations(numberId, 'connect_requested');
+    this.logger.log(`[WA_OPERATOR_CONNECT] numberId=${numberId} isManual=${isManual} ts=${new Date().toISOString()}`);
 
     const activeId = this._getActiveNumberId();
     if (activeId && activeId !== numberId) {
@@ -441,11 +467,6 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       // Cache session availability once at state creation — avoids repeated filesystem reads during
       // health polls. Updated again at ready, forceInvalidateSession, and reset flows.
       state.sessionAvailable = this._hasRestorableSession(numberId);
-      // [WA_ISOLATION] New state registered — log the clients map after insertion.
-      this._logIsolation('client_registered', numberId, {
-        isNew: true,
-        activeClientsSnapshot: this._clientsSnapshot(),
-      });
     } else if (!state.watchdogTimer) {
       // Watchdog may have self-cleared: its setInterval callback sets watchdogTimer=null and
       // returns when it detects state.terminating=true (set by forceInvalidateSession).
@@ -495,12 +516,14 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     try {
       await this._withInitLock(numberId, () => this._initClient(numberId, state!));
     } catch (e: any) {
-      // All init failures → invalidate auth and return to idle. No retries, no recovery.
-      this.logger.error(`[MKT_WA:${numberId}] Init error: ${e?.message}`);
+      // Init failure — preserve auth files, stop Chrome, wait for operator.
+      // Auth files may still be valid; the failure could be a Chromium crash or
+      // network issue, not a WA session expiry.
+      this.logger.error(`[MKT_WA:${numberId}] Init error: ${e?.message} — preserving auth, operator action required`);
       this._metrics.failedBeforeReady++;
       this._logMetrics();
       state.qrSubject.next(JSON.stringify({ type: 'error', message: `Init failed: ${e?.message}` }));
-      await this.forceInvalidateSession(numberId, `init_error`);
+      this._stopAndWaitForOperator(numberId, `init_error`);
     } finally {
       state.starting = false;
     }
@@ -830,8 +853,9 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     const browserAlive = state.client.pupBrowser?.isConnected?.() ?? false;
     const pageOpen = page != null && !page.isClosed();
     if (!browserAlive || !pageOpen) {
-      this.logger.warn(`[SEND_SKIPPED] ${numberId} — browser unhealthy, invalidating session`);
-      this.forceInvalidateSession(numberId, 'send_browser_unhealthy').catch(() => {});
+      // Browser unhealthy at send time — stop cleanly, preserve auth, do not wipe session.
+      this.logger.warn(`[WA_SESSION_PRESERVED] ${numberId} — browser unhealthy at send time; preserving auth for restore`);
+      this._stopAndWaitForOperator(numberId, 'send_browser_unhealthy');
       throw new Error(`[SEND_SKIPPED] ${numberId} — browser unhealthy`);
     }
 
@@ -895,6 +919,51 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     return result;
   }
 
+  /**
+   * Request a phone-number pairing code instead of a QR code.
+   * The wwebjs client must already be initializing (call /connect first).
+   * Returns the 8-char code the operator enters in WhatsApp → Linked Devices → Link with phone number.
+   *
+   * Safe to call when waState is 'initializing' or 'awaiting_scan'.
+   * The 'authenticated' event fires normally once the code is accepted by WA.
+   */
+  async requestPhoneLink(numberId: string, phoneNumber: string): Promise<{ code: string }> {
+    const state = this.clients.get(numberId);
+    if (!state || !state.client) {
+      throw new Error(`[WA_PHONE_LINK] ${numberId} — no active client. Call /connect first to start Chromium.`);
+    }
+    const validStates: WaState[] = ['initializing', 'awaiting_scan'];
+    if (!validStates.includes(state.waState)) {
+      throw new Error(`[WA_PHONE_LINK] ${numberId} — waState=${state.waState}; must be initializing or awaiting_scan`);
+    }
+    if (typeof state.client.requestPairingCode !== 'function') {
+      throw new Error(`[WA_PHONE_LINK] ${numberId} — requestPairingCode not available in this wwebjs version`);
+    }
+    // Normalize: strip all non-digits (E.164 without '+')
+    const normalized = phoneNumber.replace(/\D/g, '');
+    if (normalized.length < 10) {
+      throw new Error(
+        `[WA_PHONE_LINK] Invalid phone number "${phoneNumber}" — must include country code ` +
+        `(e.g. 919940172777 for India). Got ${normalized.length} digits after stripping.`,
+      );
+    }
+    this.logger.log(`[WA_OPERATOR_CONNECT] numberId=${numberId} method=phone_link phone=${normalized}`);
+    let code: string;
+    try {
+      code = await state.client.requestPairingCode(normalized);
+    } catch (err: any) {
+      const msg = err?.message ?? String(err);
+      throw new Error(
+        `[WA_PHONE_LINK] requestPairingCode failed for ${numberId} — ` +
+        `phone="${normalized}" error="${msg}". ` +
+        `Ensure the number includes the country code and matches the WhatsApp account being linked.`,
+      );
+    }
+    state.phoneLinkCode = code;
+    this.logger.log(`[WA_PHONE_LINK_CODE] numberId=${numberId} code=${code} — operator should enter this in WhatsApp`);
+    return { code };
+  }
+
   getQrObservable(numberId: string): Observable<any> {
     const state = this._getOrCreateState(numberId);
     return merge(
@@ -935,6 +1004,8 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     bridgeReady: boolean;
     sendCapable: boolean;
     fullyOperational: boolean;
+    phoneLinkCode: string | null;
+    partial_session: boolean;
   } {
     const state = this.clients.get(numberId);
 
@@ -946,7 +1017,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       : false;
 
     if (!state) {
-      return { waState: 'idle', effectiveState: 'idle', connected: false, booting: false, qrActive: false, lastHeartbeat: null, lastReadyAt: null, browserConnected: false, clientExists: false, reconnectCount: 0, qrRefreshCount: 0, sessionStartedAt: null, lastDisconnectedAt: null, firstQrGeneratedAt: null, sessionAvailable: false, liveAndReady: false, bridgeReady: false, sendCapable: false, fullyOperational: false };
+      return { waState: 'idle', effectiveState: 'idle', connected: false, booting: false, qrActive: false, lastHeartbeat: null, lastReadyAt: null, browserConnected: false, clientExists: false, reconnectCount: 0, qrRefreshCount: 0, sessionStartedAt: null, lastDisconnectedAt: null, firstQrGeneratedAt: null, sessionAvailable: false, liveAndReady: false, bridgeReady: false, sendCapable: false, fullyOperational: false, phoneLinkCode: null, partial_session: false };
     }
 
     // Read cached session availability — populated at state creation, ready event, and auth wipes.
@@ -1019,6 +1090,8 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       bridgeReady,
       sendCapable,
       fullyOperational,
+      phoneLinkCode:   state.phoneLinkCode ?? null,
+      partial_session: state.partialSession,
     };
   }
 
@@ -1061,9 +1134,11 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       const pageOpen = page != null && !page.isClosed();
 
       if (!browserAlive || !pageOpen) {
-        // Stability rule: browser unhealthy while ready → invalidate, no auto-reconnect.
-        this.logger.warn(`[WATCHDOG] ${numberId} — browser unhealthy while ready — invalidating`);
-        await this.forceInvalidateSession(numberId, 'watchdog_browser_unhealthy');
+        // Browser crashed or page closed — stop cleanly and preserve auth files.
+        // A Chromium crash does not mean the WA session is expired. Auth files survive
+        // a browser restart and can restore the session silently on next Connect.
+        this.logger.warn(`[WATCHDOG] ${numberId} — browser unhealthy while ready — stopping and preserving session`);
+        this._stopAndWaitForOperator(numberId, 'watchdog_browser_unhealthy');
       }
     }, WATCHDOG_MS);
   }
@@ -1072,12 +1147,6 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   private async _initClient(numberId: string, state: NumberClientState, _restoreRetry = 0): Promise<void> {
     this.logger.log(`[WA_INIT_ENTER] numberId=${numberId} waState=${state.waState} ts=${new Date().toISOString()}`);
-    // [WA_ISOLATION] init_started — log all clients and browsers alive at this moment.
-    this._logIsolation('init_started', numberId, {
-      restoreRetry:          _restoreRetry,
-      waState:               state.waState,
-      activeClientsSnapshot: this._clientsSnapshot(),
-    });
 
     // Clean teardown before creating a new client — safe no-op if client is already null
     await this._destroyClient(numberId, state);
@@ -1115,12 +1184,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     if (!fs.existsSync(CHROME_PATH)) {
       throw new Error(`[WA_CHROME] Chrome not found at ${CHROME_PATH} — aborting init`);
     }
-    // [WA_ISOLATION] session_folder — confirm this number's auth path before Chromium launch.
     const _sessionDir = this._getSessionDir(numberId);
-    this._logIsolation('session_folder', numberId, {
-      path:   _sessionDir,
-      exists: fs.existsSync(_sessionDir),
-    });
     this._removeSingletonFiles(numberId);
 
     this.logger.log(`[WA_AUDIT] before_client_create — ${numberId} chrome=${CHROME_PATH}`);
@@ -1147,13 +1211,6 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       webVersionCache: { type: 'none' },
     });
     this.logger.log(`[WA_CLIENT_CREATED] ${numberId} — new wwebjs Client instantiated (waState=${state.waState})`);
-    this.logger.log(`[WA_AUDIT] after_client_create — ${numberId}`);
-    // [WA_ISOLATION] browser_created — confirm only this number owns a new Client object.
-    this._logIsolation('browser_created', numberId, {
-      clientId:              `marketing-${numberId}`,
-      sessionPath:           this._getSessionDir(numberId),
-      activeClientsSnapshot: this._clientsSnapshot(),
-    });
 
     // ── Event handlers ──────────────────────────────────────────────────────────
 
@@ -1440,7 +1497,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(`[WA_READY_DEBUG] db_write_failed — ${numberId} reason=${err?.message}`);
         this.logger.error(`[WA_READY_ERROR] ${JSON.stringify({ id: numberId, stage: 'db_write', waState: state.waState, ts: new Date().toISOString() })}`);
         state.qrSubject.next(JSON.stringify({ type: 'error', reason: 'db_sync_failed', timestamp: new Date().toISOString() }));
-        await this.forceInvalidateSession(numberId, 'ready_db_write_failed');
+        this._stopAndWaitForOperator(numberId, 'ready_db_write_failed');
         return;
       }
       state.qrDataUrl = null;
@@ -1449,6 +1506,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       state.lastReadyAt = new Date();
       state.sessionStartedAt = state.sessionStartedAt ?? new Date();
       state.sessionAvailable = true;
+      state.partialSession = false;
       this._transitionState(numberId, state, 'ready', 'ready_event');
       // Bridge confirmation: both conditions required — bridge functions registered in Chrome
       // (bridgeEstablished) AND listeners attached. Page liveness is an extra safety check.
@@ -1530,8 +1588,9 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       if (state.authTimeoutId) { clearTimeout(state.authTimeoutId); state.authTimeoutId = null; }
       this._autoPause?.recordDisconnect(numberId);
       state.qrSubject.next(JSON.stringify({ type: 'disconnected', reason, timestamp: new Date().toISOString() }));
-      // Preserve auth: attempt silent restore before falling back to full invalidation.
-      this._scheduleReconnect(numberId, state, `wa_disconnected_${reason || 'empty'}`);
+      // Session disconnected — stop Chrome, preserve auth files, wait for operator.
+      // Auth files survive a disconnect and can restore silently on next Connect click.
+      this._stopAndWaitForOperator(numberId, `wa_disconnected_${reason || 'empty'}`);
     });
 
     state.client.on('auth_failure', async (msg: string) => {
@@ -1691,13 +1750,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       }
     });
 
-    // Mark listeners as attached and log per-event counts.
     state.listenersAttached = true;
-    const postCounts: Record<string, number> = {};
-    for (const e of WA_TRACKED_EVENTS) { postCounts[e] = state.client.listenerCount(e) ?? 0; }
-    for (const e of WA_TRACKED_EVENTS) {
-      this.logger.log(`[WA_LISTENER_ATTACH] event=${e} numberId=${numberId} count=${postCounts[e]}`);
-    }
 
     // ── initialize() — release init lock on first event, NOT on ready ─────────
     // initialize() stays pending while user scans QR. QR_READY is a valid stable state.
@@ -1882,10 +1935,10 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
               // No event received yet — Chromium boot genuinely failed
               settle(e instanceof Error ? e : new Error(String(e?.message ?? 'Unknown')));
             } else {
-              // Late rejection after session was running — invalidate, no auto-reconnect.
+              // Late rejection after session was running — stop and preserve auth files.
               this.logger.warn(`[WA_INIT_STAGE] late_rejection_after_first_event numberId=${numberId} error="${msg}"`);
               if (!state.manualDisconnect && !state.destroyed && !state.terminating) {
-                this.forceInvalidateSession(numberId, 'late_initialize_rejection').catch(() => {});
+                this._stopAndWaitForOperator(numberId, 'late_initialize_rejection');
               }
             }
           });
@@ -1952,12 +2005,6 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     }
     this.logger.log(`[WA_INIT] init lock released — ${numberId} — client live, awaiting user action`);
     this.logger.log(`[WA_INIT_EXIT] numberId=${numberId} waState=${state.waState} elapsed=${Date.now() - initStart}ms ts=${new Date().toISOString()}`);
-    // [WA_ISOLATION] init_completed — log final state and all clients post-init.
-    this._logIsolation('init_completed', numberId, {
-      waState:               state.waState,
-      bridgeEstablished,
-      activeClientsSnapshot: this._clientsSnapshot(),
-    });
 
     // Post-init stuck guard: loading_screen (the most common first event during a session
     // restore) releases the init lock and clears the boot timeout, but does NOT advance
@@ -1988,9 +2035,9 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
           } else {
             this.logger.error(
               `[WA_INIT_STUCK] numberId=${numberId} — stuck in initializing for ` +
-              `${postInitGuardMs / 1000}s after first event with no state advance — forcing invalidation`,
+              `${postInitGuardMs / 1000}s after first event — stopping and preserving auth`,
             );
-            this.forceInvalidateSession(numberId, 'post_init_stuck_initializing').catch(() => {});
+            this._stopAndWaitForOperator(numberId, 'post_init_stuck_initializing');
           }
         }
       }, postInitGuardMs);
@@ -2011,8 +2058,8 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
           return;
         }
         if (state.manualDisconnect || state.destroyed) return;
-        this.logger.warn(`[WA_BROWSER_DISCONNECT] ${numberId} — unexpected disconnect, scheduling reconnect`);
-        this._scheduleReconnect(numberId, state, 'browser_disconnected');
+        this.logger.warn(`[WA_BROWSER_DISCONNECT] ${numberId} — unexpected disconnect; preserving session`);
+        this._stopAndWaitForOperator(numberId, 'browser_disconnected');
       });
       this.logger.log(`[WA_INIT_STAGE] browser_disconnect_listener_attached numberId=${numberId}`);
     } else {
@@ -2022,56 +2069,54 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   // ── Private helpers ───────────────────────────────────────────────────────────
 
-  // ── Auto-reconnect without auth wipe ─────────────────────────────────────────
-  // Called instead of forceInvalidateSession for transient disconnects (WA server
-  // disconnect, Chromium crash). Preserves LocalAuth files so the next attempt can
-  // restore the session silently. Falls back to forceInvalidateSession only after
-  // MAX_AUTO_RECONNECTS consecutive failures, or if teardown itself throws.
-  private _scheduleReconnect(numberId: string, state: NumberClientState, reason: string): void {
-    if (state.autoReconnectAttempts >= MAX_AUTO_RECONNECTS) {
-      this.logger.warn(
-        `[WA_RECONNECT_LIMIT] numberId=${numberId} attempt=${state.autoReconnectAttempts} ` +
-        `— limit reached after "${reason}"; falling back to full invalidation`,
-      );
-      this.forceInvalidateSession(numberId, reason).catch(() => {});
+  // ── Stop and preserve — the ONLY response to unexpected disconnects ──────────
+  // Stops Chrome cleanly. Auth files are NEVER deleted here. State transitions to
+  // awaiting_manual_reconnect. Next connectNumber() (manual operator action) will
+  // find the auth files and attempt a silent restore — no QR scan needed if the
+  // WA server session is still valid.
+  //
+  // This replaces all auto-reconnect and auto-invalidation logic. The system never
+  // takes destructive actions on its own — it stops, preserves, and waits.
+  private _stopAndWaitForOperator(numberId: string, reason: string): void {
+    if (this._invalidatingIds.has(numberId)) {
+      this.logger.log(`[WA_SESSION_PRESERVED] numberId=${numberId} — already stopping (${reason})`);
       return;
     }
 
-    state.autoReconnectAttempts++;
-    this.logger.log(
-      `[WA_RECONNECT_SCHEDULED] numberId=${numberId} attempt=${state.autoReconnectAttempts}/${MAX_AUTO_RECONNECTS} ` +
-      `reason="${reason}" delay=${RECONNECT_DELAY_MS / 1000}s — auth files preserved`,
+    const state = this.clients.get(numberId);
+    if (!state) return;
+    if (state.terminating || state.destroying) return;
+
+    this.logger.warn(
+      `[WA_MANUAL_RECONNECT_REQUIRED] numberId=${numberId} reason="${reason}" ` +
+      `— stopping Chrome, preserving auth files, waiting for operator`,
     );
 
     state.terminating = true;
     this._clearTimers(state);
 
     (async () => {
+      this._invalidatingIds.add(numberId);
       try {
         await this._destroyClient(numberId, state);
-        // Transition in-memory FIRST so the UI and isConnected() immediately reflect
-        // the disconnected state. Writing DB second avoids the window where DB=idle
-        // but memory=ready, which caused the UI to show "Connected" while the sender
-        // read wa_state=idle from DB and dropped the number at Stage 3.
-        this._transitionState(numberId, state, 'idle', 'reconnect_teardown');
+        // In-memory transition first — UI sees awaiting_manual_reconnect immediately.
+        this._transitionState(numberId, state, 'awaiting_manual_reconnect', reason);
         state.lastDisconnectedAt = new Date();
+        state.terminating  = false;
+        state.destroying   = false;
+        state.starting     = false;
+        // Auth files are preserved — _clearAuthFiles is NOT called.
+        // connectNumber(isManual=true) will find them and attempt silent restore.
+        await this._updateNumberWaState(numberId, 'awaiting_manual_reconnect', reason);
+        this.logger.log(
+          `[WA_SESSION_PRESERVED] numberId=${numberId} reason="${reason}" ` +
+          `— auth files preserved; click Connect to restore`,
+        );
+      } catch (err: any) {
+        this.logger.error(`[WA_SESSION_PRESERVED_ERROR] numberId=${numberId} error="${err?.message}"`);
         state.terminating = false;
-        await this._updateNumberWaState(numberId, 'idle');
-
-        state.reconnectTimerId = setTimeout(() => {
-          state.reconnectTimerId = null;
-          if (state.destroyed || state.terminating) return;
-          this.logger.log(
-            `[WA_RECONNECT_ATTEMPT] numberId=${numberId} attempt=${state.autoReconnectAttempts}/${MAX_AUTO_RECONNECTS}`,
-          );
-          this.connectNumber(numberId).catch((e: any) => {
-            this.logger.error(`[WA_RECONNECT_FAILED] numberId=${numberId} error="${e?.message}"`);
-          });
-        }, RECONNECT_DELAY_MS);
-      } catch (e: any) {
-        this.logger.error(`[WA_RECONNECT_TEARDOWN_FAILED] numberId=${numberId} error="${e?.message}"`);
-        state.terminating = false;
-        this.forceInvalidateSession(numberId, reason).catch(() => {});
+      } finally {
+        this._invalidatingIds.delete(numberId);
       }
     })();
   }
@@ -2086,18 +2131,10 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     this._initLocks.set(numberId, slot);
     return previous.then(async () => {
       this.logger.log(`[WA_INIT_LOCK_ACQUIRED] numberId=${numberId} — lock acquired, starting init`);
-      // [WA_ISOLATION] lock_acquired — confirm no other number holds a lock for this slot.
-      this._logIsolation('lock_acquired', numberId, {
-        pendingLockCount: this._initLocks.size,
-      });
       try {
         await fn();
       } finally {
         this.logger.log(`[WA_INIT_LOCK_RELEASED] numberId=${numberId} — init lock released`);
-        // [WA_ISOLATION] lock_released
-        this._logIsolation('lock_released', numberId, {
-          pendingLockCount: this._initLocks.size,
-        });
         resolveSlot();
       }
     });
@@ -2106,32 +2143,16 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
   // Destroys a client and nulls refs — safe to call when client is already null.
   // destroying flag prevents concurrent calls from racing.
   private async _destroyClient(numberId: string, state: NumberClientState): Promise<void> {
-    this.logger.log(
-      `[WA_DESTROY_REASON] numberId=${numberId} duringState=${state.waState} ` +
-      `terminating=${state.terminating} manualDisconnect=${state.manualDisconnect} ` +
-      `browserConnected=${!!(state.client?.pupBrowser?.isConnected?.())}`,
-    );
     const client = state.client;
     if (!client) { this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — no client, skip`); return; }
     if (state.destroying) { this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — already destroying, skip`); return; }
     state.destroying = true;
-    // [WA_ISOLATION] client_removed — null the client ref; log snapshot before destruction.
-    this._logIsolation('client_removed', numberId, {
-      waState:               state.waState,
-      activeClientsSnapshot: this._clientsSnapshot(),
-    });
     state.client = null;
     state.listenersAttached = false;
     state.bridgeReady = false;
     state.lastHeartbeat = null;
-    this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — removing listeners`);
+    state.phoneLinkCode = null;
     try { client.removeAllListeners(); } catch { }
-    this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — calling client.destroy()`);
-    // [WA_ISOLATION] browser_destroyed — Chromium process is about to be killed.
-    this._logIsolation('browser_destroyed', numberId, {
-      waState:               state.waState,
-      browserWasConnected:   !!(client?.pupBrowser?.isConnected?.()),
-    });
     try { await client.destroy(); } catch { }
     this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — done`);
     state.destroying = false;
@@ -2233,6 +2254,26 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   private _getSessionDir(numberId: string): string {
     return path.join(process.cwd(), WA_AUTH_DATA_PATH, `session-marketing-${numberId}`);
+  }
+
+  /**
+   * Returns true when the session folder has leveldb data but NO blob directory.
+   * This is the exact fingerprint of a QR auth interrupted mid-flight (nodemon restart,
+   * process crash after Chrome started writing but before auth completed).
+   * Used only for diagnostics and the partialSession flag — never for routing decisions.
+   */
+  private _isPartialSession(numberId: string): boolean {
+    const sessionDir = this._getSessionDir(numberId);
+    if (!fs.existsSync(sessionDir)) return false;
+    const waBase = path.join(sessionDir, 'Default', 'IndexedDB', 'https_web.whatsapp.com_0.indexeddb');
+    if (fs.existsSync(`${waBase}.blob`)) return false;
+    const leveldbDir = `${waBase}.leveldb`;
+    if (!fs.existsSync(leveldbDir)) return false;
+    try {
+      return fs.readdirSync(leveldbDir).some((f) => f.endsWith('.ldb'));
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -2450,88 +2491,6 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  // ── Isolation instrumentation helpers ────────────────────────────────────────
-  // TEMPORARY — diagnostic only. No logic changes. Remove after validation phase.
-
-  /** Emits a [WA_ISOLATION] structured log with full snapshot context. */
-  private _logIsolation(event: string, numberId: string, extra: Record<string, unknown> = {}): void {
-    const phone = this._phoneCache.get(numberId) ?? 'n/a';
-    const activeBrowserCount = [...this.clients.values()]
-      .filter((s) => !!(s.client?.pupBrowser?.isConnected?.())).length;
-    const sessionPath = this._getSessionDir(numberId);
-    this.logger.log(
-      `[WA_ISOLATION] ${JSON.stringify({
-        event,
-        numberId,
-        phone,
-        memoryClientCount: this.clients.size,
-        activeBrowserCount,
-        sessionPath,
-        ts: new Date().toISOString(),
-        ...extra,
-      })}`,
-    );
-  }
-
-  /**
-   * Emits [WA_ISOLATION_VIOLATION] if any other number is mid-teardown during a
-   * connect operation, or if two numbers resolve to the same session folder.
-   * This is a warning — it does NOT block the operation.
-   */
-  private _checkIsolationViolations(requestedId: string, operation: string): void {
-    const requestedPath = this._getSessionDir(requestedId);
-    for (const [otherId, s] of this.clients) {
-      if (otherId === requestedId) continue;
-
-      // Concurrent teardown on a different number while a connect is in progress.
-      // Theoretically harmless (all state is keyed by numberId) but worth tracking.
-      if (s.terminating || s.destroying) {
-        this.logger.warn(
-          `[WA_ISOLATION_VIOLATION] ${JSON.stringify({
-            type: 'concurrent_teardown_on_connect',
-            requestedNumberId: requestedId,
-            requestedPhone:    this._phoneCache.get(requestedId) ?? 'n/a',
-            affectedNumberId:  otherId,
-            affectedPhone:     this._phoneCache.get(otherId)     ?? 'n/a',
-            affectedWaState:   s.waState,
-            flags: { terminating: s.terminating, destroying: s.destroying },
-            operation,
-            ts: new Date().toISOString(),
-          })}`,
-        );
-      }
-
-      // Session-folder collision — should never happen because clientId is per-number.
-      const otherPath = this._getSessionDir(otherId);
-      if (requestedPath === otherPath) {
-        this.logger.error(
-          `[WA_ISOLATION_VIOLATION] ${JSON.stringify({
-            type: 'SESSION_FOLDER_COLLISION',
-            requestedNumberId: requestedId,
-            affectedNumberId:  otherId,
-            sharedPath:        requestedPath,
-            operation,
-            ts: new Date().toISOString(),
-          })}`,
-        );
-      }
-    }
-  }
-
-  /** Returns a compact snapshot of all in-map clients for inclusion in isolation logs. */
-  private _clientsSnapshot(): Array<Record<string, unknown>> {
-    return [...this.clients.entries()].map(([id, s]) => ({
-      id,
-      phone:        this._phoneCache.get(id) ?? 'n/a',
-      waState:      s.waState,
-      clientExists: !!s.client,
-      browserAlive: !!(s.client?.pupBrowser?.isConnected?.()),
-      terminating:  s.terminating,
-      destroying:   s.destroying,
-      starting:     s.starting,
-      hasReconnectTimer: !!s.reconnectTimerId,
-    }));
-  }
 
   // Returns the number ID that currently holds the active session slot, or null.
   // ── Deep runtime diagnostics ────────────────────────────────────────────────
