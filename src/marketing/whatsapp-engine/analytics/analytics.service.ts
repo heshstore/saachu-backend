@@ -221,7 +221,7 @@ export class AnalyticsService {
     date: string;
     delivery_funnel: Record<string, number>;
     audience: { total: number; eligible: number; in_cooldown: number; opted_out: number };
-    number_health: { id: string; phone: string; name: string; daily_sent: number; daily_limit: number; risk_score: number; is_active: boolean; waState: string }[];
+    number_health: { id: string; phone: string; name: string; daily_sent: number; daily_cap: number; risk_score: number; is_active: boolean; waState: string }[];
     top_templates: { template_name: string; replied: number; reply_rate_pct: number }[];
     crm_leads_today: number;
     risk_alerts: number;

@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, DeepPartial } from 'typeorm';
 import { MarketingAudience } from '../entities/marketing-audience.entity';
 import { ReplyStatus } from '../entities/enums';
 
@@ -87,7 +87,7 @@ export class AudienceService {
 
     // Email-only rows: plain insert, no dedup possible without phone.
     if (emailOnly.length) {
-      await this.repo.save(emailOnly.map(r => this.repo.create(r as any)));
+      await this.repo.save(emailOnly.map(r => this.repo.create(r as DeepPartial<MarketingAudience>)));
     }
 
     if (phoneRows.length) {
