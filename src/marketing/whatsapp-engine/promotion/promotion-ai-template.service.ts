@@ -111,6 +111,7 @@ export class PromotionAiTemplateService {
     const baseParts = {
       name, opener, hook: hook.text,
       productName, sku: product.sku ?? '',
+      imageUrl: product.image ?? '',
       benefit, ctaBlock: cta.label, senderPhone: telecaller_phone,
     };
 
@@ -152,6 +153,7 @@ export class PromotionAiTemplateService {
     hook: (city: string) => string;
     productName: string;
     sku: string;
+    imageUrl: string;
     benefit: string;
     ctaBlock: string;
     senderPhone: string;
@@ -164,11 +166,15 @@ export class PromotionAiTemplateService {
       ``,
       parts.hook(''),  // city already baked into hook closure
       ``,
-      `✨ *Featured Product*: ${parts.productName}`,
+      `✨ *${parts.productName}*`,
       `SKU: ${parts.sku}`,
       ``,
       parts.benefit,
     ];
+
+    if (parts.imageUrl) {
+      lines.push(``, parts.imageUrl);
+    }
 
     if (parts.offerLine) {
       lines.push(``, `🎁 ${parts.offerLine}`);
