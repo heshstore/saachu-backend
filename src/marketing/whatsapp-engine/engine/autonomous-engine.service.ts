@@ -3,7 +3,7 @@ import { MarketingAudience } from '../entities/marketing-audience.entity';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
-import { WhatsAppNumberStatus, QueueStatus, CampaignStatus, MessageType, CTAType } from '../entities/enums';
+import { WhatsAppNumberStatus, QueueStatus, CampaignStatus, MessageType, CTAType, TemplateMode } from '../entities/enums';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
 import { MarketingTemplate } from '../entities/marketing-template.entity';
 import { MarketingCampaign } from '../entities/marketing-campaign.entity';
@@ -463,11 +463,11 @@ export class AutonomousEngineService implements OnModuleInit {
     }
 
     const allTemplates = await this.templatesService.findAll();
-    const activeTemplates = allTemplates.filter((t) => t.is_active);
+    const activeTemplates = allTemplates.filter((t) => t.is_active && t.template_mode === TemplateMode.AI);
 
-    this.logger.log(`[MKT_QUEUE_GATE] templates: total=${allTemplates.length} active=${activeTemplates.length}`);
+    this.logger.log(`[MKT_QUEUE_GATE] templates: total=${allTemplates.length} active_ai=${activeTemplates.length}`);
     if (!activeTemplates.length) {
-      this.logger.warn('[MKT_QUEUE_SKIP_REASON] No active templates — skipping build');
+      this.logger.warn('[MKT_QUEUE_SKIP_REASON] No active AI-mode templates — skipping build');
       return { queued: 0, numbers: sendableNumbers.length };
     }
 
