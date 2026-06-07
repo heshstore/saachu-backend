@@ -35,6 +35,7 @@ export interface PromotionGenerateResult {
     messageLength: number;
     productSku: string;
     productClass: ProductClass;
+    industryContext: string | null;
   };
 }
 
@@ -52,6 +53,9 @@ const COMPONENT_TERMS  = /component|part|accessory|connector|fitting|bracket|bol
 
 function classifyProduct(product: ShopifyCatalogItem): ProductClass {
   const text = [product.itemName, product.sku].filter(Boolean).join(' ');
+  // Unit-based consumable signal — liquids and weights are consumables even when name doesn't say so
+  const unit = product.unit?.trim().toLowerCase() ?? '';
+  if (/^(l|ml|ltr|litre|liter|kg|g|gram|gm)$/.test(unit)) return 'consumable';
   if (DISPLAY_TERMS.test(text))    return 'display';
   if (MACHINE_TERMS.test(text))    return 'machine';
   if (CONSUMABLE_TERMS.test(text)) return 'consumable';
@@ -112,23 +116,22 @@ const SOFT_CTAS = [
 // ══════════════════════════════════════════════════════════════════════════════
 
 interface ProductClassPools {
-  ed_hooks:  ((city: string) => string)[];
+  ed_hooks:    ((city: string) => string)[];
   ed_explains: string[];
   ed_benefits: string[];
-  ps_blocks: { problem: string; solution: string; outcome: string }[];
-  pi_hooks:  string[];
+  ps_blocks:   { problem: string; solution: string; outcome: string }[];
+  pi_hooks:    string[];
   pi_explains: string[];
   pi_benefits: string[];
-  bn_hooks:  ((city: string) => string)[];
+  bn_hooks:    ((city: string) => string)[];
   bn_explains: string[];
   bn_benefits: string[];
-  sp_blocks: { hook: string; note: string; benefit: string }[];
-  dp_blocks: { hook: string; detail: string; benefit: string }[];
+  sp_blocks:   { hook: string; note: string; benefit: string }[];
+  dp_blocks:   { hook: string; detail: string; benefit: string }[];
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // DISPLAY PRODUCTS — panels, holders, racks, stands, wall fixtures
-// Focus: organization, individual product access, arrangement
 // ══════════════════════════════════════════════════════════════════════════════
 
 const DISPLAY_POOLS: ProductClassPools = {
@@ -141,7 +144,7 @@ const DISPLAY_POOLS: ProductClassPools = {
       : `Managing a wide product range usually comes down to how well each item is positioned and accessible.`,
     (_) => `A small change in how products are arranged can make a noticeable difference in how many items get examined.`,
     (city) => city
-      ? `Buyers visiting stores in ${city} with a large range tend to spend more time where products are clearly separated.`
+      ? `Buyers visiting stores in ${city} with a large range move quickly through areas where products are clearly separated.`
       : `Buyers with a short list move quickly through ranges where each product is easy to find and pick up.`,
   ],
 
@@ -176,7 +179,7 @@ const DISPLAY_POOLS: ProductClassPools = {
       outcome: `Range can grow without reorganizing what is already in place.`,
     },
     {
-      problem: `Buyers visiting multiple branches expect consistent product placement at each location.\nWhen layouts differ, it is harder for them to locate specific items independently.`,
+      problem: `Buyers visiting multiple branches expect consistent product placement at each location.\nWhen layouts differ, it is harder for them to locate items independently.`,
       solution: `Standardized fixture that sets up the same way across different locations without customization.`,
       outcome: `Consistent product placement across branches.`,
     },
@@ -258,7 +261,6 @@ const DISPLAY_POOLS: ProductClassPools = {
 
 // ══════════════════════════════════════════════════════════════════════════════
 // MACHINE PRODUCTS — machines, tools, wheels, blades, motors, cutters
-// Focus: operations, workflow, consistent output, maintenance
 // ══════════════════════════════════════════════════════════════════════════════
 
 const MACHINE_POOLS: ProductClassPools = {
@@ -386,7 +388,6 @@ const MACHINE_POOLS: ProductClassPools = {
 
 // ══════════════════════════════════════════════════════════════════════════════
 // CONSUMABLE PRODUCTS — solutions, cleaners, pads, chemicals, lubricants
-// Focus: reliability, consistency, maintenance schedules, replenishment
 // ══════════════════════════════════════════════════════════════════════════════
 
 const CONSUMABLE_POOLS: ProductClassPools = {
@@ -462,7 +463,7 @@ const CONSUMABLE_POOLS: ProductClassPools = {
     (_) => `Maintenance consumables deliver the best results when matched to the specific surface or task.`,
     (_) => `A dedicated product for a maintenance task is more reliable than a general alternative over repeated use.`,
     (city) => city
-      ? `Businesses in ${city} with regular maintenance schedules often find fewer disruptions when consumables are managed proactively.`
+      ? `Businesses in ${city} with regular maintenance schedules find fewer disruptions when consumables are managed proactively.`
       : `Businesses with regular maintenance schedules find fewer disruptions when consumables are managed proactively.`,
     (_) => `Surface condition and equipment life are often determined by which maintenance product is used consistently.`,
   ],
@@ -514,7 +515,6 @@ const CONSUMABLE_POOLS: ProductClassPools = {
 
 // ══════════════════════════════════════════════════════════════════════════════
 // COMPONENT PRODUCTS — parts, accessories, connectors, brackets, fittings
-// Focus: compatibility, availability, maintenance planning, sourcing
 // ══════════════════════════════════════════════════════════════════════════════
 
 const COMPONENT_POOLS: ProductClassPools = {
@@ -642,7 +642,6 @@ const COMPONENT_POOLS: ProductClassPools = {
 
 // ══════════════════════════════════════════════════════════════════════════════
 // GENERAL PRODUCTS — fallback for unclassified products
-// Focus: neutral use-case descriptions, reliable sourcing
 // ══════════════════════════════════════════════════════════════════════════════
 
 const GENERAL_POOLS: ProductClassPools = {
@@ -777,6 +776,231 @@ const POOL_MAP: Record<ProductClass, ProductClassPools> = {
   general:    GENERAL_POOLS,
 };
 
+// ══════════════════════════════════════════════════════════════════════════════
+// KNOWLEDGE LAYER
+// Extracts product-specific context from catalog fields using simple rules.
+// No AI, no external calls, no external dependencies.
+// ══════════════════════════════════════════════════════════════════════════════
+
+interface ProductKnowledge {
+  productType:     string;        // extracted noun (wheel, panel, solution…)
+  primaryUse:      string | null; // inferred use-case phrase
+  targetUser:      string | null; // who typically uses this
+  material:        string | null; // material keyword if found
+  industryContext: string | null; // industry it belongs to
+  enrich:          string | null; // pre-composed product-specific explain sentence
+  isRich:          boolean;       // true when enrich was successfully composed
+}
+
+// Industry keyword → context label (checked in order, first match wins)
+const INDUSTRY_KEYWORDS: [string, string][] = [
+  ['optical',    'optical manufacturing'],
+  ['lens',       'optical lens processing'],
+  ['optic',      'optical manufacturing'],
+  ['dental',     'dental industry'],
+  ['ortho',      'dental industry'],
+  ['textile',    'textile industry'],
+  ['fabric',     'textile industry'],
+  ['garment',    'textile industry'],
+  ['automotive', 'automotive industry'],
+  ['vehicle',    'automotive industry'],
+  ['tyre',       'automotive industry'],
+  ['woodwork',   'woodworking'],
+  ['timber',     'woodworking'],
+  ['carpentry',  'woodworking'],
+  ['metal',      'metal fabrication'],
+  ['welding',    'metal fabrication'],
+  ['pharma',     'pharmaceutical industry'],
+  ['medical',    'healthcare'],
+  ['surgical',   'healthcare'],
+  ['glass',      'glass industry'],
+  ['ceramic',    'ceramics industry'],
+  ['printing',   'printing industry'],
+  ['packaging',  'packaging industry'],
+  ['food',       'food industry'],
+];
+
+// Use-case keyword → primary use phrase (checked in order, first match wins)
+const USE_KEYWORDS: [string, string][] = [
+  ['edging',      'edge finishing'],
+  ['finishing',   'surface finishing'],
+  ['grinding',    'surface grinding'],
+  ['cutting',     'material cutting'],
+  ['polishing',   'surface polishing'],
+  ['deburring',   'deburring operations'],
+  ['drilling',    'drilling operations'],
+  ['milling',     'milling operations'],
+  ['cleaning',    'cleaning and maintenance'],
+  ['washing',     'cleaning and maintenance'],
+  ['lubricating', 'lubrication'],
+  ['lubrication', 'lubrication'],
+  ['mounting',    'equipment mounting'],
+  ['fastening',   'fastening and assembly'],
+  ['assembly',    'assembly operations'],
+  ['display',     'product display organization'],
+  ['organizing',  'product organization'],
+  ['sorting',     'product sorting and organization'],
+];
+
+// Material keywords — matched as whole words against tokenized name
+const MATERIAL_KEYWORDS: string[] = [
+  'diamond', 'carbide', 'abrasive', 'wire', 'stainless',
+  'aluminum', 'rubber', 'ceramic', 'silicon', 'brass',
+  'chrome', 'steel', 'iron', 'plastic', 'glass',
+];
+
+// Industry context → who uses it
+const TARGET_USER_MAP: Record<string, string> = {
+  'optical manufacturing':    'optical labs',
+  'optical lens processing':  'optical lens labs',
+  'dental industry':          'dental practices and labs',
+  'textile industry':         'textile manufacturers',
+  'metal fabrication':        'metal fabrication units',
+  'woodworking':              'woodworking shops',
+  'glass industry':           'glass processing units',
+  'automotive industry':      'automotive workshops',
+  'surface finishing':        'manufacturing and finishing units',
+  'cleaning and maintenance': 'facilities and maintenance teams',
+  'pharmaceutical industry':  'pharmaceutical manufacturers',
+  'healthcare':               'healthcare facilities',
+  'packaging industry':       'packaging operations',
+  'food industry':            'food processing units',
+};
+
+// HSN code prefix (4 digits) → industry context
+// Used as secondary signal when text-based detection finds nothing.
+const HSN_INDUSTRY_MAP: Record<string, string> = {
+  '9001': 'optical manufacturing',
+  '9002': 'optical manufacturing',
+  '9003': 'optical manufacturing',
+  '9004': 'optical manufacturing',
+  '6804': 'surface finishing',
+  '6805': 'surface finishing',
+  '8460': 'metal fabrication',
+  '8461': 'metal fabrication',
+  '8467': 'woodworking',
+  '3402': 'cleaning and maintenance',
+  '3403': 'cleaning and maintenance',
+  '3405': 'cleaning and maintenance',
+  '7326': 'metal fabrication',
+  '3920': 'packaging industry',
+  '4015': 'healthcare',
+};
+
+// Product type nouns — matched against tokenized name words
+const PRODUCT_TYPE_NOUNS: string[] = [
+  'wheel', 'blade', 'tool', 'machine', 'motor', 'drill', 'press', 'pump',
+  'grinder', 'cutter', 'lathe', 'conveyor', 'device',
+  'panel', 'holder', 'rack', 'stand', 'shelf', 'fixture', 'mount', 'grid',
+  'hook', 'counter',
+  'solution', 'liquid', 'cleaner', 'pad', 'spray', 'gel', 'lubricant',
+  'powder', 'solvent',
+  'bracket', 'connector', 'fitting', 'pin', 'bolt', 'screw', 'clip',
+  'component', 'part', 'accessory', 'kit', 'set',
+];
+
+function deriveProductType(words: string[]): string {
+  for (const noun of PRODUCT_TYPE_NOUNS) {
+    if (words.includes(noun)) return noun;
+  }
+  const stop = new Set(['for', 'and', 'the', 'of', 'in', 'a', 'an', 'with', 'to', 'by', 'on']);
+  const candidates = words.filter(w => !stop.has(w) && w.length > 2 && !/^\d/.test(w));
+  return candidates[candidates.length - 1] ?? 'product';
+}
+
+function buildEnrichSentence(
+  productType: string,
+  primaryUse: string | null,
+  material: string | null,
+  industryContext: string | null,
+  targetUser: string | null,
+): string | null {
+  const typeWord = productType !== 'product' ? productType : null;
+
+  if (material && typeWord && primaryUse && industryContext) {
+    return `A ${material} ${typeWord} used for ${primaryUse} in ${industryContext}.`;
+  }
+  if (typeWord && primaryUse && targetUser) {
+    return `A ${typeWord} used by ${targetUser} for ${primaryUse}.`;
+  }
+  if (material && typeWord && primaryUse) {
+    return `A ${material} ${typeWord} designed for ${primaryUse}.`;
+  }
+  if (primaryUse && industryContext) {
+    return `Commonly used in ${industryContext} for ${primaryUse}.`;
+  }
+  if (primaryUse && targetUser) {
+    return `Used by ${targetUser} for ${primaryUse}.`;
+  }
+  if (typeWord && primaryUse) {
+    return `Designed for ${primaryUse} applications.`;
+  }
+  if (industryContext && targetUser) {
+    return `Used by ${targetUser} in ${industryContext}.`;
+  }
+  if (industryContext) {
+    return `Commonly used in ${industryContext}.`;
+  }
+  // material alone is not enough for a useful sentence
+  return null;
+}
+
+function deriveKnowledgeBenefit(knowledge: ProductKnowledge): string | null {
+  const { primaryUse, targetUser, industryContext } = knowledge;
+  if (primaryUse && targetUser) {
+    return `Useful for ${targetUser} where ${primaryUse} is a routine requirement.`;
+  }
+  if (primaryUse && industryContext) {
+    return `Suitable for ${industryContext} where ${primaryUse} is a regular operational need.`;
+  }
+  if (primaryUse) {
+    return `Useful when ${primaryUse} is a regular operational requirement.`;
+  }
+  if (targetUser) {
+    return `Often used by ${targetUser} as a dedicated product for this task.`;
+  }
+  return null;
+}
+
+function extractProductKnowledge(product: ShopifyCatalogItem): ProductKnowledge {
+  const rawText = [product.itemName, product.sku, product.handle].filter(Boolean).join(' ');
+  const text    = rawText.toLowerCase();
+  const words   = text.replace(/[-_/]/g, ' ').split(/\s+/).filter(Boolean);
+
+  // 1. Industry — text keywords first, HSN fallback
+  let industryContext: string | null = null;
+  for (const [kw, industry] of INDUSTRY_KEYWORDS) {
+    if (text.includes(kw)) { industryContext = industry; break; }
+  }
+  if (!industryContext && product.hsnCode) {
+    const prefix = product.hsnCode.substring(0, 4);
+    industryContext = HSN_INDUSTRY_MAP[prefix] ?? null;
+  }
+
+  // 2. Primary use
+  let primaryUse: string | null = null;
+  for (const [kw, use] of USE_KEYWORDS) {
+    if (text.includes(kw)) { primaryUse = use; break; }
+  }
+
+  // 3. Material (whole-word match)
+  let material: string | null = null;
+  for (const kw of MATERIAL_KEYWORDS) {
+    if (words.includes(kw)) { material = kw; break; }
+  }
+
+  // 4. Product type noun
+  const productType = deriveProductType(words);
+
+  // 5. Target user from industry
+  const targetUser = industryContext ? (TARGET_USER_MAP[industryContext] ?? null) : null;
+
+  // 6. Compose enrich sentence
+  const enrich = buildEnrichSentence(productType, primaryUse, material, industryContext, targetUser);
+
+  return { productType, primaryUse, targetUser, material, industryContext, enrich, isRich: !!enrich };
+}
+
 // ── Safety patterns ───────────────────────────────────────────────────────────
 const FORBIDDEN_PATTERNS = [
   /limited\s+time/i,
@@ -815,6 +1039,7 @@ export class PromotionAiTemplateService {
     const sku          = product.sku ?? '';
     const productClass = classifyProduct(product);
     const pools        = POOL_MAP[productClass];
+    const knowledge    = extractProductKnowledge(product);
 
     const category   = this._pickCategory();
     const greeting   = this._pickRandom(GREETINGS)(name);
@@ -822,7 +1047,7 @@ export class PromotionAiTemplateService {
     const callLabel  = this._pickRandom(CALL_LABELS);
     const productUrl = this._buildProductUrl(product);
 
-    const { hook, explain, benefit } = this._categoryContent(category, city, pools);
+    const { hook, explain, benefit } = this._categoryContent(category, city, pools, knowledge);
 
     const offerLine = offer?.text
       ? (offer.title ? `${offer.title}: ${offer.text}` : offer.text)
@@ -836,8 +1061,9 @@ export class PromotionAiTemplateService {
     this._assertSafe(message);
 
     this.logger.log(
-      `[PROMO_AI] category=${category} class=${productClass} sku=${sku} ` +
-      `offer=${!!offerLine} customer=${customer.phone} length=${message.length}`,
+      `[PROMO_AI] category=${category} class=${productClass} ` +
+      `industry=${knowledge.industryContext ?? 'none'} rich=${knowledge.isRich} ` +
+      `sku=${sku} offer=${!!offerLine} customer=${customer.phone} length=${message.length}`,
     );
 
     return {
@@ -852,6 +1078,7 @@ export class PromotionAiTemplateService {
         messageLength:   message.length,
         productSku:      sku,
         productClass,
+        industryContext: knowledge.industryContext ?? null,
       },
     };
   }
@@ -866,49 +1093,74 @@ export class PromotionAiTemplateService {
     return 'direct_promo';
   }
 
-  // ── Category content picker ───────────────────────────────────────────────────
+  // ── Content generation ────────────────────────────────────────────────────────
+  // Two-stage: pull raw content from class pool → apply knowledge overrides.
 
   private _categoryContent(
     category: ContentCategory,
     city: string,
     p: ProductClassPools,
+    knowledge: ProductKnowledge,
   ): { hook: string; explain: string; benefit: string } {
+    const { hook, poolExplain, poolBenefit } = this._pullFromPool(category, city, p);
+    const explain = this._resolveExplain(category, poolExplain, knowledge);
+    const benefit = deriveKnowledgeBenefit(knowledge) ?? poolBenefit;
+    return { hook, explain, benefit };
+  }
+
+  private _pullFromPool(
+    category: ContentCategory,
+    city: string,
+    p: ProductClassPools,
+  ): { hook: string; poolExplain: string; poolBenefit: string } {
     switch (category) {
       case 'educational':
         return {
-          hook:    this._pickRandom(p.ed_hooks)(city),
-          explain: this._pickRandom(p.ed_explains),
-          benefit: this._pickRandom(p.ed_benefits),
+          hook:        this._pickRandom(p.ed_hooks)(city),
+          poolExplain: this._pickRandom(p.ed_explains),
+          poolBenefit: this._pickRandom(p.ed_benefits),
         };
       case 'product_info':
         return {
-          hook:    this._pickRandom(p.pi_hooks),
-          explain: this._pickRandom(p.pi_explains),
-          benefit: this._pickRandom(p.pi_benefits),
+          hook:        this._pickRandom(p.pi_hooks),
+          poolExplain: this._pickRandom(p.pi_explains),
+          poolBenefit: this._pickRandom(p.pi_benefits),
         };
       case 'benefit':
         return {
-          hook:    this._pickRandom(p.bn_hooks)(city),
-          explain: this._pickRandom(p.bn_explains),
-          benefit: this._pickRandom(p.bn_benefits),
+          hook:        this._pickRandom(p.bn_hooks)(city),
+          poolExplain: this._pickRandom(p.bn_explains),
+          poolBenefit: this._pickRandom(p.bn_benefits),
         };
       case 'problem_sol': {
         const b = this._pickRandom(p.ps_blocks);
-        return { hook: b.problem, explain: b.solution, benefit: b.outcome };
+        return { hook: b.problem, poolExplain: b.solution, poolBenefit: b.outcome };
       }
       case 'social_proof': {
         const b = this._pickRandom(p.sp_blocks);
-        return { hook: b.hook, explain: b.note, benefit: b.benefit };
+        return { hook: b.hook, poolExplain: b.note, poolBenefit: b.benefit };
       }
       case 'direct_promo': {
         const b = this._pickRandom(p.dp_blocks);
-        return { hook: b.hook, explain: b.detail, benefit: b.benefit };
+        return { hook: b.hook, poolExplain: b.detail, poolBenefit: b.benefit };
       }
     }
   }
 
+  // Knowledge overrides pool explain when rich enough to compose a product-specific sentence.
+  // For problem_sol: enrich is prepended so the product context leads into the solution.
+  // For all other categories: enrich replaces the generic pool explain entirely.
+  private _resolveExplain(
+    category: ContentCategory,
+    poolExplain: string,
+    knowledge: ProductKnowledge,
+  ): string {
+    if (!knowledge.enrich) return poolExplain;
+    if (category === 'problem_sol') return `${knowledge.enrich}\n${poolExplain}`;
+    return knowledge.enrich;
+  }
+
   // ── Message assembly ──────────────────────────────────────────────────────────
-  // Structure: greeting → hook → *product header* → explain → benefit → [offer] → soft CTA → hard CTAs
 
   private _buildMessage(parts: {
     greeting: string;
@@ -929,26 +1181,16 @@ export class PromotionAiTemplateService {
     } = parts;
 
     const lines: string[] = [
-      greeting,
-      ``,
-      hook,
-      ``,
-      `*${productName}*`,
-      `SKU: ${sku}`,
-      ``,
-      explain,
-      ``,
+      greeting, ``,
+      hook,     ``,
+      `*${productName}*`, `SKU: ${sku}`, ``,
+      explain,  ``,
       benefit,
     ];
 
-    if (offerLine) {
-      lines.push(``, offerLine);
-    }
+    if (offerLine) lines.push(``, offerLine);
 
-    lines.push(
-      ``,
-      softCta,
-      ``,
+    lines.push(``, softCta, ``,
       `📞 ${callLabel}: ${telecallerPhone}`,
       `🛍 View Product: ${productUrl}`,
     );
@@ -957,7 +1199,6 @@ export class PromotionAiTemplateService {
   }
 
   // ── Product URL ───────────────────────────────────────────────────────────────
-  // Prefer stored Shopify handle; derive slug from item name as fallback.
 
   private _buildProductUrl(product: ShopifyCatalogItem): string {
     if (product.handle) return `${STORE_BASE}/products/${product.handle}`;
