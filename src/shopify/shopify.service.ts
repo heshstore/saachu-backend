@@ -2,24 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import axios from 'axios';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, Not, IsNull } from 'typeorm';
 import { ILike } from 'typeorm';
 import { Product } from '../products/entities/product.entity';
 import { ShopifyCatalogItem } from '../shopify-catalog/entities/shopify-catalog-item.entity';
 
 // ── Sync record — snapshot of one completed sync run ─────────────────────────
-// Terminology:
-//   inserted           = new DB rows created this run
-//   changed            = existing rows with at least one field change written
-//   verified           = existing rows processed, already current (no DB write)
-//   skippedSyncIgnored = hidden by ops team (syncIgnored=true)
-//   skippedMissingSku  = Shopify variant has no SKU
-//   skippedMissingPrice= Shopify variant price = 0
-//   skippedInactive    = product status != active (defensive; API already filters)
-//   skippedInvalid     = product missing title or otherwise malformed
-//   skippedDuplicateSku= duplicate SKU within this sync run (2nd+ occurrence skipped)
-//   rawVariants        = total Shopify variants before ANY filtering
-//   reconciled         = rawVariants === inserted+changed+verified+allSkipped+errors
 interface SyncRecord {
   completedAt:         string;
   inserted:            number;
@@ -34,7 +22,7 @@ interface SyncRecord {
   errors:              number;
   rawVariants:         number;
   fetchedProducts:     number;
-  fetchedVariants:     number;   // valid variants passed to save loop
+  fetchedVariants:     number;
   durationMs:          number;
   error:               string | null;
   reconciled:          boolean;
@@ -42,12 +30,12 @@ interface SyncRecord {
 
 // Module-level sync state — persists across requests, resets on server restart
 let syncStatus = {
-  total:         0,   // valid variants passed to save loop (current run)
-  processed:     0,   // inserted + changed so far
+  total:         0,
+  processed:     0,
   inserted:      0,
-  changed:       0,   // existing rows with actual field changes written
-  verified:      0,   // existing rows checked but already current
-  skipped:       0,   // TOTAL skipped (all reasons) — for backward compat + reconciliation
+  changed:       0,
+  verified:      0,
+  skipped:       0,
   errors:        0,
   status:        'idle'    as 'idle' | 'running' | 'done',
   phase:         'idle'    as 'idle' | 'fetching' | 'saving' | 'done',
@@ -58,16 +46,14 @@ let syncStatus = {
   startedAt:             null as string | null,
   durationMs:            null as number | null,
   fetchedProducts:       0,
-  rawVariants:           0,   // total Shopify variants before any filtering
-  // Skip breakdown
+  rawVariants:           0,
   skippedSyncIgnored:    0,
   skippedMissingSku:     0,
   skippedMissingPrice:   0,
   skippedInactive:       0,
-  skippedInvalid:        0,   // missing title / malformed product
+  skippedInvalid:        0,
   skippedDuplicateSku:   0,
   reconciled:            null as boolean | null,
-  // Separate history slots so the UI can always show both
   autoSync:   null as SyncRecord | null,
   manualSync: null as SyncRecord | null,
 };
@@ -80,12 +66,10 @@ export function getSyncStatus() {
   return { ...syncStatus, shopifyConfigured: isShopifyConfigured() };
 }
 
-// ── Classify axios/network errors into readable operational messages ─────────
 function classifyError(err: any): string {
   const msg    = err?.message ?? '';
   const code   = err?.code ?? '';
   const status = err?.response?.status ?? 0;
-  // Configuration missing — check this first so it is never masked by other branches
   if (msg.includes('SHOPIFY_STORE') || msg.includes('SHOPIFY_ACCESS_TOKEN') || !isShopifyConfigured()) {
     return 'Shopify not configured — set SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN on the server (see ecosystem.config.js)';
   }
@@ -107,6 +91,58 @@ function classifyError(err: any): string {
   return msg || 'Unknown sync error';
 }
 
+// ── Knowledge field helpers ───────────────────────────────────────────────────
+
+// Strips HTML from Shopify body_html and returns clean plain text.
+// Returns null when the result is empty after stripping.
+export function cleanDescription(html: string): string | null {
+  if (!html?.trim()) return null;
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text || null;
+}
+
+// Trims, lowercases, and deduplicates a Shopify comma-separated tag string.
+// "optical, lens , Edging, optical" → "optical,lens,edging"
+// Returns null when no tags remain after normalization.
+export function normalizeTags(raw: string): string | null {
+  if (!raw?.trim()) return null;
+  const seen = new Set<string>();
+  const tags = raw
+    .split(',')
+    .map(t => t.trim().toLowerCase())
+    .filter(t => t.length > 0 && !seen.has(t) && (seen.add(t), true));
+  return tags.length > 0 ? tags.join(',') : null;
+}
+
+// ── Valid variant shape (returned by flattenToVariants) ───────────────────────
+interface ValidVariant {
+  shopifyProductId:  string;
+  variantId:         string;
+  title:             string;
+  sku:               string;
+  price:             number;
+  image:             string;
+  inventoryItemId:   string;
+  shopifyUpdatedAt:  string;
+  // Knowledge fields — product-level, shared by all variants of the same product
+  handle:            string | null;
+  description:       string | null;
+  tags:              string | null;
+  vendor:            string | null;
+  productType:       string | null;
+}
+
 @Injectable()
 export class ShopifyService {
   private readonly logger = new Logger(ShopifyService.name);
@@ -118,8 +154,7 @@ export class ShopifyService {
     private readonly catalogRepo: Repository<ShopifyCatalogItem>,
   ) {}
 
-  // ── Fetch active products from Shopify (paginated) ──────────────────────
-  // updatedSince: ISO timestamp — when set, only returns products updated after that time (incremental mode)
+  // ── Fetch active products from Shopify (paginated) ─────────────────────────
   async getProducts(updatedSince?: string): Promise<any[]> {
     const store = process.env.SHOPIFY_STORE;
     const token = process.env.SHOPIFY_ACCESS_TOKEN;
@@ -169,20 +204,10 @@ export class ShopifyService {
   }
 
   // Returns valid variants plus per-reason skip counts so callers can reconcile totals.
-  // Required fields: title, SKU, price. Image is optional — syncs with '' if both
-  // variant and product images are missing (placeholder shown in UI).
-  // inventoryItemId and shopifyUpdatedAt are traceability fields — always passed through.
+  // Knowledge fields (handle, description, tags, vendor, productType) are product-level
+  // and shared across all variants of the same product.
   private flattenToVariants(products: any[]): {
-    valid: Array<{
-      shopifyProductId:  string;
-      variantId:         string;
-      title:             string;
-      sku:               string;
-      price:             number;
-      image:             string;
-      inventoryItemId:   string;   // Shopify inventory_item_id — for future inventory sync
-      shopifyUpdatedAt:  string;   // Shopify variant updated_at — incremental sync validation
-    }>;
+    valid:               ValidVariant[];
     rawVariantCount:     number;
     skippedInactive:     number;
     skippedInvalid:      number;
@@ -194,22 +219,12 @@ export class ShopifyService {
     let skippedInvalid     = 0;
     let skippedMissingSku  = 0;
     let skippedMissingPrice = 0;
-    const valid: Array<{
-      shopifyProductId:  string;
-      variantId:         string;
-      title:             string;
-      sku:               string;
-      price:             number;
-      image:             string;
-      inventoryItemId:   string;
-      shopifyUpdatedAt:  string;
-    }> = [];
+    const valid: ValidVariant[] = [];
 
     for (const p of products) {
       const variantsArr: any[] = p.variants ?? [];
       rawVariantCount += variantsArr.length;
 
-      // Defensive status guard — API uses status=active but verify here too
       const pStatus = (p.status ?? 'active').toLowerCase();
       if (pStatus !== 'active') {
         this.logger.warn(`[SYNC SKIP] Product "${p.title}" status=${p.status} — ${variantsArr.length} variant(s) excluded (inactive)`);
@@ -230,8 +245,14 @@ export class ShopifyService {
       }
       const productImage: string = p.image?.src ?? p.images?.[0]?.src ?? '';
 
+      // Extract product-level knowledge fields once per product
+      const handle      = (p.handle ?? '').trim() || null;
+      const description = cleanDescription(p.body_html ?? '');
+      const tags        = normalizeTags(p.tags ?? '');
+      const vendor      = (p.vendor ?? '').trim() || null;
+      const productType = (p.product_type ?? '').trim() || null;
+
       for (const v of variantsArr) {
-        // Image: variant-specific image, then product fallback, then '' (allowed — not required)
         const variantImage: string =
           (v.image_id && imageMap[String(v.image_id)])
             ? imageMap[String(v.image_id)]
@@ -263,6 +284,11 @@ export class ShopifyService {
           image:            variantImage,
           inventoryItemId:  v.inventory_item_id ? String(v.inventory_item_id) : '',
           shopifyUpdatedAt: v.updated_at ? String(v.updated_at) : '',
+          handle,
+          description,
+          tags,
+          vendor,
+          productType,
         });
       }
     }
@@ -270,9 +296,6 @@ export class ShopifyService {
     return { valid, rawVariantCount, skippedInactive, skippedInvalid, skippedMissingSku, skippedMissingPrice };
   }
 
-  // ── Daily auto-sync cron (2:30 AM IST = 21:00 UTC) ───────────────────────
-  // Incremental — only fetches products changed in the last 25 hours to catch
-  // any products that may have been missed during the previous day's run.
   @Cron('0 21 * * *')
   async scheduledSync() {
     if (syncStatus.status === 'running') {
@@ -284,17 +307,16 @@ export class ShopifyService {
     await this.syncProducts({ mode: 'incremental', updatedSince: cutoff, trigger: 'auto' });
   }
 
-  // ── Main sync — writes exclusively to shopify_catalog_items ──────────────
   async syncProducts(opts: { mode?: 'full' | 'incremental'; updatedSince?: string; trigger?: 'auto' | 'manual' } = {}): Promise<{
-    fetched: number;         // raw Shopify products
-    variants: number;        // valid variants after filtering
-    inserted: number;
-    changed: number;         // rows with actual field changes
-    verified: number;        // rows processed but already current
-    skipped: number;
-    errors: number;
+    fetched:    number;
+    variants:   number;
+    inserted:   number;
+    changed:    number;
+    verified:   number;
+    skipped:    number;
+    errors:     number;
     durationMs: number;
-    error?: string;
+    error?:     string;
   }> {
     const syncType  = opts.mode ?? 'full';
     const trigger   = opts.trigger ?? 'manual';
@@ -335,7 +357,6 @@ export class ShopifyService {
 
       syncStatus.fetchedProducts = rawProducts.length;
 
-      // flattenToVariants returns counts so every raw variant is accounted for
       const { valid: variants, rawVariantCount, skippedInactive, skippedInvalid, skippedMissingSku, skippedMissingPrice }
         = this.flattenToVariants(rawProducts);
 
@@ -351,16 +372,14 @@ export class ShopifyService {
       syncStatus.total                = variants.length;
       syncStatus.phase                = 'saving';
 
-      // ── Save loop ──────────────────────────────────────────────────────────
       const seenSkus          = new Set<string>();
       let skippedSyncIgnored  = 0;
       let skippedDuplicateSku = 0;
 
       for (const v of variants) {
         try {
-          // Duplicate SKU guard — skip 2nd+ occurrences to prevent accidental overwrite
           if (seenSkus.has(v.sku)) {
-            this.logger.warn(`[SYNC:DUPLICATE] sku="${v.sku}" variantId=${v.variantId} productId=${v.shopifyProductId} — duplicate in this run, skipping to prevent overwrite`);
+            this.logger.warn(`[SYNC:DUPLICATE] sku="${v.sku}" variantId=${v.variantId} productId=${v.shopifyProductId} — duplicate in this run, skipping`);
             skippedDuplicateSku++;
             syncStatus.skippedDuplicateSku = skippedDuplicateSku;
             syncStatus.skipped = preSaveSkipped + skippedSyncIgnored + skippedDuplicateSku;
@@ -368,37 +387,39 @@ export class ShopifyService {
           }
           seenSkus.add(v.sku);
 
-          // Primary match: shopifyVariantId (stable across SKU/price edits)
           let existing = await this.catalogRepo.findOneBy({ shopifyVariantId: v.variantId });
-
-          // Fallback: match by SKU for pre-migration records missing shopifyVariantId
           if (!existing) {
             existing = await this.catalogRepo.findOneBy({ sku: v.sku });
           }
 
           if (existing) {
             if (existing.syncIgnored) {
-              this.logger.debug(`[SYNC:IGNORED] sku="${v.sku}" variantId=${v.variantId} productId=${v.shopifyProductId} id=${existing.id} — sync-ignored by ops`);
+              this.logger.debug(`[SYNC:IGNORED] sku="${v.sku}" variantId=${v.variantId} id=${existing.id}`);
               skippedSyncIgnored++;
               syncStatus.skippedSyncIgnored = skippedSyncIgnored;
               syncStatus.skipped = preSaveSkipped + skippedSyncIgnored + skippedDuplicateSku;
               continue;
             }
 
-            // Detect whether any field actually changed to avoid phantom "changed" counts
             const incomingImage    = v.image || existing.image || '';
             const itemCodeBackfill = existing.itemCode === `SP_${v.variantId}`
               ? `SP_${v.shopifyProductId}_${v.variantId}` : existing.itemCode;
 
-            const nameChanged     = existing.itemName !== v.title;
-            const skuChanged      = existing.sku      !== v.sku;
-            const priceChanged    = Number(existing.sellingPrice) !== v.price;
-            const imageChanged    = !!v.image && existing.image !== v.image;
-            const itemCodeChanged = itemCodeBackfill !== existing.itemCode;
+            const nameChanged        = existing.itemName     !== v.title;
+            const skuChanged         = existing.sku          !== v.sku;
+            const priceChanged       = Number(existing.sellingPrice) !== v.price;
+            const imageChanged       = !!v.image && existing.image !== v.image;
+            const itemCodeChanged    = itemCodeBackfill !== existing.itemCode;
+            const handleChanged      = existing.handle      !== v.handle;
+            const descriptionChanged = existing.description !== v.description;
+            const tagsChanged        = existing.tags        !== v.tags;
+            const vendorChanged      = existing.vendor      !== v.vendor;
+            const productTypeChanged = existing.productType !== v.productType;
 
-            if (nameChanged || skuChanged || priceChanged || imageChanged || itemCodeChanged) {
+            if (nameChanged || skuChanged || priceChanged || imageChanged || itemCodeChanged ||
+                handleChanged || descriptionChanged || tagsChanged || vendorChanged || productTypeChanged) {
               if (skuChanged) {
-                this.logger.warn(`[SYNC WARNING] Shopify variant changed SKU: "${existing.sku}" → "${v.sku}" (variantId=${v.variantId} productId=${v.shopifyProductId})`);
+                this.logger.warn(`[SYNC WARNING] SKU changed: "${existing.sku}" → "${v.sku}" (variantId=${v.variantId})`);
               }
               await this.catalogRepo.update({ id: existing.id }, {
                 itemName:               v.title,
@@ -410,13 +431,18 @@ export class ShopifyService {
                 shopifyVariantId:       v.variantId,
                 shopifyInventoryItemId: v.inventoryItemId || existing.shopifyInventoryItemId || '',
                 shopifyUpdatedAt:       v.shopifyUpdatedAt ? new Date(v.shopifyUpdatedAt) : existing.shopifyUpdatedAt,
+                handle:                 v.handle,
+                description:            v.description,
+                tags:                   v.tags,
+                vendor:                 v.vendor,
+                productType:            v.productType,
                 ...(itemCodeChanged ? { itemCode: itemCodeBackfill } : {}),
               });
               changed++;
-              this.logger.debug(`[SYNC:CHANGED] sku="${v.sku}" variantId=${v.variantId} productId=${v.shopifyProductId} id=${existing.id}`);
+              this.logger.debug(`[SYNC:CHANGED] sku="${v.sku}" id=${existing.id}`);
             } else {
               verified++;
-              this.logger.debug(`[SYNC:VERIFIED] sku="${v.sku}" variantId=${v.variantId} productId=${v.shopifyProductId} id=${existing.id}`);
+              this.logger.debug(`[SYNC:VERIFIED] sku="${v.sku}" id=${existing.id}`);
             }
           } else {
             await this.catalogRepo.save({
@@ -437,9 +463,14 @@ export class ShopifyService {
               costPrice:              0,
               syncIgnored:            false,
               source:                 'SHOPIFY',
+              handle:                 v.handle,
+              description:            v.description,
+              tags:                   v.tags,
+              vendor:                 v.vendor,
+              productType:            v.productType,
             });
             inserted++;
-            this.logger.debug(`[SYNC:ADDED] sku="${v.sku}" variantId=${v.variantId} productId=${v.shopifyProductId}`);
+            this.logger.debug(`[SYNC:ADDED] sku="${v.sku}" variantId=${v.variantId}`);
           }
 
           syncStatus.processed = inserted + changed;
@@ -453,7 +484,6 @@ export class ShopifyService {
         }
       }
 
-      // ── Reconciliation check ──────────────────────────────────────────────
       const totalSkipped      = preSaveSkipped + skippedSyncIgnored + skippedDuplicateSku;
       const totalAccountedFor = inserted + changed + verified + totalSkipped + errors;
       const reconciled        = totalAccountedFor === rawVariantCount;
@@ -528,7 +558,6 @@ export class ShopifyService {
       syncStatus.durationMs   = durationMs;
       syncStatus.lastSyncAt   = new Date().toISOString();
       syncStatus.lastSyncType = syncType;
-      // lastSuccessfulSyncAt intentionally NOT updated on fatal failure
       if (trigger === 'auto') syncStatus.autoSync   = failRecord;
       else                    syncStatus.manualSync = failRecord;
 
@@ -536,12 +565,106 @@ export class ShopifyService {
     }
   }
 
-  // ── Item lookup by SKU — exact match first, then ILIKE prefix fallback ───
+  // ── Backfill knowledge fields on existing catalog items ─────────────────────
+  // Fetches all active Shopify products and patches description/tags/vendor/
+  // productType/handle on every matching catalog row (syncIgnored rows skipped).
+  // Only touches these 5 fields — does NOT change prices, names, or SKUs.
+  // Safe to run multiple times; already-populated rows simply get re-confirmed.
+  async backfillKnowledgeFields(): Promise<{
+    products:        number;
+    itemsUpdated:    number;
+    itemsWithDesc:   number;
+    itemsWithTags:   number;
+    itemsWithVendor: number;
+    itemsWithType:   number;
+    errors:          number;
+    durationMs:      number;
+  }> {
+    const startMs = Date.now();
+    this.logger.log('[BACKFILL] Starting knowledge field backfill');
+
+    const rawProducts = await this.getProducts();
+    this.logger.log(`[BACKFILL] Fetched ${rawProducts.length} products from Shopify`);
+
+    let itemsUpdated    = 0;
+    let itemsWithDesc   = 0;
+    let itemsWithTags   = 0;
+    let itemsWithVendor = 0;
+    let itemsWithType   = 0;
+    let errors          = 0;
+
+    for (const p of rawProducts) {
+      const productId   = String(p.id);
+      const handle      = (p.handle ?? '').trim() || null;
+      const description = cleanDescription(p.body_html ?? '');
+      const tags        = normalizeTags(p.tags ?? '');
+      const vendor      = (p.vendor ?? '').trim() || null;
+      const productType = (p.product_type ?? '').trim() || null;
+
+      try {
+        const result = await this.catalogRepo.update(
+          { shopifyProductId: productId, syncIgnored: false },
+          { handle, description, tags, vendor, productType },
+        );
+        const affected = result.affected ?? 0;
+        itemsUpdated += affected;
+        if (description) itemsWithDesc   += affected;
+        if (tags)        itemsWithTags   += affected;
+        if (vendor)      itemsWithVendor += affected;
+        if (productType) itemsWithType   += affected;
+      } catch (err: any) {
+        errors++;
+        this.logger.error(`[BACKFILL] product ${productId}: ${err.message}`);
+      }
+    }
+
+    const durationMs = Date.now() - startMs;
+    this.logger.log(`[BACKFILL] ✅ Done — products=${rawProducts.length} items_updated=${itemsUpdated} errors=${errors} duration=${durationMs}ms`);
+
+    return { products: rawProducts.length, itemsUpdated, itemsWithDesc, itemsWithTags, itemsWithVendor, itemsWithType, errors, durationMs };
+  }
+
+  // ── Knowledge coverage report ────────────────────────────────────────────────
+  // Reads catalog items (non-ignored) and reports how many have each knowledge
+  // field populated. Used to assess Promotion AI input quality.
+  async getKnowledgeReport(): Promise<{
+    total:            number;
+    withDescription:  number;
+    withTags:         number;
+    withVendor:       number;
+    withProductType:  number;
+    withHandle:       number;
+    withAnyKnowledge: number;
+    withAllKnowledge: number;
+    coveragePct:      number;
+    fullCoveragePct:  number;
+  }> {
+    const items = await this.catalogRepo.find({
+      where: { syncIgnored: false },
+      select: ['description', 'tags', 'vendor', 'productType', 'handle'] as any,
+    });
+
+    const total            = items.length;
+    const withDescription  = items.filter(i => i.description).length;
+    const withTags         = items.filter(i => i.tags).length;
+    const withVendor       = items.filter(i => i.vendor).length;
+    const withProductType  = items.filter(i => i.productType).length;
+    const withHandle       = items.filter(i => i.handle).length;
+    const withAnyKnowledge = items.filter(i => i.description || i.tags || i.vendor || i.productType).length;
+    const withAllKnowledge = items.filter(i => i.description && i.tags && i.vendor && i.productType).length;
+    const coveragePct      = total > 0 ? Math.round((withAnyKnowledge / total) * 100) : 0;
+    const fullCoveragePct  = total > 0 ? Math.round((withAllKnowledge / total) * 100) : 0;
+
+    return {
+      total, withDescription, withTags, withVendor, withProductType,
+      withHandle, withAnyKnowledge, withAllKnowledge, coveragePct, fullCoveragePct,
+    };
+  }
+
+  // ── Item lookup by SKU — exact match first, then ILIKE prefix fallback ───────
   async getItemBySku(sku: string) {
     const needle = sku.trim();
-    // Exact match (case-insensitive)
     let found = await this.catalogRepo.findOneBy({ sku: ILike(needle) });
-    // Prefix fallback for partial SKUs (e.g. "WS-" matches "WS-001")
     if (!found) {
       found = await this.catalogRepo.findOne({
         where: { sku: ILike(`${needle}%`) },

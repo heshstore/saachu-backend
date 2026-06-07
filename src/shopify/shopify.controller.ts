@@ -61,6 +61,27 @@ export class ShopifyController {
     return this.syncProductsBlocking();
   }
 
+  /** Backfill description/tags/vendor/productType/handle on all existing catalog rows.
+   *  Fetches all active Shopify products and patches ONLY the 5 knowledge fields.
+   *  Safe to run multiple times. Does not touch prices, names, or SKUs. */
+  @Post('backfill-knowledge')
+  @RequirePermission('item.shopify_sync')
+  async backfillKnowledge() {
+    if (!isShopifyConfigured()) {
+      return { started: false, reason: 'Shopify not configured' };
+    }
+    this.logger.log('[SHOPIFY] Knowledge backfill started via POST /shopify/backfill-knowledge');
+    return this.shopifyService.backfillKnowledgeFields();
+  }
+
+  /** Knowledge coverage report — shows how many catalog items have description/tags/vendor/productType.
+   *  Use to measure Promotion AI input quality before and after backfill. */
+  @Get('knowledge-report')
+  @RequirePermission('item.view')
+  knowledgeReport() {
+    return this.shopifyService.getKnowledgeReport();
+  }
+
   @Get(':sku')
   @RequirePermission('item.view')
   getItem(@Param('sku') sku: string) {
