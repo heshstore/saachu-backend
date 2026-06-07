@@ -438,7 +438,11 @@ export class SenderService implements OnModuleInit {
         ? (await this.templatesService.findOne(item.template_id).catch(() => null))?.template_mode === TemplateMode.AI
         : false;
 
-      if (item.template_id && !isAiTemplate) {
+      // Validation contacts (is_test_contact=true, propagated via message_payload.is_validation)
+      // bypass the fingerprint gate entirely — they must always be sendable for validation runs.
+      const isValidation = (item.message_payload as any)?.is_validation === true;
+
+      if (item.template_id && !isAiTemplate && !isValidation) {
         // Test-mode campaigns use a 1-hour lookback so the same template can be resent
         // during QA without waiting 3 days. Production behavior is unchanged.
         const isTestCampaign = item.campaign_id

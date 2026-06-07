@@ -89,6 +89,11 @@ export class AiDashboardService {
     next.setHours(8, 30, 0, 0);
     if (now >= next) next.setDate(next.getDate() + 1);
 
+    const validationRows = await this.ds.query<{ cnt: string }[]>(
+      `SELECT COUNT(*) AS cnt FROM marketing_audience WHERE is_test_contact = true AND opt_out = false AND is_whatsapp_valid = true`,
+    ).catch(() => [{ cnt: '0' }]);
+    const validationContactsActive = parseInt(validationRows[0]?.cnt ?? '0', 10);
+
     // Engine ran today if: autonomous campaign created today OR queue rows built today
     const todayCampaignRows = await this.ds.query<{ cnt: string }[]>(
       `SELECT COUNT(*) AS cnt FROM marketing_campaigns
@@ -105,17 +110,20 @@ export class AiDashboardService {
       parseInt(todayCampaignRows[0]?.cnt ?? '0', 10) > 0 ||
       parseInt(todayQueueRows[0]?.cnt    ?? '0', 10) > 0;
 
+    const testOnlyMode = process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true';
     return {
-      running:           waConnected && (process.env.WHATSAPP_ENGINE_ENABLED !== 'false'),
-      engine_enabled:    process.env.WHATSAPP_ENGINE_ENABLED !== 'false',
-      pilot_mode:        process.env.WHATSAPP_ENGINE_PILOT_MODE === 'true',
-      test_only_mode:    process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true',
-      autonomous_mode:   autoAiMode,
-      last_ai_run:       lastAiRun,
-      next_ai_run:       next.toISOString(),
-      engine_ran_today:  engineRanToday,
-      total_numbers:     allNumbers.length,
-      connected_numbers: connectedNumbers.length,
+      running:                    waConnected && (process.env.WHATSAPP_ENGINE_ENABLED !== 'false'),
+      engine_enabled:             process.env.WHATSAPP_ENGINE_ENABLED !== 'false',
+      pilot_mode:                 process.env.WHATSAPP_ENGINE_PILOT_MODE === 'true',
+      test_only_mode:             testOnlyMode,
+      validation_mode_on:         testOnlyMode && validationContactsActive > 0,
+      validation_contacts_active: validationContactsActive,
+      autonomous_mode:            autoAiMode,
+      last_ai_run:                lastAiRun,
+      next_ai_run:                next.toISOString(),
+      engine_ran_today:           engineRanToday,
+      total_numbers:              allNumbers.length,
+      connected_numbers:          connectedNumbers.length,
       numbers: allNumbers.map(n => {
         const waStatus = this.whatsAppService.getNumberWaStatus(n.id);
         return {

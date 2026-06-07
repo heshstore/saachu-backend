@@ -156,17 +156,23 @@ export class AudienceService {
     return this.findOne(id);
   }
 
-  // Returns audience eligible for sends: not opted out, WA valid, not in cooldown, above quality threshold
+  // Returns audience eligible for sends: not opted out, WA valid, not in cooldown, above quality threshold.
+  // When testOnly=true (Validation Mode): returns test contacts bypassing cooldown and quality score —
+  // they remain sendable regardless of engagement history.
   findEligible(minScore = 0, testOnly = false): Promise<MarketingAudience[]> {
     const qb = this.repo
       .createQueryBuilder('a')
       .where('a.opt_out = false')
-      .andWhere('a.is_whatsapp_valid = true')
-      .andWhere('a.quality_score >= :minScore', { minScore })
-      .andWhere('(a.cooldown_until IS NULL OR a.cooldown_until <= :now)', { now: new Date() });
+      .andWhere('a.is_whatsapp_valid = true');
 
     if (testOnly) {
+      // Validation Mode: only safety filters apply — test contacts bypass cooldown + quality score
       qb.andWhere('a.is_test_contact = true');
+    } else {
+      qb
+        .andWhere('a.quality_score >= :minScore', { minScore })
+        .andWhere('(a.cooldown_until IS NULL OR a.cooldown_until <= :now)', { now: new Date() })
+        .andWhere('a.is_test_contact IS NOT TRUE');
     }
 
     return qb.orderBy('a.quality_score', 'DESC').getMany();

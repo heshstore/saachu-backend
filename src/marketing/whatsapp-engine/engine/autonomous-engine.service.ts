@@ -19,6 +19,7 @@ import { EngineAuditService, AuditEvent } from './engine-audit.service';
 import { EngineSettingsService } from './engine-settings.service';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 import { getActiveLimits } from '../shared/number-limits';
+import { isValidationContact } from '../shared/validation-mode';
 
 @Injectable()
 export class AutonomousEngineService implements OnModuleInit {
@@ -346,10 +347,17 @@ export class AutonomousEngineService implements OnModuleInit {
 
       if (allocatedPerNumber[number.id] >= getActiveLimits(number.warmup_level).daily) continue;
 
-      // Skip phones already queued today (any status — sent, skipped, failed, or pending)
+      // Skip phones already queued today (any status — sent, skipped, failed, or pending).
+      // Validation contacts bypass this: test numbers must always be re-queued for each run.
       if (activePhones.has(member.phone)) {
-        this.logger.log(`[MKT_QUEUE_SKIP_DUPE] phone=${member.phone} already in today's queue — skipping`);
-        continue;
+        if (isValidationContact(member)) {
+          this.logger.log(
+            `[MKT_QUEUE_VALIDATION_BYPASS] phone=${member.phone} is_test_contact=true — bypassing today's queue dedup`,
+          );
+        } else {
+          this.logger.log(`[MKT_QUEUE_SKIP_DUPE] phone=${member.phone} already in today's queue — skipping`);
+          continue;
+        }
       }
 
       // Pick template, respecting category saturation
@@ -403,6 +411,7 @@ export class AutonomousEngineService implements OnModuleInit {
           city:          member.city ?? '',
           business_type: member.business_type ?? '',
           sender_phone:  number.phone,
+          is_validation: isValidationContact(member),
           ...productFields,
         },
       });

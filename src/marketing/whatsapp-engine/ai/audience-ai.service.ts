@@ -117,10 +117,13 @@ export class AudienceAiService {
   //   fatigue_score >= 70 (high fatigue)        → 45-day cooldown (extended suppression)
   async applyCooldowns(): Promise<void> {
     // 14-day cooldown: sent 3+ times recently, never replied
+    // Validation contacts (is_test_contact=true) are excluded — their cooldown is bypassed
+    // during audience selection and we avoid polluting their cooldown_until field.
     const r14 = await this.ds.query(`
       UPDATE marketing_audience a
       SET cooldown_until = NOW() + INTERVAL '14 days'
       WHERE a.opt_out = false
+        AND a.is_test_contact IS NOT TRUE
         AND (a.cooldown_until IS NULL OR a.cooldown_until <= NOW())
         AND (
           SELECT COUNT(*) FROM whatsapp_message_logs l
@@ -140,6 +143,7 @@ export class AudienceAiService {
       UPDATE marketing_audience a
       SET cooldown_until = NOW() + INTERVAL '30 days'
       WHERE a.opt_out = false
+        AND a.is_test_contact IS NOT TRUE
         AND (a.cooldown_until IS NULL OR a.cooldown_until <= NOW())
         AND (
           SELECT COUNT(*) FROM whatsapp_message_logs l
@@ -159,6 +163,7 @@ export class AudienceAiService {
       UPDATE marketing_audience a
       SET cooldown_until = NOW() + INTERVAL '45 days'
       WHERE a.opt_out = false
+        AND a.is_test_contact IS NOT TRUE
         AND a.fatigue_score >= 70
         AND (a.cooldown_until IS NULL OR a.cooldown_until < NOW() + INTERVAL '30 days')
     `);
@@ -180,35 +185,56 @@ export class AudienceAiService {
   async filterByQuality(minScore: number): Promise<MarketingAudience[]> {
     const now = new Date();
 
+    // Validation contacts: is_test_contact=true always pass — cooldown and quality score
+    // are bypassed so internal test numbers remain sendable for every validation run.
+    // Only hard safety rules (opt_out, is_whatsapp_valid) still apply.
+    const validationContacts = await this.repo
+      .createQueryBuilder('a')
+      .where('a.is_test_contact = true')
+      .andWhere('a.opt_out = false')
+      .andWhere('a.is_whatsapp_valid = true')
+      .orderBy('a.quality_score', 'DESC')
+      .getMany();
+
     if (process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true') {
-      const testContacts = await this.repo.find({ where: { is_test_contact: true } });
-      this.logger.log(`[MKT_AUDIENCE_FETCH] test contacts in DB: ${testContacts.length}`);
-      for (const c of testContacts) {
-        const cooldownActive = !!(c.cooldown_until && c.cooldown_until > now);
+      const allTestContacts = await this.repo.find({ where: { is_test_contact: true } });
+      this.logger.log(`[MKT_AUDIENCE_FETCH] validation contacts in DB: ${allTestContacts.length} total, ${validationContacts.length} eligible`);
+      for (const c of allTestContacts) {
+        const skippedByValidation = !validationContacts.find(v => v.id === c.id);
         const skipReasons: string[] = [];
         if (c.opt_out) skipReasons.push('opt_out=true');
         if (!c.is_whatsapp_valid) skipReasons.push('is_whatsapp_valid=false');
-        if (Number(c.quality_score) < minScore) skipReasons.push(`quality_score=${c.quality_score}<${minScore}`);
-        if (cooldownActive) skipReasons.push(`cooldown_until=${c.cooldown_until?.toISOString()}`);
+        const bypassedReasons: string[] = [];
+        if (Number(c.quality_score) < minScore) bypassedReasons.push(`quality_score=${c.quality_score}<${minScore}(BYPASSED)`);
+        if (c.cooldown_until && c.cooldown_until > now) bypassedReasons.push(`cooldown_until=${c.cooldown_until?.toISOString()}(BYPASSED)`);
         this.logger.log(
-          `[MKT_AUDIENCE_FILTER] phone=${c.phone} ` +
+          `[MKT_AUDIENCE_FILTER] phone=${c.phone} is_test_contact=true ` +
           `opt_out=${c.opt_out} is_whatsapp_valid=${c.is_whatsapp_valid} ` +
           `quality_score=${c.quality_score} cooldown_until=${c.cooldown_until?.toISOString() ?? 'NULL'} ` +
-          `passes=${skipReasons.length === 0} skip_reason=${skipReasons.join(', ') || 'none'}`,
+          `passes=${!skippedByValidation} ` +
+          `skip_reason=${skipReasons.join(', ') || 'none'} ` +
+          `bypassed=${bypassedReasons.join(', ') || 'none'}`,
         );
       }
     }
 
-    const result = await this.repo
+    // Regular contacts: full filter applies. Exclude test contacts (already in validationContacts).
+    const regularContacts = await this.repo
       .createQueryBuilder('a')
       .where('a.opt_out = false')
       .andWhere('a.is_whatsapp_valid = true')
       .andWhere('a.quality_score >= :minScore', { minScore })
       .andWhere('(a.cooldown_until IS NULL OR a.cooldown_until <= :now)', { now })
+      .andWhere('a.is_test_contact IS NOT TRUE')
       .orderBy('a.quality_score', 'DESC')
       .getMany();
 
-    this.logger.log(`[MKT_AUDIENCE_FETCH] filterByQuality(minScore=${minScore}): ${result.length} passed`);
+    const result = [...validationContacts, ...regularContacts];
+    this.logger.log(
+      `[MKT_AUDIENCE_FETCH] filterByQuality(minScore=${minScore}): ` +
+      `${validationContacts.length} validation (bypassed restrictions) + ` +
+      `${regularContacts.length} regular = ${result.length} total`,
+    );
     return result;
   }
 
