@@ -25,7 +25,7 @@ export interface PromotionGenerateResult {
   message: string;
   /** Shopify product image URL. Sender dispatches this as a WhatsApp image + caption. Null when unavailable. */
   imageUrl: string | null;
-  /** Product search URL — stored in message_payload for analytics; NOT included in message text. */
+  /** Product page URL — stored in message_payload for analytics; also included as View Product CTA. */
   productUrl: string;
   metadata: {
     templateVariant: string;
@@ -56,195 +56,178 @@ const CATEGORY_THRESHOLDS: [ContentCategory, number][] = [
   ['direct_promo', 100],
 ];
 
-// ── Knowledge content ─────────────────────────────────────────────────────────
-// Industry insights first; product mentioned as supporting element, not subject.
-const KNOWLEDGE_BLOCKS = [
-  {
-    insight: (city: string) => city
-      ? `One thing we see in well-run showrooms across ${city} — products placed at eye level with clear spacing tend to attract more attention from buyers than crowded or disorganized displays.`
-      : `A consistent pattern in well-run showrooms — products with clear spacing and good visibility tend to attract more buyer attention than overcrowded displays.`,
-    connection: (n: string) => `${n} fits this kind of organized layout well.`,
-    outcome: `It keeps individual products visible without overcrowding the display area.`,
-  },
-  {
-    insight: (_: string) => `For B2B buyers, how a product range is displayed often determines how quickly they shortlist items. Clear grouping and labeling reduce the time between entry and enquiry.`,
-    connection: (n: string) => `${n} works well in setups built around that kind of clarity.`,
-    outcome: `Buyers can locate and identify items faster, which usually leads to quicker decision-making.`,
-  },
-  {
-    insight: (city: string) => city
-      ? `Something worth thinking about for showrooms in ${city} — consistency in how products are displayed across the floor tends to improve the overall impression for visiting buyers.`
-      : `Consistency in how products are displayed tends to improve the overall impression for visiting buyers.`,
-    connection: (n: string) => `${n} is a straightforward option that supports that kind of consistent presentation.`,
-    outcome: `It avoids the visual inconsistency that comes from mixing different display formats.`,
-  },
-  {
-    insight: (_: string) => `Display density is something most businesses underestimate. Too crowded and products get overlooked. Too sparse and the range looks thin. The right balance tends to keep buyers engaged longer.`,
-    connection: (n: string) => `${n} is designed with that balance in mind.`,
-    outcome: `It keeps the display full enough to look complete without making it hard to navigate.`,
-  },
-  {
-    insight: (city: string) => city
-      ? `Businesses in ${city} that rotate their display focus seasonally tend to generate more enquiries on featured products than those with a static layout throughout the year.`
-      : `Businesses that rotate their display focus seasonally tend to generate more enquiries on featured products than those with a static layout.`,
-    connection: (n: string) => `${n} works well as a featured item in this kind of rotation.`,
-    outcome: `It has a clean presentation that holds attention when placed in a prominent display position.`,
-  },
-  {
-    insight: (_: string) => `Keeping a large SKU range organized is one of the ongoing challenges for product showrooms. When items are not easy to locate, buyers tend to miss products they would have considered.`,
-    connection: (n: string) => `${n} is useful for this kind of organized setup — it maintains individual product visibility even in a dense range.`,
-    outcome: `Buyers can scan the range and identify items without needing staff assistance for each one.`,
-  },
-  {
-    insight: (_: string) => `Something we hear often from showrooms — the initial display setup gets maintained well, but over time it drifts as products get restocked inconsistently. Systems that are easy to reset tend to hold their structure longer.`,
-    connection: (n: string) => `${n} is built to maintain its position without constant adjustment.`,
-    outcome: `That kind of stability reduces the maintenance effort while keeping the display consistent.`,
-  },
-  {
-    insight: (_: string) => `For businesses managing product lines across multiple showroom locations, maintaining a consistent display standard is often harder than setting one up in the first place. Standardized components make that significantly easier.`,
-    connection: (n: string) => `${n} is a standardized component that works across different showroom configurations.`,
-    outcome: `Using the same format across locations makes training and maintenance much more straightforward.`,
-  },
-] as const;
+// ── Greeting rotation ─────────────────────────────────────────────────────────
+const GREETINGS: ((name: string) => string)[] = [
+  (n) => `Hi ${n},`,
+  (n) => `Hello ${n},`,
+  (n) => `Hi ${n}.`,
+  (n) => `Hello ${n}.`,
+];
 
-// ── Product info content ──────────────────────────────────────────────────────
-// Product is the main subject. Explains what it is and where it fits.
-const PRODUCT_INFO_BLOCKS = [
-  {
-    opener: (_: string) => `Wanted to share something about a product from our catalog.`,
-    explain: (n: string, sku: string) => `${n} — SKU ${sku} — is designed for display applications where clean organization and individual product visibility are priorities.`,
-    application: `It fits standard configurations without needing customization and maintains its structure under regular use.`,
-  },
-  {
-    opener: (_: string) => `Quick note on something relevant from our range.`,
-    explain: (n: string, sku: string) => `${n} (SKU: ${sku}) is a display component used for organizing product ranges in showroom and retail environments.`,
-    application: `The construction is straightforward and it integrates with most standard shelving or display systems.`,
-  },
-  {
-    opener: (name: string) => `${name}, sharing something from our catalog that might be relevant to your setup.`,
-    explain: (n: string, sku: string) => `${n} — SKU ${sku}. It is a display item built for businesses that want to present a product range clearly without complex installation.`,
-    application: `Works well as a standalone display or alongside other catalog items in a larger showroom layout.`,
-  },
-  {
-    opener: (_: string) => `Thought this might be worth bringing to your notice.`,
-    explain: (n: string, sku: string) => `${n} (${sku}) is part of our core display range. It is a practical option for businesses that want consistent product presentation across their showroom.`,
-    application: `The design keeps individual products visible and accessible without requiring frequent adjustment.`,
-  },
-  {
-    opener: (_: string) => `Something from our product range that seems relevant to your type of business.`,
-    explain: (n: string, sku: string) => `${n} — SKU ${sku}. Typically used when a business wants to display a range of items cleanly without the clutter that comes from stacking or overcrowding.`,
-    application: `It keeps items individually accessible, which works better for businesses where buyers browse before deciding.`,
-  },
-] as const;
+// ── Call CTA label rotation ───────────────────────────────────────────────────
+const CALL_LABELS = ['Call us', 'Reach us', 'Contact us', 'Talk to us'];
 
-// ── Benefit content ───────────────────────────────────────────────────────────
-// How the customer benefits — practical, operational, buyer-experience focused.
-const BENEFIT_BLOCKS = [
-  {
-    hook: (city: string) => city
-      ? `Something that tends to make a practical difference in showrooms in ${city}.`
-      : `Something that tends to make a practical difference in product showroom setups.`,
-    product_use: (n: string) => `${n} is used to improve how a product range is displayed — keeping items individually visible and easy to browse.`,
-    benefit: `This reduces the time buyers spend searching for specific items and generally shortens the path to an enquiry.`,
-  },
-  {
-    hook: (_: string) => `If keeping your display organized through busy periods is a priority, this might be useful.`,
-    product_use: (n: string) => `${n} is designed to maintain its position and structure even with regular restocking and heavy use.`,
-    benefit: `That kind of stability means less time spent resetting the display and more consistency for visiting buyers.`,
-  },
-  {
-    hook: (_: string) => `A simple improvement that tends to have a visible impact on how buyers engage with a product range.`,
-    product_use: (n: string) => `${n} gives each product in the range its own visible position — avoiding the grouping that makes individual items hard to notice.`,
-    benefit: `Buyers tend to spend more time browsing when products are clearly separated and easy to identify.`,
-  },
-  {
-    hook: (city: string) => city
-      ? `For businesses in ${city} managing a large product range, visibility is usually the first challenge.`
-      : `For businesses managing a large product range, visibility is often the first challenge.`,
-    product_use: (n: string) => `${n} helps address this directly — it keeps individual products visible even when the overall range is extensive.`,
-    benefit: `Buyers can scan and shortlist faster, which tends to lead to more enquiries per visit.`,
-  },
-  {
-    hook: (_: string) => `One area where small changes tend to have a noticeable impact — how easy products are to locate in the display.`,
-    product_use: (n: string) => `${n} is built for exactly this. It gives each item a consistent, fixed position in the display layout.`,
-    benefit: `This makes it easier for staff to point buyers to specific products and for buyers to return to items they were considering.`,
-  },
-] as const;
-
-// ── Problem → Solution content ────────────────────────────────────────────────
-// Present a recognizable industry problem, then show product as the solution.
-const PROBLEM_SOL_BLOCKS = [
-  {
-    problem: `Products stacked behind each other become difficult to browse, especially when the range is large. Buyers tend to skip past items they cannot clearly see.`,
-    solution: (n: string) => `${n} addresses this by keeping each product individually visible and accessible.`,
-    outcome: `This tends to improve the number of products buyers engage with during a single visit.`,
-  },
-  {
-    problem: `Display units that shift or tip under product weight are a common issue in showrooms. They create a poor impression and require ongoing attention from staff.`,
-    solution: (n: string) => `${n} is built to stay in position under regular use.`,
-    outcome: `That stability reduces maintenance time and keeps the showroom looking organized without constant adjustment.`,
-  },
-  {
-    problem: `When a product range grows, it often becomes harder to display everything clearly. Items get grouped in ways that reduce individual visibility and make browsing harder.`,
-    solution: (n: string) => `${n} is designed to scale with the range — it keeps individual products visible even in a larger display setup.`,
-    outcome: `Buyers can navigate a wider range without it feeling overwhelming or hard to browse.`,
-  },
-  {
-    problem: `Inconsistent display standards across showroom branches tend to create confusion for buyers who visit multiple locations.`,
-    solution: (n: string) => `${n} provides a standardized display component that can be replicated across locations without customization.`,
-    outcome: `This makes it easier to maintain a consistent presentation standard regardless of which branch a buyer visits.`,
-  },
-  {
-    problem: `Busy periods in a showroom often leave displays looking disorganized by mid-day. Resetting takes time that staff do not always have.`,
-    solution: (n: string) => `${n} holds its structure after restocking, so the display stays organized with less intervention.`,
-    outcome: `This reduces the reset effort and keeps the presentation consistent throughout the day.`,
-  },
-] as const;
-
-// ── Social proof content (3%) ─────────────────────────────────────────────────
-// Trust signals — minimal, factual, no superlatives.
-const SOCIAL_PROOF_BLOCKS = [
-  {
-    hook: `This is a configuration that a number of businesses in this category have found useful for their showroom setup.`,
-    brief: (n: string, sku: string) => `${n} — SKU ${sku}.`,
-    note: `It is a commonly used option for businesses that want a clean, organized display without a heavy investment in custom fittings.`,
-  },
-  {
-    hook: `A number of buyers we work with have used this as part of their display reorganization.`,
-    brief: (n: string, sku: string) => `${n} (SKU: ${sku}).`,
-    note: `It tends to be a practical choice for businesses that want a reliable display format that holds its structure over time.`,
-  },
-  {
-    hook: `This is one of the more frequently chosen options in its category from our catalog.`,
-    brief: (n: string, sku: string) => `${n} — SKU ${sku}.`,
-    note: `Businesses typically choose it when they want a consistent, easy-to-maintain display that works across different product types.`,
-  },
-] as const;
-
-// ── Direct promo content (2%) ─────────────────────────────────────────────────
-// Short, factual, no urgency language.
-const DIRECT_PROMO_BLOCKS = [
-  {
-    intro: `A quick note on something from our catalog that might interest you.`,
-    detail: (n: string, sku: string) => `${n} — SKU ${sku}. It is a display item we currently have in stock, designed for product showroom applications.`,
-  },
-  {
-    intro: `Sharing something relevant from our range.`,
-    detail: (n: string, sku: string) => `${n} (${sku}). A display component suited for businesses looking to organize and present their product range cleanly.`,
-  },
-] as const;
-
-// ── Soft CTAs ─────────────────────────────────────────────────────────────────
-// Goal: invite a reply, not a click. Customer must reply to receive more.
+// ── Soft CTAs — invite a reply, not a click ───────────────────────────────────
 const SOFT_CTAS = [
-  'Can share dimensions or specifications if useful for your setup.',
-  'Happy to send across a catalog if you would like to browse the range.',
-  'Let me know if this is relevant — can share more details.',
-  'Can share specifications or a product sheet if needed.',
-  'Happy to share more if this fits what you are currently looking for.',
-  'Let me know if useful — can follow up with details.',
-  'Can send across more product information if this is relevant to your requirements.',
-  'Happy to share dimensions and availability if this looks like a fit.',
+  'Can share dimensions if useful.',
+  'Happy to share more details if required.',
+  'Can share additional options if you are exploring similar products.',
+  'Can send specifications if needed.',
+  'Can share catalog if useful.',
+  'Happy to share product details if this is relevant to your setup.',
+  'Can share more if you are looking at this category.',
+  'Let me know — happy to share specifications.',
+];
+
+// ── KNOWLEDGE hooks (40%) ─────────────────────────────────────────────────────
+// 1-2 short sentences. Industry insight, no product mention yet.
+const K_HOOKS: ((city: string) => string)[] = [
+  (city) => city
+    ? `Many showrooms in ${city} lose browsing time when displays get overcrowded.`
+    : `Many showrooms lose browsing time when displays get overcrowded.`,
+  (_) => `When buyers can't find what they want quickly, they tend to move on.`,
+  (_) => `Display organization directly affects how long buyers stay and what they enquire about.`,
+  (_) => `Buyers shortlist faster when products are clearly spaced and easy to scan.`,
+  (city) => city
+    ? `B2B buyers in ${city} usually have limited time. How products are displayed affects whether they enquire.`
+    : `B2B buyers usually have limited time. How products are displayed affects whether they enquire.`,
+  (_) => `Showrooms that rotate featured products tend to get more enquiries on new arrivals.`,
+  (_) => `When a range grows without a system, buyers start missing products they would have considered.`,
+  (city) => city
+    ? `Inconsistent display layouts in ${city} showrooms tend to slow down buyer decisions.`
+    : `Inconsistent display layouts tend to slow down buyer decisions.`,
+];
+
+// Explain lines come AFTER the bold product header — implicit subject is the product.
+const K_EXPLAINS: string[] = [
+  `Helps keep products clearly visible without taking up unnecessary space.`,
+  `Built for organized, easy-to-navigate layouts.`,
+  `Gives each product a clear position — easy to spot, easy to reach.`,
+  `Works well in structured layouts. Consistent and low-maintenance.`,
+  `Helps maintain organized displays even through busy periods.`,
+  `Designed for setups where clear product visibility is the priority.`,
+];
+
+const K_BENEFITS: string[] = [
+  `Buyers browse faster. Enquiries usually follow.`,
+  `Fewer missed products. More enquiries per visit.`,
+  `Easier browsing leads to quicker buyer decisions.`,
+  `Organized layouts reduce browsing time and increase what buyers notice.`,
+  `When each product is visible, buyers can shortlist without needing staff help each time.`,
+];
+
+// ── PRODUCT_INFO hooks (25%) ──────────────────────────────────────────────────
+const PI_HOOKS: string[] = [
+  `Sharing something from our catalog that might be relevant.`,
+  `Quick note on a display item from our range.`,
+  `One of our catalog items that tends to fit businesses like yours.`,
+  `Something worth knowing about from our display range.`,
+  `A product from our catalog that might be useful to have on your radar.`,
+];
+
+// After product header — no product name repeated.
+const PI_EXPLAINS: string[] = [
+  `A display component for showroom and retail environments.\nFits standard configurations. No custom installation needed.`,
+  `Designed for clear product organization in showroom layouts.\nHolds structure under regular use.`,
+  `Keeps individual products visible and accessible.\nWorks standalone or as part of a larger layout.`,
+  `Built for consistent product presentation across the display area.\nStraightforward to set up and easy to maintain.`,
+  `Used for organized display in showroom and retail setups.\nNo specialized fitting required.`,
+];
+
+const PI_BENEFITS: string[] = [
+  `No complex installation. Integrates with most standard shelving.`,
+  `Maintains display structure without frequent adjustment.`,
+  `Clean results. Low ongoing maintenance.`,
+  `Practical setup. Works across different showroom sizes.`,
+];
+
+// ── BENEFIT hooks (20%) ───────────────────────────────────────────────────────
+const B_HOOKS: ((city: string) => string)[] = [
+  (_) => `One thing that consistently makes a difference in product showrooms.`,
+  (_) => `Buyer experience often comes down to how easy products are to find.`,
+  (_) => `When buyers can browse without asking for help, enquiry rates tend to improve.`,
+  (city) => city
+    ? `For businesses in ${city} managing a wide range — visibility is usually the first challenge.`
+    : `For businesses managing a wide product range — visibility is usually the first challenge.`,
+  (_) => `Clear product visibility has a direct effect on how many items buyers engage with.`,
+];
+
+const B_EXPLAINS: string[] = [
+  `Helps with exactly this. Each item gets a clear, fixed position in the layout.`,
+  `Keeps the display organized without taking up excess space.`,
+  `Gives every product its own visible spot — easy to browse, easy to find again.`,
+  `Maintains clear visibility even when the range is large.`,
+];
+
+const B_BENEFITS: string[] = [
+  `Less time searching. More time enquiring.`,
+  `Fewer missed products. More enquiries per visit.`,
+  `Cleaner display. Faster buyer decisions.`,
+  `Staff spend less time directing buyers. More time for actual conversations.`,
+  `Organized layouts reduce browsing time and increase what buyers notice.`,
+];
+
+// ── PROBLEM_SOL blocks (10%) ──────────────────────────────────────────────────
+// problem = hook text. solution and outcome come after the product header.
+const PS_BLOCKS: { problem: string; solution: string; outcome: string }[] = [
+  {
+    problem: `Products stacked behind each other are hard to browse.\nBuyers skip past items they can't clearly see.`,
+    solution: `Keeps each product individually visible and easy to access.`,
+    outcome: `Buyers engage with more products during the same visit.`,
+  },
+  {
+    problem: `Display units that shift under weight create a poor impression.\nThey also take up staff time to reset.`,
+    solution: `Built to hold its position under regular use.`,
+    outcome: `Less maintenance. Consistent presentation throughout the day.`,
+  },
+  {
+    problem: `As ranges grow, displays become harder to navigate.\nBuyers often miss products they would have considered.`,
+    solution: `Scales with the range. Each product stays visible even in a dense layout.`,
+    outcome: `Wider range. Same clarity.`,
+  },
+  {
+    problem: `Inconsistent displays across branches confuse buyers who visit multiple locations.`,
+    solution: `A standardized component that replicates across different showroom setups without customization.`,
+    outcome: `Same presentation standard across locations. Easier to manage.`,
+  },
+  {
+    problem: `Busy periods leave displays disorganized by mid-day.\nResetting takes time staff don't always have.`,
+    solution: `Holds its layout after restocking without constant readjustment.`,
+    outcome: `Display stays organized through the day with less intervention.`,
+  },
+];
+
+// ── SOCIAL_PROOF blocks (3%) ──────────────────────────────────────────────────
+const SP_BLOCKS: { hook: string; note: string; benefit: string }[] = [
+  {
+    hook: `A number of businesses in this segment use this for their showroom display.`,
+    note: `Commonly chosen for organized, easy-to-maintain displays without heavy custom fitting.`,
+    benefit: `Practical and straightforward across different showroom sizes.`,
+  },
+  {
+    hook: `This is a frequently chosen option among buyers managing a wide product range.`,
+    note: `Often used when businesses want consistent display structure without complex installation.`,
+    benefit: `Holds its layout well over time. Minimal maintenance required.`,
+  },
+  {
+    hook: `One of our more regularly requested display items in this category.`,
+    note: `Preferred by businesses that want clean, organized displays across a wide range.`,
+    benefit: `Easy to use. Consistent results. Low ongoing effort.`,
+  },
+];
+
+// ── DIRECT_PROMO blocks (2%) ──────────────────────────────────────────────────
+const DP_BLOCKS: { hook: string; detail: string; benefit: string }[] = [
+  {
+    hook: `Sharing something from our catalog — might be relevant.`,
+    detail: `A display item for organized product presentation. In stock.`,
+    benefit: `Fits standard configurations. No custom installation required.`,
+  },
+  {
+    hook: `Quick note on something from our range.`,
+    detail: `A display component for showroom and retail setups. Straightforward to set up.`,
+    benefit: `Keeps products organized and individually visible. Low ongoing maintenance.`,
+  },
 ];
 
 // ── Safety patterns ───────────────────────────────────────────────────────────
@@ -265,8 +248,6 @@ const STORE_BASE = 'https://www.heshstore.in';
 @Injectable()
 export class PromotionAiTemplateService {
   private readonly logger = new Logger(PromotionAiTemplateService.name);
-
-  // Per-phone soft CTA history — avoids repeating the same variant back-to-back
   private _softCtaHistory = new Map<string, string[]>();
 
   constructor(
@@ -275,27 +256,35 @@ export class PromotionAiTemplateService {
   ) {}
 
   async generate(input: PromotionGenerateInput): Promise<PromotionGenerateResult> {
-    const { product, customer, offer } = input;
+    const { product, customer, telecaller_phone, offer } = input;
 
     const productName = product.itemName ?? product.sku ?? 'this product';
     const city        = customer.city ?? '';
     const name        = customer.name?.trim() || 'there';
     const sku         = product.sku ?? '';
 
-    const category = this._pickCategory();
-    const softCta  = this._pickSoftCta(customer.phone);
+    const category  = this._pickCategory();
+    const greeting  = this._pickRandom(GREETINGS)(name);
+    const softCta   = this._pickSoftCta(customer.phone);
+    const callLabel = this._pickRandom(CALL_LABELS);
+    const productUrl = this._buildProductUrl(product);
 
-    const productUrl = sku
-      ? `${STORE_BASE}/search?q=${encodeURIComponent(sku)}`
-      : STORE_BASE;
+    const { hook, explain, benefit } = this._categoryContent(category, city);
 
-    const message = this._buildMessage({ name, productName, sku, city, category, softCta, offer });
+    const offerLine = offer?.text
+      ? (offer.title ? `${offer.title}: ${offer.text}` : offer.text)
+      : undefined;
+
+    const message = this._buildMessage({
+      greeting, productName, sku, hook, explain, benefit,
+      softCta, callLabel, telecallerPhone: telecaller_phone, productUrl, offerLine,
+    });
 
     this._assertSafe(message);
 
     this.logger.log(
       `[PROMO_AI] category=${category} sku=${sku} ` +
-      `offer=${!!offer?.text} customer=${customer.phone} length=${message.length}`,
+      `offer=${!!offerLine} customer=${customer.phone} length=${message.length}`,
     );
 
     return {
@@ -305,7 +294,7 @@ export class PromotionAiTemplateService {
       metadata: {
         templateVariant: `v${Math.floor(Math.random() * 3) + 1}`,
         contentCategory: category,
-        softCtaUsed:     softCta.slice(0, 60),
+        softCtaUsed:     softCta,
         hookType:        category,
         messageLength:   message.length,
         productSku:      sku,
@@ -323,61 +312,111 @@ export class PromotionAiTemplateService {
     return 'direct_promo';
   }
 
-  // ── Message assembly ──────────────────────────────────────────────────────────
+  // ── Category content picker ───────────────────────────────────────────────────
 
-  private _buildMessage(parts: {
-    name: string;
-    productName: string;
-    sku: string;
-    city: string;
-    category: ContentCategory;
-    softCta: string;
-    offer?: { title?: string | null; text: string };
-  }): string {
-    const { name, productName, sku, city, category, softCta, offer } = parts;
-    const lines: string[] = [`Hi ${name},`, ``];
-
+  private _categoryContent(
+    category: ContentCategory,
+    city: string,
+  ): { hook: string; explain: string; benefit: string } {
     switch (category) {
-      case 'knowledge': {
-        const b = this._pickRandom([...KNOWLEDGE_BLOCKS]);
-        lines.push(b.insight(city), ``, b.connection(productName), ``, b.outcome);
-        break;
-      }
-      case 'product_info': {
-        const b = this._pickRandom([...PRODUCT_INFO_BLOCKS]);
-        lines.push(b.opener(name), ``, b.explain(productName, sku), ``, b.application);
-        break;
-      }
-      case 'benefit': {
-        const b = this._pickRandom([...BENEFIT_BLOCKS]);
-        lines.push(b.hook(city), ``, b.product_use(productName), ``, b.benefit);
-        break;
-      }
+      case 'knowledge':
+        return {
+          hook:    this._pickRandom(K_HOOKS)(city),
+          explain: this._pickRandom(K_EXPLAINS),
+          benefit: this._pickRandom(K_BENEFITS),
+        };
+      case 'product_info':
+        return {
+          hook:    this._pickRandom(PI_HOOKS),
+          explain: this._pickRandom(PI_EXPLAINS),
+          benefit: this._pickRandom(PI_BENEFITS),
+        };
+      case 'benefit':
+        return {
+          hook:    this._pickRandom(B_HOOKS)(city),
+          explain: this._pickRandom(B_EXPLAINS),
+          benefit: this._pickRandom(B_BENEFITS),
+        };
       case 'problem_sol': {
-        const b = this._pickRandom([...PROBLEM_SOL_BLOCKS]);
-        lines.push(b.problem, ``, b.solution(productName), ``, b.outcome);
-        break;
+        const b = this._pickRandom(PS_BLOCKS);
+        return { hook: b.problem, explain: b.solution, benefit: b.outcome };
       }
       case 'social_proof': {
-        const b = this._pickRandom([...SOCIAL_PROOF_BLOCKS]);
-        lines.push(b.hook, ``, b.brief(productName, sku), ``, b.note);
-        break;
+        const b = this._pickRandom(SP_BLOCKS);
+        return { hook: b.hook, explain: b.note, benefit: b.benefit };
       }
       case 'direct_promo': {
-        const b = this._pickRandom([...DIRECT_PROMO_BLOCKS]);
-        lines.push(b.intro, ``, b.detail(productName, sku));
-        break;
+        const b = this._pickRandom(DP_BLOCKS);
+        return { hook: b.hook, explain: b.detail, benefit: b.benefit };
       }
     }
+  }
 
-    if (offer?.text) {
-      const offerLine = offer.title ? `${offer.title}: ${offer.text}` : offer.text;
+  // ── Message assembly ──────────────────────────────────────────────────────────
+  // Fixed structure: greeting → hook → *product header* → explain → benefit → [offer] → soft CTA → hard CTAs
+
+  private _buildMessage(parts: {
+    greeting: string;
+    productName: string;
+    sku: string;
+    hook: string;
+    explain: string;
+    benefit: string;
+    softCta: string;
+    callLabel: string;
+    telecallerPhone: string;
+    productUrl: string;
+    offerLine?: string;
+  }): string {
+    const {
+      greeting, productName, sku, hook, explain, benefit,
+      softCta, callLabel, telecallerPhone, productUrl, offerLine,
+    } = parts;
+
+    const lines: string[] = [
+      greeting,
+      ``,
+      hook,
+      ``,
+      `*${productName}*`,
+      `SKU: ${sku}`,
+      ``,
+      explain,
+      ``,
+      benefit,
+    ];
+
+    if (offerLine) {
       lines.push(``, offerLine);
     }
 
-    lines.push(``, softCta);
+    lines.push(
+      ``,
+      softCta,
+      ``,
+      `📞 ${callLabel}: ${telecallerPhone}`,
+      `🛍 View Product: ${productUrl}`,
+    );
 
     return lines.join('\n');
+  }
+
+  // ── Product URL ───────────────────────────────────────────────────────────────
+  // Prefer stored Shopify handle; derive from item name as fallback.
+
+  private _buildProductUrl(product: ShopifyCatalogItem): string {
+    if (product.handle) return `${STORE_BASE}/products/${product.handle}`;
+    if (product.itemName) {
+      const derived = product.itemName
+        .toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .trim()
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
+      if (derived) return `${STORE_BASE}/products/${derived}`;
+    }
+    return STORE_BASE;
   }
 
   // ── Pickers ───────────────────────────────────────────────────────────────────
@@ -411,8 +450,8 @@ export class PromotionAiTemplateService {
       }
     }
     const emojiCount = (message.match(/\p{Emoji_Presentation}/gu) ?? []).length;
-    if (emojiCount > 2) {
-      this.logger.warn(`[PROMO_AI_SAFETY] emoji_count=${emojiCount} exceeds limit of 2`);
+    if (emojiCount > 3) {
+      this.logger.warn(`[PROMO_AI_SAFETY] emoji_count=${emojiCount} exceeds limit`);
     }
   }
 }

@@ -20,6 +20,11 @@ export class ShopifyCatalogItem {
   @Column({ name: 'shopify_inventory_item_id', nullable: true })
   shopifyInventoryItemId: string;
 
+  /** Shopify product handle (e.g. "wire-panel-2x4") — used to build the product page URL.
+   *  Populated by Shopify sync. Null until sync runs. */
+  @Column({ nullable: true, default: null })
+  handle: string | null;
+
   /** Shopify's own updated_at for this variant — used to validate incremental sync */
   @Column({ name: 'shopify_updated_at', type: 'timestamptz', nullable: true })
   shopifyUpdatedAt: Date;
