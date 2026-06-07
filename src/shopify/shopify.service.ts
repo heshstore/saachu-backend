@@ -639,9 +639,10 @@ export class ShopifyService {
     coveragePct:      number;
     fullCoveragePct:  number;
   }> {
+    // Load only knowledge-relevant columns — TypeORM select+where misbehaves when the
+    // where field isn't in the select list, so we filter syncIgnored in TypeScript.
     const items = await this.catalogRepo.find({
       where: { syncIgnored: false },
-      select: ['description', 'tags', 'vendor', 'productType', 'handle'] as any,
     });
 
     const total            = items.length;

@@ -14,7 +14,8 @@ ALTER TABLE shopify_catalog_items
   ADD COLUMN IF NOT EXISTS description  TEXT         DEFAULT NULL,
   ADD COLUMN IF NOT EXISTS tags         VARCHAR      DEFAULT NULL,
   ADD COLUMN IF NOT EXISTS vendor       VARCHAR      DEFAULT NULL,
-  ADD COLUMN IF NOT EXISTS product_type VARCHAR      DEFAULT NULL;
+  ADD COLUMN IF NOT EXISTS product_type VARCHAR      DEFAULT NULL,
+  ADD COLUMN IF NOT EXISTS handle       VARCHAR      DEFAULT NULL;
 
 -- Confirm columns exist after migration:
 -- SELECT column_name, data_type, is_nullable
