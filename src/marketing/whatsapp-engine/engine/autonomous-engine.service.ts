@@ -3,7 +3,7 @@ import { MarketingAudience } from '../entities/marketing-audience.entity';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
-import { WhatsAppNumberStatus, QueueStatus, CampaignStatus, MessageType, CTAType, TemplateMode } from '../entities/enums';
+import { WhatsAppNumberStatus, QueueStatus, CampaignStatus, TemplateMode } from '../entities/enums';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
 import { MarketingTemplate } from '../entities/marketing-template.entity';
 import { MarketingCampaign } from '../entities/marketing-campaign.entity';
@@ -38,12 +38,6 @@ export class AutonomousEngineService implements OnModuleInit {
       this.logger.log(`[MKT_TEST_CONTACTS_FINAL] count=${testPhones.length} phones=${JSON.stringify(testPhones)}`);
     }
 
-    if (!bypass || !testOnly || !enabled) return;
-    await this._ensureTestSetup();
-    this.logger.log('[MKT_QUEUE_GATE] TEST_ONLY+BYPASS: triggering immediate startup queue build');
-    const numberToCampaign = await this._ensureDailyCampaigns();
-    const result = await this._buildQueue(numberToCampaign);
-    this.logger.log(`[MKT_QUEUE_GATE] Startup queue build complete: queued=${result.queued} numbers=${result.numbers}`);
   }
 
   private static readonly STORE_URL = 'https://www.heshstore.in';
@@ -635,65 +629,6 @@ export class AutonomousEngineService implements OnModuleInit {
 
     this.logger.log(`[MKT_QUEUE_GATE] _buildQueue complete: queued=${queued} numbers=${sendableNumbers.length}`);
     return { queued, numbers: sendableNumbers.length };
-  }
-
-  // Idempotent: creates the default test template + campaign if none exist.
-  // Only called when TEST_ONLY+BYPASS mode is active.
-  private async _ensureTestSetup(): Promise<void> {
-    // ── Template ─────────────────────────────────────────────────────────────
-    const allTemplates = await this.templatesService.findAll();
-    const byName = allTemplates.find((t) => t.template_name === 'AI Test Campaign');
-    let template: MarketingTemplate;
-
-    if (byName) {
-      template = byName;
-      if (!byName.is_active) {
-        await this.templatesService.update(byName.id, { is_active: true });
-        this.logger.log(`[MKT_TEMPLATE_AUTO_CREATED] re-activated existing template id=${byName.id}`);
-      } else {
-        this.logger.log(`[MKT_TEMPLATE_AUTO_CREATED] skipped — template "AI Test Campaign" already exists id=${byName.id}`);
-      }
-    } else {
-      const activeAlready = allTemplates.filter((t) => t.is_active);
-      if (activeAlready.length > 0) {
-        template = activeAlready[0];
-        this.logger.log(
-          `[MKT_TEMPLATE_AUTO_CREATED] skipped — ${activeAlready.length} active template(s) exist, using "${template.template_name}" id=${template.id}`,
-        );
-      } else {
-        template = await this.templatesService.create({
-          template_name: 'AI Test Campaign',
-          message_body:
-            'Hello {{name}}, this is a live WhatsApp engine test from Saachu App. Reply YES if you received this message.',
-          product_category: 'TEST',
-          is_active: true,
-          performance_weight: 1.0,
-          message_type: MessageType.TEXT,
-          cta_type: CTAType.NONE,
-        });
-        this.logger.log(`[MKT_TEMPLATE_AUTO_CREATED] created id=${template.id} name="${template.template_name}"`);
-      }
-    }
-
-    // ── Campaign ─────────────────────────────────────────────────────────────
-    const allCampaigns = await this.campaignsService.findAll();
-    const existingCampaign = allCampaigns.find((c) => c.campaign_name === 'AI Engine Test Campaign');
-    if (existingCampaign) {
-      this.logger.log(
-        `[MKT_CAMPAIGN_AUTO_CREATED] skipped — campaign "${existingCampaign.campaign_name}" already exists (status=${existingCampaign.status})`,
-      );
-    } else {
-      const campaign = await this.campaignsService.create({
-        campaign_name: 'AI Engine Test Campaign',
-        status: CampaignStatus.RUNNING,
-        template_id: template.id,
-        daily_target: 10,
-        notes: 'Auto-created for TEST_ONLY mode — autonomous engine validation',
-      });
-      this.logger.log(
-        `[MKT_CAMPAIGN_AUTO_CREATED] created id=${campaign.id} template_id=${template.id}`,
-      );
-    }
   }
 
   // Weighted template selection with category saturation guard.
