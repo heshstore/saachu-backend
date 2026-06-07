@@ -920,6 +920,63 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Send a product image with promotional caption.
+   * Uses MessageMedia.fromUrl() to fetch the Shopify CDN image.
+   * Falls back to text-only via sendViaNumber() if image fetch fails or times out.
+   * Returns { sentAsImage: boolean } so the caller can log the send path.
+   */
+  async sendViaNumberWithImage(
+    numberId: string,
+    phone: string,
+    imageUrl: string,
+    caption: string,
+  ): Promise<{ result: any; sentAsImage: boolean }> {
+    let media: any;
+    try {
+      const { MessageMedia } = require('whatsapp-web.js');
+      media = await Promise.race([
+        MessageMedia.fromUrl(imageUrl, { unsafeMime: true }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('IMAGE_FETCH_TIMEOUT')), 12_000),
+        ),
+      ]);
+    } catch (err: any) {
+      this.logger.warn(
+        `[MKT_IMG_FETCH_FAIL] numberId=${numberId} imageUrl=${imageUrl} err="${err?.message}" — falling back to text`,
+      );
+      const result = await this.sendViaNumber(numberId, phone, caption);
+      return { result, sentAsImage: false };
+    }
+
+    const state = this.clients.get(numberId);
+    if (!state?.client || state.waState !== 'ready') {
+      throw new Error(`[SEND_SKIPPED] ${numberId} — not ready for image send`);
+    }
+
+    const normalized = phone.replace(/^\+/, '').replace(/\s+/g, '').replace(/-/g, '');
+    const target = `${normalized}@c.us`;
+
+    let result: any;
+    try {
+      result = await this._safeEval(numberId, state, () =>
+        state.client.sendMessage(target, media, { caption }),
+      );
+      this.logger.log(
+        `[MKT_IMG_SEND_OK] numberId=${numberId} phone=${phone} ` +
+        `messageId=${result?.id?._serialized ?? 'null'}`,
+      );
+    } catch (sendErr: any) {
+      this.logger.warn(
+        `[MKT_IMG_SEND_FAIL] numberId=${numberId} phone=${phone} err="${sendErr?.message}" — falling back to text`,
+      );
+      const fallback = await this.sendViaNumber(numberId, phone, caption);
+      return { result: fallback, sentAsImage: false };
+    }
+
+    return { result, sentAsImage: true };
+  }
+
+  /**
    * Request a phone-number pairing code instead of a QR code.
    * The wwebjs client must already be initializing (call /connect first).
    * Returns the 8-char code the operator enters in WhatsApp → Linked Devices → Link with phone number.

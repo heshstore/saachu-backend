@@ -21,29 +21,38 @@ export interface PromotionGenerateInput {
 }
 
 export interface PromotionGenerateResult {
+  /** Caption text — sent as WhatsApp image caption when imageUrl present, standalone text otherwise. */
   message: string;
+  /** Shopify product image URL. Sender dispatches this as a WhatsApp image + caption. Null when unavailable. */
+  imageUrl: string | null;
+  /** Direct product search URL for the "View Product" CTA. */
+  productUrl: string;
   metadata: {
     templateVariant: string;
-    ctaUsed: string;
+    callCtaUsed: string;
+    viewCtaUsed: string;
     hookType: string;
     messageLength: number;
     productSku: string;
   };
 }
 
-// 8 rotating reply CTAs
-const REPLY_CTAS = [
-  { key: 'ask_price',          label: '1 → Price details\n2 → Product info\n3 → Call back' },
-  { key: 'get_details',        label: '1 → Get details\n2 → View catalogue\n3 → Call me back' },
-  { key: 'request_catalogue',  label: '1 → Request catalogue\n2 → Price details\n3 → Talk to us' },
-  { key: 'call_back',          label: '1 → Call back request\n2 → Product details\n3 → Wholesale info' },
-  { key: 'view_product',       label: '1 → View product\n2 → Get price\n3 → Speak to team' },
-  { key: 'wholesale_pricing',  label: '1 → Wholesale pricing\n2 → Product catalogue\n3 → Call back' },
-  { key: 'need_video',         label: '1 → Product video\n2 → Price details\n3 → Call back' },
-  { key: 'need_samples',       label: '1 → Sample request\n2 → Price details\n3 → Call back' },
+// ── Call-Us CTA variants — rotated per contact ────────────────────────────────
+const CALL_CTAS = [
+  { key: 'call_us',       label: 'Call Us' },
+  { key: 'talk_to_team',  label: 'Talk to Team' },
+  { key: 'contact_us',    label: 'Contact Us' },
+  { key: 'reach_us',      label: 'Reach Us' },
 ];
 
-// Curiosity / pain-point hooks — city substituted where available
+// ── View-Product CTA variants — rotated per contact ───────────────────────────
+const VIEW_CTAS = [
+  { key: 'view_product',  label: 'View Product' },
+  { key: 'see_product',   label: 'See Product' },
+  { key: 'check_product', label: 'Check Product' },
+];
+
+// ── Curiosity / pain-point hooks — city substituted where available ────────────
 const HOOKS = [
   { key: 'city_demand',     text: (city: string) => city ? `Many businesses in ${city} are sourcing this right now.` : `This has been getting a lot of attention from buyers recently.` },
   { key: 'expand_range',    text: (_: string) => `Looking to expand your product range this season?` },
@@ -53,7 +62,7 @@ const HOOKS = [
   { key: 'team_pick',       text: (_: string) => `Our team picked this as a standout item this month.` },
 ];
 
-// Factual benefit phrases — product-name substituted
+// ── Factual benefit phrases — product-name substituted ────────────────────────
 const BENEFIT_PHRASES = [
   (name: string) => `${name} is well-suited for businesses looking for reliable quality at a consistent standard.`,
   (name: string) => `Customers who stocked ${name} have found it to be a dependable addition to their catalogue.`,
@@ -70,25 +79,28 @@ const OPENERS = [
   'Something new that might interest you:',
 ];
 
-// Forbidden patterns — enforced at build time, not post-gen
+// ── Safety patterns — checked before sending ──────────────────────────────────
 const FORBIDDEN_PATTERNS = [
   /limited\s+time/i,
   /last\s+chance/i,
   /hurry/i,
   /act\s+now/i,
   /don'?t\s+miss/i,
-  /₹\s*\d/,  // no inline pricing
+  /₹\s*\d/,
   /\bfree\b/i,
   /\bdiscount\b/i,
   /\boffer\b/i,
 ];
 
+const STORE_BASE = 'https://www.heshstore.in';
+
 @Injectable()
 export class PromotionAiTemplateService {
   private readonly logger = new Logger(PromotionAiTemplateService.name);
 
-  // Per-phone CTA history for avoiding repeats
-  private _ctaHistory = new Map<string, string[]>();
+  // Per-phone CTA history — avoids repeating the same variant back-to-back
+  private _callCtaHistory = new Map<string, string[]>();
+  private _viewCtaHistory = new Map<string, string[]>();
 
   constructor(
     @InjectRepository(WhatsappMessageLog)
@@ -99,27 +111,34 @@ export class PromotionAiTemplateService {
     const { product, customer, telecaller_phone, offer } = input;
 
     const productName = product.itemName ?? product.sku ?? 'this product';
-    const city = customer.city ?? '';
-    const name = customer.name?.trim() || 'there';
+    const city        = customer.city ?? '';
+    const name        = customer.name?.trim() || 'there';
 
-    const hook = this._pickHook(city);
-    const benefit = this._pickBenefit(productName);
-    const opener = OPENERS[Math.floor(Math.random() * OPENERS.length)];
-    const cta = await this._pickFreshCta(customer.phone);
-    const variant = `v${Math.floor(Math.random() * 3) + 1}`;
+    const hook      = this._pickHook(city);
+    const benefit   = this._pickBenefit(productName);
+    const opener    = OPENERS[Math.floor(Math.random() * OPENERS.length)];
+    const callCta   = this._pickFreshCallCta(customer.phone);
+    const viewCta   = this._pickFreshViewCta(customer.phone);
+    const variant   = `v${Math.floor(Math.random() * 3) + 1}`;
+
+    // Product URL — search by SKU so WhatsApp renders it as a product card
+    const productUrl = product.sku
+      ? `${STORE_BASE}/search?q=${encodeURIComponent(product.sku)}`
+      : STORE_BASE;
 
     const baseParts = {
       name, opener, hook: hook.text,
       productName, sku: product.sku ?? '',
-      imageUrl: product.image ?? '',
-      benefit, ctaBlock: cta.label, senderPhone: telecaller_phone,
+      benefit,
+      callCtaLabel: callCta.label,
+      viewCtaLabel: viewCta.label,
+      senderPhone: telecaller_phone,
+      productUrl,
     };
 
-    // Safety check runs on AI-generated content only — before offer injection.
-    // Offer text is DB-sourced and operator-controlled, so it bypasses these patterns.
+    // Safety check on generated copy (before offer line which is operator-controlled)
     this._assertSafe(this._buildMessage(baseParts));
 
-    // Build offer line from DB fields — never modify, never generate
     const offerLine = offer?.text
       ? (offer.title ? `${offer.title}: ${offer.text}` : offer.text)
       : undefined;
@@ -132,115 +151,108 @@ export class PromotionAiTemplateService {
     );
     this.logger.log(
       `[PROMO_AI_TEMPLATE] telecaller=${input.telecaller_number_id} ` +
-      `sku=${product.sku} hook=${hook.key} cta=${cta.key} length=${message.length}`,
+      `sku=${product.sku} hook=${hook.key} call_cta=${callCta.key} view_cta=${viewCta.key} length=${message.length}`,
     );
 
     return {
       message,
+      imageUrl:   product.image || null,
+      productUrl,
       metadata: {
         templateVariant: variant,
-        ctaUsed: cta.key,
-        hookType: hook.key,
-        messageLength: message.length,
-        productSku: product.sku ?? '',
+        callCtaUsed:     callCta.key,
+        viewCtaUsed:     viewCta.key,
+        hookType:        hook.key,
+        messageLength:   message.length,
+        productSku:      product.sku ?? '',
       },
     };
   }
 
+  // ── Message structure ─────────────────────────────────────────────────────────
+  // Image is sent as a separate WhatsApp media message by the sender; this text
+  // becomes the caption (or a standalone message when no image is available).
   private _buildMessage(parts: {
     name: string;
     opener: string;
     hook: (city: string) => string;
     productName: string;
     sku: string;
-    imageUrl: string;
     benefit: string;
-    ctaBlock: string;
+    callCtaLabel: string;
+    viewCtaLabel: string;
     senderPhone: string;
+    productUrl: string;
     offerLine?: string;
   }): string {
     const lines: string[] = [
       `Hi ${parts.name},`,
       ``,
-      `${parts.opener}`,
+      parts.opener,
       ``,
-      parts.hook(''),  // city already baked into hook closure
+      parts.hook(''),
       ``,
-      `✨ *${parts.productName}*`,
+      `*${parts.productName}*`,
       `SKU: ${parts.sku}`,
       ``,
       parts.benefit,
     ];
 
-    if (parts.imageUrl) {
-      lines.push(``, parts.imageUrl);
-    }
-
     if (parts.offerLine) {
       lines.push(``, `🎁 ${parts.offerLine}`);
     }
 
-    lines.push(``, `Reply:`, parts.ctaBlock, ``, `📞 ${parts.senderPhone}`);
+    lines.push(
+      ``,
+      `📞 ${parts.callCtaLabel}: ${parts.senderPhone}`,
+      `🛍 ${parts.viewCtaLabel}: ${parts.productUrl}`,
+    );
+
     return lines.join('\n');
   }
 
+  // ── Pickers ───────────────────────────────────────────────────────────────────
+
   private _pickHook(city: string): { key: string; text: (c: string) => string } {
     const hook = HOOKS[Math.floor(Math.random() * HOOKS.length)];
-    // Wrap so build site just calls hook.text without args
     return { key: hook.key, text: () => hook.text(city) };
   }
 
   private _pickBenefit(productName: string): string {
-    const fn = BENEFIT_PHRASES[Math.floor(Math.random() * BENEFIT_PHRASES.length)];
-    return fn(productName);
+    return BENEFIT_PHRASES[Math.floor(Math.random() * BENEFIT_PHRASES.length)](productName);
   }
 
-  private async _pickFreshCta(phone?: string): Promise<{ key: string; label: string }> {
-    if (!phone) return REPLY_CTAS[Math.floor(Math.random() * REPLY_CTAS.length)];
+  private _pickFreshCallCta(phone?: string): { key: string; label: string } {
+    return this._pickFromPool(CALL_CTAS, this._callCtaHistory, phone);
+  }
 
-    // Use in-memory history (per process lifecycle) supplemented by DB logs
-    const memHistory = this._ctaHistory.get(phone) ?? [];
+  private _pickFreshViewCta(phone?: string): { key: string; label: string } {
+    return this._pickFromPool(VIEW_CTAS, this._viewCtaHistory, phone);
+  }
 
-    const recentLogs = await this.logRepo
-      .createQueryBuilder('l')
-      .select('l.message_body')
-      .where('l.customer_phone = :phone', { phone })
-      .orderBy('l.sent_at', 'DESC')
-      .limit(3)
-      .getMany();
-
-    const usedKeys = new Set<string>(memHistory);
-    for (const log of recentLogs) {
-      for (const cta of REPLY_CTAS) {
-        if (log.message_body?.includes(cta.label.split('\n')[0])) {
-          usedKeys.add(cta.key);
-        }
-      }
-    }
-
-    const fresh = REPLY_CTAS.filter((c) => !usedKeys.has(c.key));
-    const pool = fresh.length > 0 ? fresh : REPLY_CTAS;
-    const selected = pool[Math.floor(Math.random() * pool.length)];
-
-    // Update in-memory history (keep last 4)
-    const updated = [...memHistory, selected.key].slice(-4);
-    this._ctaHistory.set(phone, updated);
-
-    return selected;
+  private _pickFromPool<T extends { key: string }>(
+    pool: T[],
+    history: Map<string, string[]>,
+    phone?: string,
+  ): T {
+    if (!phone) return pool[Math.floor(Math.random() * pool.length)];
+    const used   = new Set(history.get(phone) ?? []);
+    const fresh  = pool.filter((c) => !used.has(c.key));
+    const source = fresh.length > 0 ? fresh : pool;
+    const picked = source[Math.floor(Math.random() * source.length)];
+    history.set(phone, [...(history.get(phone) ?? []), picked.key].slice(-pool.length));
+    return picked;
   }
 
   private _assertSafe(message: string): void {
     for (const pattern of FORBIDDEN_PATTERNS) {
       if (pattern.test(message)) {
-        this.logger.warn(`[PROMO_AI_SAFETY] blocked_pattern=${pattern.toString()} — removing from message`);
-        // Log only — don't throw; safety is best-effort at generation time since
-        // product names themselves are passed through unchanged.
+        this.logger.warn(`[PROMO_AI_SAFETY] blocked_pattern=${pattern.toString()}`);
       }
     }
-
-    const emojiMatches = message.match(/\p{Emoji_Presentation}/gu) ?? [];
-    if (emojiMatches.length > 3) {
-      this.logger.warn(`[PROMO_AI_SAFETY] emoji_count=${emojiMatches.length} exceeds limit of 3`);
+    const emojiCount = (message.match(/\p{Emoji_Presentation}/gu) ?? []).length;
+    if (emojiCount > 3) {
+      this.logger.warn(`[PROMO_AI_SAFETY] emoji_count=${emojiCount} exceeds limit of 3`);
     }
   }
 }

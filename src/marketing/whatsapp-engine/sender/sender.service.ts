@@ -551,23 +551,31 @@ export class SenderService implements OnModuleInit {
       if (!number?.id) throw new Error('Queue item has no eligible sender number — cannot send');
 
       // ── Actual WA send ───────────────────────────────────────────────────────
+      const imageUrl = (item.message_payload as Record<string, unknown>)?.['product_image'] as string | null | undefined;
       this.logger.log(
         `[MKT_BEFORE_WA_SEND] id=${item.id} phone=${item.customer_phone} ` +
-        `number_id=${number.id} body_length=${body.length} body_preview="${body.slice(0, 60)}"`,
+        `number_id=${number.id} body_length=${body.length} has_image=${!!imageUrl} body_preview="${body.slice(0, 60)}"`,
       );
 
       let waResult: any;
+      let sentAsImage = false;
       try {
-        waResult = await this.whatsAppService.sendViaNumber(number.id, item.customer_phone, body);
+        if (imageUrl) {
+          const imgResult = await this.whatsAppService.sendViaNumberWithImage(number.id, item.customer_phone, imageUrl, body);
+          waResult    = imgResult.result;
+          sentAsImage = imgResult.sentAsImage;
+        } else {
+          waResult = await this.whatsAppService.sendViaNumber(number.id, item.customer_phone, body);
+        }
         this.logger.log(
-          `[MKT_AFTER_WA_SEND] phone=${item.customer_phone} ` +
+          `[MKT_AFTER_WA_SEND] phone=${item.customer_phone} sent_as_image=${sentAsImage} ` +
           `result_id=${waResult?.id?._serialized ?? waResult?.id ?? 'null'} ` +
           `result_type=${typeof waResult} ` +
           `result_keys=${Object.keys(waResult ?? {}).join(',') || 'empty'}`,
         );
         this.logger.log(
           `[SENDER_AUDIT] wa_send_ok: queue_id=${item.id} phone=${item.customer_phone} ` +
-          `number_id=${number.id} wa_message_id=${waResult?.id?._serialized ?? waResult?.id ?? 'null'}`,
+          `number_id=${number.id} sent_as_image=${sentAsImage} wa_message_id=${waResult?.id?._serialized ?? waResult?.id ?? 'null'}`,
         );
       } catch (sendErr: any) {
         const errMsg: string = sendErr?.message ?? 'Unknown WA error';
@@ -753,6 +761,8 @@ export class SenderService implements OnModuleInit {
         generated_message: result.message,
         product_sku:       product.sku,
         product_id:        product.id,
+        product_image:     result.imageUrl ?? null,
+        product_url:       result.productUrl,
         ai_metadata:       result.metadata,
         offer_applied:     !!activeOffer,
       });
