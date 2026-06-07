@@ -338,6 +338,9 @@ export class AiDashboardService {
       message_body:        string | null;
       ai_hook_type:        string | null;
       ai_cta_used:         string | null;
+      product_image:       string | null;
+      product_url:         string | null;
+      generated_message:   string | null;
     }[]>(`
       SELECT
         q.id                                       AS queue_id,
@@ -359,8 +362,11 @@ export class AiDashboardService {
         l.reply_message,
         (r.id IS NOT NULL)                         AS lead_created,
         l.message_body,
-        q.message_payload->'ai_metadata'->>'hookType' AS ai_hook_type,
-        q.message_payload->'ai_metadata'->>'ctaUsed'  AS ai_cta_used
+        q.message_payload->'ai_metadata'->>'hookType'  AS ai_hook_type,
+        q.message_payload->'ai_metadata'->>'ctaUsed'   AS ai_cta_used,
+        q.message_payload->>'product_image'             AS product_image,
+        q.message_payload->>'product_url'               AS product_url,
+        q.message_payload->>'generated_message'         AS generated_message
       FROM whatsapp_message_queue q
       LEFT JOIN marketing_campaigns c     ON c.id = q.campaign_id
       LEFT JOIN whatsapp_numbers n        ON n.id = q.number_id
@@ -389,8 +395,11 @@ export class AiDashboardService {
       reply_message:    r.reply_message ?? null,
       lead_created:     !!r.lead_created,
       message_body:     r.message_body ?? null,
-      ai_hook_type:     r.ai_hook_type ?? null,
-      ai_cta_used:      r.ai_cta_used ?? null,
+      ai_hook_type:       r.ai_hook_type ?? null,
+      ai_cta_used:        r.ai_cta_used ?? null,
+      product_image:      r.product_image ?? null,
+      product_url:        r.product_url ?? null,
+      generated_message:  r.generated_message ?? null,
     }));
   }
 
