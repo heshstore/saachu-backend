@@ -31,7 +31,8 @@ export class AiDashboardService {
       campaigns,
       campaignQueueDetail,
       telecallerPerformance,
-      liveQueue,
+      validationQueue,
+      historicalQueue,
       productRotation,
       numberUtilization,
       logStream,
@@ -42,7 +43,8 @@ export class AiDashboardService {
       this._getAiCampaigns(todayIso),
       this._getCampaignQueueDetail(todayIso),
       this._getTelecallerPerformance(todayIso),
-      this._getLiveQueue(),
+      this._getTodayValidationQueue(),
+      this._getAllTimeQueue(),
       this._getProductRotation(todayIso),
       this._getNumberUtilization(),
       this._getLogStream(),
@@ -50,7 +52,8 @@ export class AiDashboardService {
     ]);
 
     const isInconsistent = todayActivity.queue_items > 0 && todayActivity.campaigns_created === 0;
-    const warnings = this._computeWarnings(todayActivity, engineStatus, liveQueue);
+    // Warnings use the all-time queue for stuck-pending detection (production monitoring)
+    const warnings = this._computeWarnings(todayActivity, engineStatus, historicalQueue);
 
     return {
       engine_status:             engineStatus,
@@ -58,7 +61,8 @@ export class AiDashboardService {
       campaigns,
       campaign_queue_detail:     campaignQueueDetail,
       telecaller_performance:    telecallerPerformance,
-      live_queue:                liveQueue,
+      live_queue:                validationQueue,   // today's validation rows only
+      historical_queue:          historicalQueue,   // all-time production rows (collapsible)
       product_rotation:          productRotation,
       number_utilization:        numberUtilization,
       log_stream:                logStream,
@@ -448,10 +452,59 @@ export class AiDashboardService {
     });
   }
 
-  // ── Section F: Live Queue (all-time, for stuck detection) ─────────────────
+  // ── Section F: Today Validation Queue ────────────────────────────────────────
+  // Scoped to is_validation=true + created today. Zero means cleanup succeeded.
 
-  private async _getLiveQueue() {
-    // Include queue rows regardless of whether campaign_id is set
+  private async _getTodayValidationQueue() {
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+
+    const rows = await this.ds.query<{
+      status:       string;
+      number_phone: string | null;
+      number_name:  string | null;
+      cnt:          string;
+    }[]>(`
+      SELECT
+        q.status,
+        n.phone AS number_phone,
+        n.name  AS number_name,
+        COUNT(*) AS cnt
+      FROM whatsapp_message_queue q
+      LEFT JOIN whatsapp_numbers n ON n.id = q.number_id
+      WHERE (q.message_payload->>'is_validation')::boolean = true
+        AND q.created_at >= $1
+      GROUP BY q.status, n.phone, n.name
+      ORDER BY n.phone, q.status
+    `, [todayStart]).catch(() => []);
+
+    const stuckRows = await this.ds.query<{ oldest: string | null }[]>(`
+      SELECT MIN(q.scheduled_at) AS oldest
+      FROM whatsapp_message_queue q
+      WHERE (q.message_payload->>'is_validation')::boolean = true
+        AND q.status = 'pending'
+        AND q.created_at >= $1
+        AND q.scheduled_at <= NOW()
+    `, [todayStart]).catch(() => []);
+    const oldestPending = stuckRows[0]?.oldest ?? null;
+    const stuckMinutes  = oldestPending
+      ? Math.floor((Date.now() - new Date(oldestPending).getTime()) / 60_000)
+      : 0;
+
+    return {
+      rows: rows.map(r => ({
+        status:       r.status,
+        number_phone: r.number_phone ?? 'unassigned',
+        number_name:  r.number_name  ?? '—',
+        count:        parseInt(r.cnt, 10),
+      })),
+      oldest_pending_minutes: stuckMinutes,
+    };
+  }
+
+  // ── Historical Queue (all-time, for stuck detection + collapsible view) ───────
+
+  private async _getAllTimeQueue() {
     const rows = await this.ds.query<{
       status:       string;
       number_phone: string | null;
@@ -474,8 +527,8 @@ export class AiDashboardService {
       FROM whatsapp_message_queue q
       WHERE q.status = 'pending' AND q.scheduled_at <= NOW()
     `).catch(() => []);
-    const oldestPending  = stuckRows[0]?.oldest ?? null;
-    const stuckMinutes   = oldestPending
+    const oldestPending = stuckRows[0]?.oldest ?? null;
+    const stuckMinutes  = oldestPending
       ? Math.floor((Date.now() - new Date(oldestPending).getTime()) / 60_000)
       : 0;
 
@@ -659,7 +712,7 @@ export class AiDashboardService {
   private _computeWarnings(
     activity: Awaited<ReturnType<typeof this._getTodayActivity>>,
     status:   Awaited<ReturnType<typeof this._getEngineStatus>>,
-    queue:    Awaited<ReturnType<typeof this._getLiveQueue>>,
+    queue:    Awaited<ReturnType<typeof this._getAllTimeQueue>>,
   ): string[] {
     const now          = new Date();
     const hour         = now.getHours();
