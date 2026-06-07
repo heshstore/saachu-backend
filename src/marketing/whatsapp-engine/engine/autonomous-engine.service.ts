@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { MarketingAudience } from '../entities/marketing-audience.entity';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
 import { WhatsAppNumberStatus, QueueStatus, CampaignStatus, MessageType, CTAType } from '../entities/enums';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
@@ -49,6 +49,8 @@ export class AutonomousEngineService implements OnModuleInit {
   private static readonly STORE_URL = 'https://www.heshstore.in';
 
   constructor(
+    @InjectDataSource()
+    private readonly ds: DataSource,
     @InjectRepository(ShopifyCatalogItem)
     private readonly catalogRepo: Repository<ShopifyCatalogItem>,
     @InjectRepository(MarketingCampaign)
@@ -245,7 +247,15 @@ export class AutonomousEngineService implements OnModuleInit {
     audience_count: number;
     queued: number;
     numbers: number;
+    cleanup: { campaigns_deleted: number; queue_rows_deleted: number; message_logs_deleted: number; audit_logs_deleted: number };
   }> {
+    const cleanup = await this._cleanupValidationArtifacts();
+    this.logger.log(
+      `[VALIDATION_CLEANUP] deleted campaigns=${cleanup.campaigns_deleted} ` +
+      `queue_rows=${cleanup.queue_rows_deleted} message_logs=${cleanup.message_logs_deleted} ` +
+      `audit_logs=${cleanup.audit_logs_deleted}`,
+    );
+
     const now = new Date();
     const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
     const hh = String(now.getHours()).padStart(2, '0');
@@ -272,7 +282,6 @@ export class AutonomousEngineService implements OnModuleInit {
       );
     }
 
-    const testOnly = process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true';
     const numberToCampaign = new Map<string, string>();
     const createdCampaigns: { campaign_id: string; number_phone: string; number_name: string | null }[] = [];
 
@@ -284,7 +293,7 @@ export class AutonomousEngineService implements OnModuleInit {
         campaign_name:        `${promoId} · ${number.phone}`,
         status:               CampaignStatus.RUNNING,
         is_promotion:         true,
-        test_mode:            testOnly,
+        test_mode:            true,  // always true — enables sender window bypass + 1h fingerprint window
         telecaller_number_id: number.id,
         promo_id:             promoId,
         notes:                `Validation campaign — T${telecallerIndex} · audience=test_contacts_only · bypass=cooldown,fatigue,dedup`,
@@ -304,8 +313,8 @@ export class AutonomousEngineService implements OnModuleInit {
       metadata: { promo_id: promoId, audience_count: validationAudience.length, numbers: sendableNumbers.length },
     });
 
-    // Pass validation audience directly — _buildQueue bypasses dedup/cooldown for test contacts
-    const result = await this._buildQueue(numberToCampaign, validationAudience);
+    // Pass validation audience directly — schedule immediately so sender picks up on next tick
+    const result = await this._buildQueue(numberToCampaign, validationAudience, true);
 
     this.logger.log(
       `[VALIDATION_CAMPAIGN] complete promo_id=${promoId} queued=${result.queued} numbers=${result.numbers}`,
@@ -317,12 +326,96 @@ export class AutonomousEngineService implements OnModuleInit {
       audience_count: validationAudience.length,
       queued:         result.queued,
       numbers:        result.numbers,
+      cleanup,
+    };
+  }
+
+  /**
+   * Deletes ONLY validation artifacts before a fresh validation run.
+   *
+   * Identification:
+   *   - By campaign: promo_id LIKE 'VALIDATION-%' OR campaign_name LIKE 'VALIDATION-%'
+   *   - Orphaned queue rows (campaign_id=NULL): message_payload->>'is_validation' = 'true'
+   *
+   * Deletion order matters — message_logs references queue rows and campaigns, so it
+   * must be deleted first while the subqueries can still resolve.
+   *
+   * NOT touched: whatsapp_replies, promotion_product_rotation, leads.
+   */
+  private async _cleanupValidationArtifacts(): Promise<{
+    campaigns_deleted:    number;
+    queue_rows_deleted:   number;
+    message_logs_deleted: number;
+    audit_logs_deleted:   number;
+  }> {
+    const campaignRows = await this.ds.query<{ id: string }[]>(
+      `SELECT id FROM marketing_campaigns
+       WHERE promo_id LIKE 'VALIDATION-%' OR campaign_name LIKE 'VALIDATION-%'`,
+    );
+
+    if (!campaignRows.length) {
+      return { campaigns_deleted: 0, queue_rows_deleted: 0, message_logs_deleted: 0, audit_logs_deleted: 0 };
+    }
+
+    // Step 1: Delete message logs FIRST (references queue rows + campaigns via subquery).
+    // Catches both directly-linked rows (campaign_id) and indirectly-linked rows (queue_id).
+    const deletedLogs = await this.ds.query<{ id: string }[]>(`
+      DELETE FROM whatsapp_message_logs
+      WHERE campaign_id IN (
+              SELECT id FROM marketing_campaigns
+              WHERE promo_id LIKE 'VALIDATION-%' OR campaign_name LIKE 'VALIDATION-%'
+            )
+         OR queue_id IN (
+              SELECT id FROM whatsapp_message_queue
+              WHERE campaign_id IN (
+                      SELECT id FROM marketing_campaigns
+                      WHERE promo_id LIKE 'VALIDATION-%' OR campaign_name LIKE 'VALIDATION-%'
+                    )
+                 OR (message_payload->>'is_validation')::boolean = true
+            )
+      RETURNING id
+    `);
+
+    // Step 2: Delete queue rows + audit logs in parallel.
+    // Queue: by campaign_id AND by the is_validation JSONB flag to catch NULL-campaign_id orphans.
+    const [deletedQueue, deletedAudit] = await Promise.all([
+      this.ds.query<{ id: string }[]>(`
+        DELETE FROM whatsapp_message_queue
+        WHERE campaign_id IN (
+                SELECT id FROM marketing_campaigns
+                WHERE promo_id LIKE 'VALIDATION-%' OR campaign_name LIKE 'VALIDATION-%'
+              )
+           OR (message_payload->>'is_validation')::boolean = true
+        RETURNING id
+      `),
+      this.ds.query<{ id: string }[]>(`
+        DELETE FROM engine_audit_logs
+        WHERE campaign_id IN (
+                SELECT id FROM marketing_campaigns
+                WHERE promo_id LIKE 'VALIDATION-%' OR campaign_name LIKE 'VALIDATION-%'
+              )
+        RETURNING id
+      `),
+    ]);
+
+    // Step 3: Delete campaigns last.
+    await this.ds.query(`
+      DELETE FROM marketing_campaigns
+      WHERE promo_id LIKE 'VALIDATION-%' OR campaign_name LIKE 'VALIDATION-%'
+    `);
+
+    return {
+      campaigns_deleted:    campaignRows.length,
+      queue_rows_deleted:   deletedQueue.length,
+      message_logs_deleted: deletedLogs.length,
+      audit_logs_deleted:   deletedAudit.length,
     };
   }
 
   async _buildQueue(
     numberToCampaign: Map<string, string> = new Map(),
     audienceOverride?: MarketingAudience[],
+    scheduleImmediately = false,
   ): Promise<{ queued: number; numbers: number }> {
     this.logger.log(
       `[MKT_QUEUE_GATE] _buildQueue start — engine_enabled=${process.env.WHATSAPP_ENGINE_ENABLED} ` +
@@ -472,7 +565,9 @@ export class AutonomousEngineService implements OnModuleInit {
         }
       }
 
-      const scheduledAt = await this.timingAi.getOptimalSendTime(member.phone);
+      const scheduledAt = scheduleImmediately
+        ? new Date()
+        : await this.timingAi.getOptimalSendTime(member.phone);
 
       // Autonomous per-number campaign takes priority; fall back to template-linked campaign.
       const resolvedCampaignId = numberToCampaign.get(number.id) ?? campaignId;
