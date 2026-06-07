@@ -46,7 +46,7 @@ export class NumbersService {
 
   // Reset all daily_sent counters to 0 — intended to be called once per day via cron
   async resetDailyCounts(): Promise<void> {
-    await this.repo.update({}, { daily_sent: 0 });
+    await this.repo.createQueryBuilder().update().set({ daily_sent: 0 }).execute();
   }
 
   async incrementDailySent(id: string): Promise<void> {
