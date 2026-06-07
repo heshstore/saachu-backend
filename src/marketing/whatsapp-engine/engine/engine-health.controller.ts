@@ -51,6 +51,17 @@ export class EngineHealthController {
     };
   }
 
+  /**
+   * Run a validation campaign using ONLY is_test_contact=true audience.
+   * Creates a VALIDATION-YYYYMMDD-HHMMSS campaign per connected number,
+   * bypasses cooldown/fatigue/dedup, respects daily/hourly caps and send windows.
+   * Returns: { promo_id, campaigns, audience_count, queued, numbers }
+   */
+  @Post('ai/validation-run')
+  async runValidationCampaign() {
+    return this.autonomousEngine.runValidationCampaign();
+  }
+
   // ── Pilot monitoring ─────────────────────────────────────────────────────
 
   /** Real-time pilot dashboard: metrics, health checks, alerts, GREEN/YELLOW/RED */

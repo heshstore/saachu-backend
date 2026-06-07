@@ -286,11 +286,13 @@ export class AiDashboardService {
 
     return rows.map(r => {
       const isToday = !!r.is_today;
+      const promoId = r.promo_id ?? `PROMO-${new Date(r.created_at).toISOString().slice(0, 10).replace(/-/g, '')}-????`;
       const products = productByCampaign.get(r.id)
         ?? (isToday && r.telecaller_number_id ? productByTelecaller.get(r.telecaller_number_id) ?? 0 : 0);
       return {
         id:                   r.id,
-        promo_id:             r.promo_id ?? `PROMO-${new Date(r.created_at).toISOString().slice(0, 10).replace(/-/g, '')}-????`,
+        promo_id:             promoId,
+        is_validation:        promoId.startsWith('VALIDATION-'),
         campaign_name:        r.campaign_name,
         created_at:           r.created_at,
         status:               r.status,
@@ -329,6 +331,7 @@ export class AiDashboardService {
       reply_received:      boolean | null;
       reply_message:       string | null;
       lead_created:        boolean | null;
+      message_body:        string | null;
       ai_hook_type:        string | null;
       ai_cta_used:         string | null;
     }[]>(`
@@ -351,6 +354,7 @@ export class AiDashboardService {
         l.reply_received,
         l.reply_message,
         (r.id IS NOT NULL)                         AS lead_created,
+        l.message_body,
         q.message_payload->'ai_metadata'->>'hookType' AS ai_hook_type,
         q.message_payload->'ai_metadata'->>'ctaUsed'  AS ai_cta_used
       FROM whatsapp_message_queue q
@@ -380,6 +384,7 @@ export class AiDashboardService {
       replied:          !!r.reply_received,
       reply_message:    r.reply_message ?? null,
       lead_created:     !!r.lead_created,
+      message_body:     r.message_body ?? null,
       ai_hook_type:     r.ai_hook_type ?? null,
       ai_cta_used:      r.ai_cta_used ?? null,
     }));

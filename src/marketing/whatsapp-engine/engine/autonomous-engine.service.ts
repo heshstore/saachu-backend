@@ -1,4 +1,5 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { MarketingAudience } from '../entities/marketing-audience.entity';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
@@ -231,7 +232,98 @@ export class AutonomousEngineService implements OnModuleInit {
     return numberToCampaign;
   }
 
-  async _buildQueue(numberToCampaign: Map<string, string> = new Map()): Promise<{ queued: number; numbers: number }> {
+  /**
+   * Create a validation campaign run for internal test contacts.
+   * Audience: ONLY is_test_contact=true (opt_out+is_whatsapp_valid still apply).
+   * Campaign naming: VALIDATION-YYYYMMDD-HHMMSS per connected number.
+   * All customer-side restrictions (cooldown, fatigue, dedup) are bypassed
+   * via isValidationContact(); production caps (daily/hourly/send-window) are NOT bypassed.
+   */
+  async runValidationCampaign(): Promise<{
+    promo_id: string;
+    campaigns: { campaign_id: string; number_phone: string; number_name: string | null }[];
+    audience_count: number;
+    queued: number;
+    numbers: number;
+  }> {
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    const promoId = `VALIDATION-${dateStr}-${hh}${mm}${ss}`;
+
+    const allNumbers = await this.numbersService.findAll();
+    const sendableNumbers = allNumbers.filter(
+      n => n.is_active && n.status === WhatsAppNumberStatus.ACTIVE && this.whatsAppService.isConnected(n.id),
+    );
+
+    if (!sendableNumbers.length) {
+      throw new BadRequestException('No connected WhatsApp numbers — cannot run validation campaign');
+    }
+
+    // ONLY test contacts; only hard safety rules apply (opt_out + is_whatsapp_valid)
+    const allTestContacts = await this.audienceService.findTestContacts();
+    const validationAudience = allTestContacts.filter(c => !c.opt_out && c.is_whatsapp_valid);
+
+    if (!validationAudience.length) {
+      throw new BadRequestException(
+        'No eligible validation contacts — set is_test_contact=true, opt_out=false, is_whatsapp_valid=true on at least one audience member',
+      );
+    }
+
+    const testOnly = process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true';
+    const numberToCampaign = new Map<string, string>();
+    const createdCampaigns: { campaign_id: string; number_phone: string; number_name: string | null }[] = [];
+
+    for (const number of sendableNumbers) {
+      const nameMatch = number.name?.match(/(\d+)\s*$/);
+      const telecallerIndex = nameMatch ? parseInt(nameMatch[1], 10) : 0;
+
+      const campaign = await this.campaignsService.create({
+        campaign_name:        `${promoId} · ${number.phone}`,
+        status:               CampaignStatus.RUNNING,
+        is_promotion:         true,
+        test_mode:            testOnly,
+        telecaller_number_id: number.id,
+        promo_id:             promoId,
+        notes:                `Validation campaign — T${telecallerIndex} · audience=test_contacts_only · bypass=cooldown,fatigue,dedup`,
+      });
+
+      numberToCampaign.set(number.id, campaign.id);
+      createdCampaigns.push({ campaign_id: campaign.id, number_phone: number.phone, number_name: number.name ?? null });
+
+      this.logger.log(
+        `[VALIDATION_CAMPAIGN] created promo_id=${promoId} id=${campaign.id} number=${number.phone} T${telecallerIndex}`,
+      );
+    }
+
+    await this.auditService.log({
+      event:    AuditEvent.QUEUE_CREATED,
+      reason:   `Validation campaign: ${promoId} — ${validationAudience.length} test contacts across ${sendableNumbers.length} numbers`,
+      metadata: { promo_id: promoId, audience_count: validationAudience.length, numbers: sendableNumbers.length },
+    });
+
+    // Pass validation audience directly — _buildQueue bypasses dedup/cooldown for test contacts
+    const result = await this._buildQueue(numberToCampaign, validationAudience);
+
+    this.logger.log(
+      `[VALIDATION_CAMPAIGN] complete promo_id=${promoId} queued=${result.queued} numbers=${result.numbers}`,
+    );
+
+    return {
+      promo_id:       promoId,
+      campaigns:      createdCampaigns,
+      audience_count: validationAudience.length,
+      queued:         result.queued,
+      numbers:        result.numbers,
+    };
+  }
+
+  async _buildQueue(
+    numberToCampaign: Map<string, string> = new Map(),
+    audienceOverride?: MarketingAudience[],
+  ): Promise<{ queued: number; numbers: number }> {
     this.logger.log(
       `[MKT_QUEUE_GATE] _buildQueue start — engine_enabled=${process.env.WHATSAPP_ENGINE_ENABLED} ` +
       `test_only=${process.env.WHATSAPP_ENGINE_TEST_ONLY} bypass=${process.env.MARKETING_TEST_BYPASS_SEND_WINDOW} ` +
@@ -264,13 +356,13 @@ export class AutonomousEngineService implements OnModuleInit {
     const activePhones = await this.queueService.findActivePhonesSet();
     this.logger.log(`[MKT_QUEUE_GATE] active_queue_phones=${activePhones.size} phones=${JSON.stringify([...activePhones])}`);
 
-    const rawAudience = await this.audienceAi.filterByQuality(30);
+    const rawAudience = audienceOverride ?? await this.audienceAi.filterByQuality(30);
     // Honour daily audience cap (WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE) — critical for pilot safety
     const maxDaily = parseInt(process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE || '999999', 10);
     const audience = rawAudience.slice(0, maxDaily);
-    this.logger.log(`[MKT_QUEUE_GATE] audience: raw=${rawAudience.length} capped=${audience.length} maxDaily=${maxDaily}`);
+    this.logger.log(`[MKT_QUEUE_GATE] audience: raw=${rawAudience.length} capped=${audience.length} maxDaily=${maxDaily} override=${!!audienceOverride}`);
     if (!audience.length) {
-      this.logger.warn('[MKT_QUEUE_SKIP_REASON] No eligible audience (quality_score>=30, is_whatsapp_valid=true, opt_out=false, cooldown expired) — skipping build');
+      this.logger.warn('[MKT_QUEUE_SKIP_REASON] No eligible audience — skipping build');
       return { queued: 0, numbers: sendableNumbers.length };
     }
     if (rawAudience.length > audience.length) {
