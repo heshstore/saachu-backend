@@ -25,6 +25,22 @@ export class ShopifyCatalogItem {
   @Column({ nullable: true, default: null })
   handle: string | null;
 
+  /** Shopify product description (plain text or HTML). Populated by sync. Used by promotion AI. */
+  @Column({ type: 'text', nullable: true, default: null })
+  description: string | null;
+
+  /** Shopify comma-separated tags (e.g. "optical,lens,edging"). Populated by sync. */
+  @Column({ nullable: true, default: null })
+  tags: string | null;
+
+  /** Shopify vendor / brand name. Populated by sync. */
+  @Column({ nullable: true, default: null })
+  vendor: string | null;
+
+  /** Shopify product type (e.g. "Optical Equipment"). Populated by sync. */
+  @Column({ name: 'product_type', nullable: true, default: null })
+  productType: string | null;
+
   /** Shopify's own updated_at for this variant — used to validate incremental sync */
   @Column({ name: 'shopify_updated_at', type: 'timestamptz', nullable: true })
   shopifyUpdatedAt: Date;

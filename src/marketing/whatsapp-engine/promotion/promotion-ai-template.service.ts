@@ -28,14 +28,15 @@ export interface PromotionGenerateResult {
   /** Product page URL — stored in message_payload for analytics; also included as View Product CTA. */
   productUrl: string;
   metadata: {
-    templateVariant: string;
-    contentCategory: ContentCategory;
-    softCtaUsed: string;
-    hookType: string;
-    messageLength: number;
-    productSku: string;
-    productClass: ProductClass;
-    industryContext: string | null;
+    templateVariant:     string;
+    contentCategory:     ContentCategory;
+    softCtaUsed:         string;
+    hookType:            string;
+    messageLength:       number;
+    productSku:          string;
+    productClass:        ProductClass;
+    industryContext:     string | null;
+    knowledgeConfidence: number;
   };
 }
 
@@ -45,7 +46,6 @@ export interface PromotionGenerateResult {
 
 type ProductClass = 'display' | 'machine' | 'consumable' | 'component' | 'general';
 
-// Checked in order — first match wins.
 const DISPLAY_TERMS    = /display|panel|holder|rack|counter|wall|peg|shelf|stand|fixture|mount|grid|hook/i;
 const MACHINE_TERMS    = /machine|wheel|tool|blade|motor|cutter|press|drill|grinder|lathe|pump|conveyor/i;
 const CONSUMABLE_TERMS = /solution|liquid|cleaner|chemical|consumable|pad|lubric|solvent|spray|gel|powder/i;
@@ -767,7 +767,6 @@ const GENERAL_POOLS: ProductClassPools = {
   ],
 };
 
-// ── Pool lookup ───────────────────────────────────────────────────────────────
 const POOL_MAP: Record<ProductClass, ProductClassPools> = {
   display:    DISPLAY_POOLS,
   machine:    MACHINE_POOLS,
@@ -778,21 +777,19 @@ const POOL_MAP: Record<ProductClass, ProductClassPools> = {
 
 // ══════════════════════════════════════════════════════════════════════════════
 // KNOWLEDGE LAYER
-// Extracts product-specific context from catalog fields using simple rules.
-// No AI, no external calls, no external dependencies.
 // ══════════════════════════════════════════════════════════════════════════════
 
 interface ProductKnowledge {
-  productType:     string;        // extracted noun (wheel, panel, solution…)
-  primaryUse:      string | null; // inferred use-case phrase
-  targetUser:      string | null; // who typically uses this
-  material:        string | null; // material keyword if found
-  industryContext: string | null; // industry it belongs to
-  enrich:          string | null; // pre-composed product-specific explain sentence
-  isRich:          boolean;       // true when enrich was successfully composed
+  productType:     string;
+  primaryUse:      string | null;
+  targetUser:      string | null;
+  material:        string | null;
+  industryContext: string | null;
+  enrich:          string | null;
+  confidence:      number;  // 0–100; replaces the old boolean isRich
 }
 
-// Industry keyword → context label (checked in order, first match wins)
+// ── Industry keyword → context label ─────────────────────────────────────────
 const INDUSTRY_KEYWORDS: [string, string][] = [
   ['optical',    'optical manufacturing'],
   ['lens',       'optical lens processing'],
@@ -820,7 +817,7 @@ const INDUSTRY_KEYWORDS: [string, string][] = [
   ['food',       'food industry'],
 ];
 
-// Use-case keyword → primary use phrase (checked in order, first match wins)
+// ── Use-case keyword → primary use phrase ─────────────────────────────────────
 const USE_KEYWORDS: [string, string][] = [
   ['edging',      'edge finishing'],
   ['finishing',   'surface finishing'],
@@ -834,22 +831,23 @@ const USE_KEYWORDS: [string, string][] = [
   ['washing',     'cleaning and maintenance'],
   ['lubricating', 'lubrication'],
   ['lubrication', 'lubrication'],
-  ['mounting',    'equipment mounting'],
+  ['fastener',    'fastening and assembly'],
   ['fastening',   'fastening and assembly'],
+  ['mounting',    'equipment mounting'],
   ['assembly',    'assembly operations'],
   ['display',     'product display organization'],
   ['organizing',  'product organization'],
   ['sorting',     'product sorting and organization'],
 ];
 
-// Material keywords — matched as whole words against tokenized name
+// ── Material keywords (whole-word) ────────────────────────────────────────────
 const MATERIAL_KEYWORDS: string[] = [
   'diamond', 'carbide', 'abrasive', 'wire', 'stainless',
   'aluminum', 'rubber', 'ceramic', 'silicon', 'brass',
   'chrome', 'steel', 'iron', 'plastic', 'glass',
 ];
 
-// Industry context → who uses it
+// ── Industry → who uses it ────────────────────────────────────────────────────
 const TARGET_USER_MAP: Record<string, string> = {
   'optical manufacturing':    'optical labs',
   'optical lens processing':  'optical lens labs',
@@ -867,8 +865,7 @@ const TARGET_USER_MAP: Record<string, string> = {
   'food industry':            'food processing units',
 };
 
-// HSN code prefix (4 digits) → industry context
-// Used as secondary signal when text-based detection finds nothing.
+// ── HSN prefix → industry (last-resort only, must not override text signals) ──
 const HSN_INDUSTRY_MAP: Record<string, string> = {
   '9001': 'optical manufacturing',
   '9002': 'optical manufacturing',
@@ -887,7 +884,7 @@ const HSN_INDUSTRY_MAP: Record<string, string> = {
   '4015': 'healthcare',
 };
 
-// Product type nouns — matched against tokenized name words
+// ── Product type nouns ────────────────────────────────────────────────────────
 const PRODUCT_TYPE_NOUNS: string[] = [
   'wheel', 'blade', 'tool', 'machine', 'motor', 'drill', 'press', 'pump',
   'grinder', 'cutter', 'lathe', 'conveyor', 'device',
@@ -898,6 +895,24 @@ const PRODUCT_TYPE_NOUNS: string[] = [
   'bracket', 'connector', 'fitting', 'pin', 'bolt', 'screw', 'clip',
   'component', 'part', 'accessory', 'kit', 'set',
 ];
+
+// ── Text layer ordering: [text, sourceName, confidenceBonus] ─────────────────
+// Priority: description → tags → productType → name → handle → vendor
+// HSN is handled separately as a last-resort fallback.
+type TextLayer = [string, string, number];
+
+function buildTextLayers(product: ShopifyCatalogItem): TextLayer[] {
+  return [
+    [(product.description  ?? '').toLowerCase(), 'description',   30],
+    [(product.tags         ?? '').toLowerCase(), 'tags',          20],
+    [(product.productType  ?? '').toLowerCase(), 'productType',   15],
+    [(product.itemName     ?? '').toLowerCase(), 'name',          15],
+    [(product.handle       ?? '').toLowerCase(), 'handle',        10],
+    [(product.vendor       ?? '').toLowerCase(), 'vendor',         5],
+  ];
+}
+
+// ── Pure helper functions ─────────────────────────────────────────────────────
 
 function deriveProductType(words: string[]): string {
   for (const noun of PRODUCT_TYPE_NOUNS) {
@@ -941,7 +956,6 @@ function buildEnrichSentence(
   if (industryContext) {
     return `Commonly used in ${industryContext}.`;
   }
-  // material alone is not enough for a useful sentence
   return null;
 }
 
@@ -962,43 +976,70 @@ function deriveKnowledgeBenefit(knowledge: ProductKnowledge): string | null {
   return null;
 }
 
-function extractProductKnowledge(product: ShopifyCatalogItem): ProductKnowledge {
-  const rawText = [product.itemName, product.sku, product.handle].filter(Boolean).join(' ');
-  const text    = rawText.toLowerCase();
-  const words   = text.replace(/[-_/]/g, ' ').split(/\s+/).filter(Boolean);
+function extractProductKnowledge(
+  product: ShopifyCatalogItem,
+  productClass: ProductClass,
+): ProductKnowledge {
+  const layers = buildTextLayers(product);
 
-  // 1. Industry — text keywords first, HSN fallback
+  // All tokens combined — used for material and product-type extraction
+  const allText = layers.map(([t]) => t).concat(product.sku?.toLowerCase() ?? '').join(' ');
+  const words   = allText.replace(/[-_/]/g, ' ').split(/\s+/).filter(Boolean);
+
+  // ── Extract industryContext — first matching layer wins ──────────────────────
   let industryContext: string | null = null;
-  for (const [kw, industry] of INDUSTRY_KEYWORDS) {
-    if (text.includes(kw)) { industryContext = industry; break; }
+  let hsnFallbackUsed = false;
+
+  for (const [layerText] of layers) {
+    if (!layerText) continue;
+    for (const [kw, ind] of INDUSTRY_KEYWORDS) {
+      if (layerText.includes(kw)) { industryContext = ind; break; }
+    }
+    if (industryContext) break;
   }
-  if (!industryContext && product.hsnCode) {
+
+  // HSN only as last resort — and NEVER for display products (prevents cross-class pollution)
+  if (!industryContext && product.hsnCode && productClass !== 'display') {
     const prefix = product.hsnCode.substring(0, 4);
-    industryContext = HSN_INDUSTRY_MAP[prefix] ?? null;
+    const mapped = HSN_INDUSTRY_MAP[prefix];
+    if (mapped) { industryContext = mapped; hsnFallbackUsed = true; }
   }
 
-  // 2. Primary use
+  // ── Extract primaryUse — same priority order ─────────────────────────────────
   let primaryUse: string | null = null;
-  for (const [kw, use] of USE_KEYWORDS) {
-    if (text.includes(kw)) { primaryUse = use; break; }
+  for (const [layerText] of layers) {
+    if (!layerText) continue;
+    for (const [kw, use] of USE_KEYWORDS) {
+      if (layerText.includes(kw)) { primaryUse = use; break; }
+    }
+    if (primaryUse) break;
   }
 
-  // 3. Material (whole-word match)
+  // ── Extract material ──────────────────────────────────────────────────────────
   let material: string | null = null;
   for (const kw of MATERIAL_KEYWORDS) {
     if (words.includes(kw)) { material = kw; break; }
   }
 
-  // 4. Product type noun
   const productType = deriveProductType(words);
+  const targetUser  = industryContext ? (TARGET_USER_MAP[industryContext] ?? null) : null;
+  const enrich      = buildEnrichSentence(productType, primaryUse, material, industryContext, targetUser);
 
-  // 5. Target user from industry
-  const targetUser = industryContext ? (TARGET_USER_MAP[industryContext] ?? null) : null;
+  // ── Confidence scoring — each source that contributed ANY signal adds its bonus ─
+  // Scoring is independent of extraction priority so all useful sources are counted.
+  let confidence = 0;
+  for (const [layerText, , bonus] of layers) {
+    if (!layerText) continue;
+    const hit =
+      INDUSTRY_KEYWORDS.some(([kw]) => layerText.includes(kw)) ||
+      USE_KEYWORDS.some(([kw]) => layerText.includes(kw));
+    if (hit) confidence += bonus;
+  }
+  if (hsnFallbackUsed) confidence += 5;
+  if (material)        confidence += 5;
+  confidence = Math.min(Math.round(confidence), 100);
 
-  // 6. Compose enrich sentence
-  const enrich = buildEnrichSentence(productType, primaryUse, material, industryContext, targetUser);
-
-  return { productType, primaryUse, targetUser, material, industryContext, enrich, isRich: !!enrich };
+  return { productType, primaryUse, targetUser, material, industryContext, enrich, confidence };
 }
 
 // ── Safety patterns ───────────────────────────────────────────────────────────
@@ -1039,7 +1080,7 @@ export class PromotionAiTemplateService {
     const sku          = product.sku ?? '';
     const productClass = classifyProduct(product);
     const pools        = POOL_MAP[productClass];
-    const knowledge    = extractProductKnowledge(product);
+    const knowledge    = extractProductKnowledge(product, productClass);
 
     const category   = this._pickCategory();
     const greeting   = this._pickRandom(GREETINGS)(name);
@@ -1062,7 +1103,7 @@ export class PromotionAiTemplateService {
 
     this.logger.log(
       `[PROMO_AI] category=${category} class=${productClass} ` +
-      `industry=${knowledge.industryContext ?? 'none'} rich=${knowledge.isRich} ` +
+      `industry=${knowledge.industryContext ?? 'none'} confidence=${knowledge.confidence} ` +
       `sku=${sku} offer=${!!offerLine} customer=${customer.phone} length=${message.length}`,
     );
 
@@ -1071,14 +1112,15 @@ export class PromotionAiTemplateService {
       imageUrl:   product.image || null,
       productUrl,
       metadata: {
-        templateVariant: `v${Math.floor(Math.random() * 3) + 1}`,
-        contentCategory: category,
-        softCtaUsed:     softCta,
-        hookType:        category,
-        messageLength:   message.length,
-        productSku:      sku,
+        templateVariant:     `v${Math.floor(Math.random() * 3) + 1}`,
+        contentCategory:     category,
+        softCtaUsed:         softCta,
+        hookType:            category,
+        messageLength:       message.length,
+        productSku:          sku,
         productClass,
-        industryContext: knowledge.industryContext ?? null,
+        industryContext:     knowledge.industryContext ?? null,
+        knowledgeConfidence: knowledge.confidence,
       },
     };
   }
@@ -1093,8 +1135,7 @@ export class PromotionAiTemplateService {
     return 'direct_promo';
   }
 
-  // ── Content generation ────────────────────────────────────────────────────────
-  // Two-stage: pull raw content from class pool → apply knowledge overrides.
+  // ── Content generation — two-stage: pool pull → knowledge override ────────────
 
   private _categoryContent(
     category: ContentCategory,
@@ -1104,7 +1145,10 @@ export class PromotionAiTemplateService {
   ): { hook: string; explain: string; benefit: string } {
     const { hook, poolExplain, poolBenefit } = this._pullFromPool(category, city, p);
     const explain = this._resolveExplain(category, poolExplain, knowledge);
-    const benefit = deriveKnowledgeBenefit(knowledge) ?? poolBenefit;
+    // Benefit override only at high confidence — weak knowledge must not create weak benefits.
+    const benefit = knowledge.confidence >= 70
+      ? (deriveKnowledgeBenefit(knowledge) ?? poolBenefit)
+      : poolBenefit;
     return { hook, explain, benefit };
   }
 
@@ -1147,17 +1191,20 @@ export class PromotionAiTemplateService {
     }
   }
 
-  // Knowledge overrides pool explain when rich enough to compose a product-specific sentence.
-  // For problem_sol: enrich is prepended so the product context leads into the solution.
-  // For all other categories: enrich replaces the generic pool explain entirely.
+  // Confidence thresholds for explain override:
+  //   < 40  → pool explain always wins (knowledge too weak to trust)
+  //   40–70 → knowledge explain replaces pool explain; pool benefit retained
+  //   > 70  → knowledge explain; knowledge benefit (handled in _categoryContent)
   private _resolveExplain(
     category: ContentCategory,
     poolExplain: string,
     knowledge: ProductKnowledge,
   ): string {
-    if (!knowledge.enrich) return poolExplain;
-    if (category === 'problem_sol') return `${knowledge.enrich}\n${poolExplain}`;
-    return knowledge.enrich;
+    const { enrich, confidence } = knowledge;
+    if (!enrich || confidence < 40) return poolExplain;
+    // problem_sol: prepend product context before the solution (which addresses the stated problem)
+    if (category === 'problem_sol') return `${enrich}\n${poolExplain}`;
+    return enrich;
   }
 
   // ── Message assembly ──────────────────────────────────────────────────────────
