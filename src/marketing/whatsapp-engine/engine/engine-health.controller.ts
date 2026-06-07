@@ -8,6 +8,7 @@ import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 import { ValidateService } from '../validate/validate.service';
 import { PilotMonitoringService } from './pilot-monitoring.service';
 import { AiDashboardService } from './ai-dashboard.service';
+import { AutonomousEngineService } from './autonomous-engine.service';
 
 @Controller('marketing/whatsapp-engine')
 export class EngineHealthController {
@@ -21,6 +22,7 @@ export class EngineHealthController {
     private readonly validateService: ValidateService,
     private readonly pilotMonitoring: PilotMonitoringService,
     private readonly aiDashboard: AiDashboardService,
+    private readonly autonomousEngine: AutonomousEngineService,
   ) {}
 
   // ── AI Promotion Dashboard ────────────────────────────────────────────────
@@ -29,6 +31,24 @@ export class EngineHealthController {
   @Get('ai/dashboard')
   getAiDashboard() {
     return this.aiDashboard.getDashboard();
+  }
+
+  /**
+   * Force-trigger one autonomous engine run immediately.
+   * Idempotent: creates today's campaigns if missing, then builds the queue.
+   * Use for validation runs and manual testing — does NOT bypass WHATSAPP_ENGINE_ENABLED.
+   * Returns: { triggered, campaigns_created, queued, numbers }
+   */
+  @Post('ai/trigger')
+  async triggerAutonomousRun() {
+    const numberToCampaign = await this.autonomousEngine._ensureDailyCampaigns();
+    const result           = await this.autonomousEngine._buildQueue(numberToCampaign);
+    return {
+      triggered:         true,
+      campaigns_created: numberToCampaign.size,
+      queued:            result.queued,
+      numbers:           result.numbers,
+    };
   }
 
   // ── Pilot monitoring ─────────────────────────────────────────────────────

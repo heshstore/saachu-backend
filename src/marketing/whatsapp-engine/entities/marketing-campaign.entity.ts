@@ -60,9 +60,16 @@ export class MarketingCampaign {
   @Column({ type: 'boolean', default: false })
   test_mode: boolean;
 
-  /** Human-readable promotion ID: PROMO-YYYYMMDD-XXXX. Set automatically for is_promotion=true. */
-  @Column({ type: 'varchar', length: 20, nullable: true, unique: true })
+  /** Human-readable promotion ID: PROMO-T1-YYYYMMDD-001. Set automatically for is_promotion=true. */
+  @Column({ type: 'varchar', length: 32, nullable: true, unique: true })
   promo_id: string | null;
+
+  /**
+   * For autonomous daily campaigns: the WhatsApp number UUID this campaign is assigned to.
+   * NULL for manually created campaigns.
+   */
+  @Column({ type: 'uuid', nullable: true })
+  telecaller_number_id: string | null;
 
   @Column({ type: 'int', nullable: true })
   created_by: number | null;

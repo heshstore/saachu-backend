@@ -5,6 +5,7 @@ import { Cron } from '@nestjs/schedule';
 import { WhatsAppNumberStatus, QueueStatus, CampaignStatus, MessageType, CTAType } from '../entities/enums';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
 import { MarketingTemplate } from '../entities/marketing-template.entity';
+import { MarketingCampaign } from '../entities/marketing-campaign.entity';
 import { ShopifyCatalogItem } from '../../../shopify-catalog/entities/shopify-catalog-item.entity';
 import { AudienceAiService } from '../ai/audience-ai.service';
 import { MessageAiService } from '../ai/message-ai.service';
@@ -38,7 +39,8 @@ export class AutonomousEngineService implements OnModuleInit {
     if (!bypass || !testOnly || !enabled) return;
     await this._ensureTestSetup();
     this.logger.log('[MKT_QUEUE_GATE] TEST_ONLY+BYPASS: triggering immediate startup queue build');
-    const result = await this._buildQueue();
+    const numberToCampaign = await this._ensureDailyCampaigns();
+    const result = await this._buildQueue(numberToCampaign);
     this.logger.log(`[MKT_QUEUE_GATE] Startup queue build complete: queued=${result.queued} numbers=${result.numbers}`);
   }
 
@@ -47,6 +49,8 @@ export class AutonomousEngineService implements OnModuleInit {
   constructor(
     @InjectRepository(ShopifyCatalogItem)
     private readonly catalogRepo: Repository<ShopifyCatalogItem>,
+    @InjectRepository(MarketingCampaign)
+    private readonly campaignRepo: Repository<MarketingCampaign>,
     private readonly audienceAi: AudienceAiService,
     private readonly messageAi: MessageAiService,
     private readonly timingAi: TimingAiService,
@@ -91,36 +95,146 @@ export class AutonomousEngineService implements OnModuleInit {
     this._running = true;
 
     try {
-    // Require at least one RUNNING campaign OR auto AI mode ON
-    const campaigns = await this.campaignsService.findAll();
-    const hasRunning = campaigns.some((c) => c.status === CampaignStatus.RUNNING);
-    if (!hasRunning) {
-      const autoAiMode = await this.engineSettings.getAutoAiMode();
-      if (!autoAiMode) {
-        this.logger.warn('[Engine] No running campaigns and auto AI mode is OFF — skipping daily queue build');
-        return;
-      }
-      this.logger.log('[Engine] No running campaigns — auto AI mode ON, building from active AI templates');
-    }
+      // Step 1: Ensure one autonomous campaign exists per connected telecaller number.
+      // This must run before the queue build so every queue row gets a non-null campaign_id.
+      const numberToCampaign = await this._ensureDailyCampaigns();
 
-    this.logger.log('[Engine] Building daily queue');
-    const result = await this._buildQueue();
-    this.logger.log(`[Engine] Daily queue built: ${result.queued} items across ${result.numbers} numbers`);
-    await this.auditService.log({
-      event: AuditEvent.QUEUE_CREATED,
-      reason: `Daily queue build: ${result.queued} items across ${result.numbers} numbers`,
-      metadata: result,
-    });
+      // Step 2: Gate check — need at least one autonomous campaign OR a manually RUNNING campaign OR auto AI mode.
+      const hasAutonomousCampaigns = numberToCampaign.size > 0;
+      if (!hasAutonomousCampaigns) {
+        const allCampaigns = await this.campaignsService.findAll();
+        const hasRunning = allCampaigns.some((c) => c.status === CampaignStatus.RUNNING);
+        if (!hasRunning) {
+          const autoAiMode = await this.engineSettings.getAutoAiMode();
+          if (!autoAiMode) {
+            this.logger.warn('[Engine] No autonomous campaigns, no running campaigns, auto AI mode OFF — skipping queue build');
+            return;
+          }
+          this.logger.log('[Engine] No running campaigns — auto AI mode ON, building without per-number campaigns');
+        }
+      }
+
+      this.logger.log(`[Engine] Building daily queue — autonomous campaigns: ${numberToCampaign.size}`);
+      const result = await this._buildQueue(numberToCampaign);
+      this.logger.log(`[Engine] Daily queue built: ${result.queued} items across ${result.numbers} numbers`);
+      await this.auditService.log({
+        event: AuditEvent.QUEUE_CREATED,
+        reason: `Daily queue build: ${result.queued} items across ${result.numbers} numbers`,
+        metadata: result,
+      });
     } finally {
       this._running = false;
     }
   }
 
-  async _buildQueue(): Promise<{ queued: number; numbers: number }> {
+  /**
+   * Idempotent: for each connected WhatsApp number, ensures a RUNNING autonomous
+   * promotion campaign exists for today. Creates one if missing.
+   * Returns a map of numberId → campaignId for the daily campaigns.
+   */
+  async _ensureDailyCampaigns(): Promise<Map<string, string>> {
+    const testOnly = process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true';
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const allNumbers = await this.numbersService.findAll();
+    const sendableNumbers = allNumbers.filter(
+      (n) => n.is_active && n.status === WhatsAppNumberStatus.ACTIVE && this.whatsAppService.isConnected(n.id),
+    );
+
+    if (!sendableNumbers.length) {
+      this.logger.warn('[Engine] _ensureDailyCampaigns: no connected numbers — skipping campaign creation');
+      return new Map();
+    }
+
+    // Find any existing autonomous campaigns for today (created since midnight)
+    const existing = await this.campaignRepo.find({
+      where: { is_promotion: true },
+      order: { created_at: 'DESC' },
+    });
+    const todayExisting = existing.filter(
+      (c) => c.telecaller_number_id && new Date(c.created_at) >= today,
+    );
+    const existingByNumber = new Map<string, string>(
+      todayExisting.map((c) => [c.telecaller_number_id!, c.id]),
+    );
+
+    const numberToCampaign = new Map<string, string>();
+
+    for (const number of sendableNumbers) {
+      // T-index: extract trailing number from name "Telecaller N" → N.
+      // This preserves stable naming across connection order changes.
+      // Falls back to 0 if name has no trailing digit, which will produce PROMO-T0-... (logged as warning).
+      const nameMatch = number.name?.match(/(\d+)\s*$/);
+      const telecallerIndex = nameMatch ? parseInt(nameMatch[1], 10) : 0;
+      if (!nameMatch) {
+        this.logger.warn(
+          `[ENGINE_CAMPAIGN] number=${number.phone} name="${number.name}" has no trailing digit — T-index will be 0`,
+        );
+      }
+
+      // Already have today's campaign for this number
+      if (existingByNumber.has(number.id)) {
+        const campaignId = existingByNumber.get(number.id)!;
+        numberToCampaign.set(number.id, campaignId);
+        this.logger.log(
+          `[ENGINE_CAMPAIGN] number=${number.phone} T${telecallerIndex} — today's campaign already exists id=${campaignId}`,
+        );
+        continue;
+      }
+
+      const promoId = CampaignsService.generateDailyPromoId(telecallerIndex, today);
+      const campaignName = `${promoId} · ${number.phone}`;
+
+      const campaign = await this.campaignsService.create({
+        campaign_name: campaignName,
+        status: CampaignStatus.RUNNING,
+        is_promotion: true,
+        test_mode: testOnly,
+        telecaller_number_id: number.id,
+        promo_id: promoId,
+        notes: `Auto-created by autonomous engine for ${number.phone} (T${telecallerIndex})`,
+      });
+
+      numberToCampaign.set(number.id, campaign.id);
+      await this.auditService.log({
+        event: AuditEvent.QUEUE_CREATED,
+        reason: `Autonomous campaign created: ${promoId} for number ${number.phone}`,
+        metadata: { campaign_id: campaign.id, promo_id: promoId, number_phone: number.phone },
+      });
+      this.logger.log(
+        `[ENGINE_CAMPAIGN] created: promo_id=${promoId} id=${campaign.id} number=${number.phone} test_mode=${testOnly}`,
+      );
+    }
+
+    // Retroactive repair: link today's queue rows (campaign_id IS NULL) to their campaign.
+    // This handles cases where the queue was built before campaign creation code was deployed.
+    if (numberToCampaign.size > 0) {
+      const repairFrom = today.toISOString();
+      for (const [numberId, campaignId] of numberToCampaign) {
+        const repaired = await this.campaignRepo.manager.query(
+          `UPDATE whatsapp_message_queue
+           SET campaign_id = $1
+           WHERE number_id = $2 AND campaign_id IS NULL AND created_at >= $3
+           RETURNING id`,
+          [campaignId, numberId, repairFrom],
+        ) as { id: string }[];
+        if (repaired.length > 0) {
+          this.logger.log(
+            `[ENGINE_CAMPAIGN_REPAIR] linked ${repaired.length} orphan queue rows → campaign=${campaignId} number=${numberId}`,
+          );
+        }
+      }
+    }
+
+    return numberToCampaign;
+  }
+
+  async _buildQueue(numberToCampaign: Map<string, string> = new Map()): Promise<{ queued: number; numbers: number }> {
     this.logger.log(
       `[MKT_QUEUE_GATE] _buildQueue start — engine_enabled=${process.env.WHATSAPP_ENGINE_ENABLED} ` +
       `test_only=${process.env.WHATSAPP_ENGINE_TEST_ONLY} bypass=${process.env.MARKETING_TEST_BYPASS_SEND_WINDOW} ` +
-      `maxDaily=${process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE}`,
+      `maxDaily=${process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE} autonomous_campaigns=${numberToCampaign.size}`,
     );
 
     const allNumbers = await this.numbersService.findAll();
@@ -259,7 +373,11 @@ export class AutonomousEngineService implements OnModuleInit {
       }
 
       const scheduledAt = await this.timingAi.getOptimalSendTime(member.phone);
-      const catalogItem = campaignId ? campaignToProduct.get(campaignId) ?? null : null;
+
+      // Autonomous per-number campaign takes priority; fall back to template-linked campaign.
+      const resolvedCampaignId = numberToCampaign.get(number.id) ?? campaignId;
+
+      const catalogItem = resolvedCampaignId ? campaignToProduct.get(resolvedCampaignId) ?? null : null;
 
       const productFields = catalogItem
         ? {
@@ -271,7 +389,7 @@ export class AutonomousEngineService implements OnModuleInit {
         : {};
 
       items.push({
-        campaign_id:    campaignId,
+        campaign_id:    resolvedCampaignId,
         number_id:      number.id,
         product_id:     catalogItem?.id ?? undefined,
         customer_phone: member.phone,

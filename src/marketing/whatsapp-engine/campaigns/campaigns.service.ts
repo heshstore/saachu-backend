@@ -56,6 +56,16 @@ export class CampaignsService {
     return `PROMO-${date}-${rand}`;
   }
 
+  /**
+   * Generates the deterministic daily promo ID for an autonomous per-telecaller campaign.
+   * Format: PROMO-T{index}-YYYYMMDD-{seq:03}
+   * e.g. PROMO-T1-20260607-001
+   */
+  static generateDailyPromoId(telecallerIndex: number, date: Date, seq = 1): string {
+    const dateStr = date.toISOString().slice(0, 10).replace(/-/g, '');
+    return `PROMO-T${telecallerIndex}-${dateStr}-${String(seq).padStart(3, '0')}`;
+  }
+
   async update(id: string, dto: Partial<MarketingCampaign>): Promise<MarketingCampaign> {
     const existing = await this.findOne(id);
     // Promotion rule fields cannot be overridden after creation.
