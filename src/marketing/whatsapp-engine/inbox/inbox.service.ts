@@ -40,6 +40,8 @@ export interface ConversationSummary {
   latest_reply_id: string;
   crm_lead_created: boolean;
   crm_lead_id: number | null;
+  /** CUSTOMER_DB | PROMO_DB | UNKNOWN */
+  customer_source: string;
 }
 
 export interface ConversationMessage {
@@ -71,23 +73,22 @@ export class InboxService {
   ) {}
 
   async findAll(): Promise<ConversationSummary[]> {
-    // Group all inbound messages into one row per conversation.
-    // COALESCE(conversation_key, customer_phone) handles rows that pre-date Phase 4
-    // where conversation_key was not yet populated.
+    // Group by customer_phone only (not conversation_key) so the same customer
+    // appears exactly once even if they've messaged via multiple telecaller numbers.
     const rows: ConversationSummary[] = await this.repo.manager.query(`
       WITH latest AS (
-        SELECT DISTINCT ON (COALESCE(conversation_key, customer_phone))
-          COALESCE(conversation_key, customer_phone) AS conversation_key,
+        SELECT DISTINCT ON (customer_phone)
+          customer_phone AS conversation_key,
           id             AS latest_reply_id,
           message        AS latest_message,
           number_id,
           customer_name
         FROM whatsapp_replies
-        ORDER BY COALESCE(conversation_key, customer_phone), received_at DESC
+        WHERE customer_phone IS NOT NULL
+        ORDER BY customer_phone, received_at DESC
       ),
       agg AS (
         SELECT
-          COALESCE(conversation_key, customer_phone)                             AS conversation_key,
           customer_phone,
           MAX(received_at)                                                       AS latest_message_at,
           SUM(CASE WHEN is_read = false THEN 1 ELSE 0 END)::int                 AS unread_count,
@@ -95,10 +96,11 @@ export class InboxService {
           BOOL_OR(crm_lead_created)                                              AS crm_lead_created,
           MAX(crm_lead_id)                                                       AS crm_lead_id
         FROM whatsapp_replies
-        GROUP BY COALESCE(conversation_key, customer_phone), customer_phone
+        WHERE customer_phone IS NOT NULL
+        GROUP BY customer_phone
       )
       SELECT
-        a.conversation_key,
+        a.customer_phone  AS conversation_key,
         a.customer_phone,
         COALESCE(
           NULLIF(cust."companyName", ''),
@@ -112,12 +114,29 @@ export class InboxService {
         a.message_count,
         l.latest_reply_id,
         a.crm_lead_created,
-        a.crm_lead_id
+        a.crm_lead_id,
+        CASE
+          WHEN cust.id IS NOT NULL                         THEN 'CUSTOMER_DB'
+          WHEN ma.id  IS NOT NULL                          THEN 'PROMO_DB'
+          ELSE                                                  'UNKNOWN'
+        END AS customer_source
       FROM agg a
-      JOIN latest l ON l.conversation_key = a.conversation_key
-      LEFT JOIN customer cust
-        ON REGEXP_REPLACE(cust.mobile1, '[^0-9]', '', 'g')
-         = REGEXP_REPLACE(a.customer_phone, '[^0-9]', '', 'g')
+      JOIN latest l ON l.conversation_key = a.customer_phone
+      LEFT JOIN LATERAL (
+        SELECT id, "companyName", "contactName"
+        FROM customer
+        WHERE REGEXP_REPLACE(mobile1, '[^0-9]', '', 'g')
+            = REGEXP_REPLACE(a.customer_phone, '[^0-9]', '', 'g')
+        LIMIT 1
+      ) cust ON true
+      LEFT JOIN LATERAL (
+        SELECT id
+        FROM marketing_audience
+        WHERE REGEXP_REPLACE(phone, '[^0-9]', '', 'g')
+            = REGEXP_REPLACE(a.customer_phone, '[^0-9]', '', 'g')
+          AND (source IS NULL OR source != 'WHATSAPP_INBOX')
+        LIMIT 1
+      ) ma ON true
       ORDER BY a.latest_message_at DESC
       LIMIT 200
     `);
@@ -208,8 +227,12 @@ export class InboxService {
   // Returns merged INBOUND (WhatsappReply) + OUTBOUND (WhatsappMessageLog) for a phone,
   // sorted chronologically. Gives a full conversation thread view from the inbox.
   async getConversation(phone: string): Promise<ConversationMessage[]> {
-    const [replies, logs, numbers] = await Promise.all([
-      this.repo.find({ where: { customer_phone: phone }, order: { received_at: 'ASC' } }),
+    const [repliesDesc, logs, numbers] = await Promise.all([
+      this.repo.find({
+        where: { customer_phone: phone },
+        order: { received_at: 'DESC' },
+        take: 300,
+      }),
       this.logRepo.find({
         where: { customer_phone: phone },
         order: { sent_at: 'ASC' },
@@ -217,6 +240,9 @@ export class InboxService {
       }),
       this.numberRepo.find(),
     ]);
+
+    // Re-sort ascending after DESC-limited fetch so thread renders chronologically
+    const replies = repliesDesc.reverse();
 
     const numberMap = new Map<string, string>(numbers.map((n) => [n.id, n.phone]));
 
@@ -392,12 +418,54 @@ export class InboxService {
       `message="${(dto.message ?? '').slice(0, 60)}"`,
     );
 
+    // Upsert marketing_audience: create with source=WHATSAPP_INBOX for unknown numbers,
+    // or update reply_status on existing records.
     if (dto.customer_phone) {
-      await this.audienceRepo.update(
-        { phone: dto.customer_phone },
-        { reply_status: ReplyStatus.REPLIED, last_reply_at: new Date() },
-      );
+      const existing = await this.audienceRepo.findOne({ where: { phone: dto.customer_phone } });
+      if (existing) {
+        await this.audienceRepo.update(existing.id, {
+          reply_status: ReplyStatus.REPLIED,
+          last_reply_at: new Date(),
+        });
+      } else {
+        try {
+          await this.audienceRepo.save(this.audienceRepo.create({
+            phone:          dto.customer_phone,
+            name:           saved.customer_name ?? null,
+            customer_name:  saved.customer_name ?? null,
+            source:         'WHATSAPP_INBOX',
+            reply_status:   ReplyStatus.REPLIED,
+            last_reply_at:  new Date(),
+            is_whatsapp_valid: true,
+          }));
+          this.logger.log(`[INBOX_AUTO_AUDIENCE] phone=${dto.customer_phone} created source=WHATSAPP_INBOX`);
+        } catch (e: any) {
+          // 23505 = unique_violation — another message from the same number raced us
+          if (e.code !== '23505') {
+            this.logger.warn(`[INBOX_AUTO_AUDIENCE] insert failed for phone=${dto.customer_phone}: ${e.message}`);
+          }
+        }
+      }
     }
     return saved;
+  }
+
+  // Product search for telecaller use inside inbox — queries Shopify catalog only
+  async searchProducts(q: string): Promise<Array<{
+    id: number; itemName: string; sku: string;
+    retailPrice: number; image: string | null; handle: string | null;
+  }>> {
+    if (!q || q.trim().length < 1) return [];
+    const like = `%${q.trim()}%`;
+    return this.repo.manager.query(
+      `SELECT id, item_name AS "itemName", sku,
+              retail_price::float AS "retailPrice", image, handle
+       FROM shopify_catalog_items
+       WHERE (item_name ILIKE $1 OR sku ILIKE $1)
+         AND sync_ignored = false
+       ORDER BY sku ASC
+       LIMIT 10`,
+      [like],
+    );
   }
 }

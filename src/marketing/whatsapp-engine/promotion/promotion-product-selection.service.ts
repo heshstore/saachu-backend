@@ -23,7 +23,7 @@ export class PromotionProductSelectionService {
    */
   async getEligibleProductForTelecaller(
     telecallerNumberId: string,
-    options?: { category?: string; campaignId?: string },
+    options?: { category?: string; campaignId?: string; excludeSkus?: string[] },
   ): Promise<ShopifyCatalogItem | null> {
     const allProducts = await this._loadCatalog(options?.category);
     if (!allProducts.length) {
@@ -31,15 +31,18 @@ export class PromotionProductSelectionService {
       return null;
     }
 
-    const sentSkus = await this._getSentSkus(telecallerNumberId);
+    const sentSkus   = await this._getSentSkus(telecallerNumberId);
+    const excludeSet = new Set(options?.excludeSkus ?? []);
 
-    let eligible = allProducts.filter((p) => !sentSkus.has(p.sku));
+    let eligible = allProducts.filter((p) => !sentSkus.has(p.sku) && !excludeSet.has(p.sku ?? ''));
 
     if (!eligible.length) {
       this.logger.log(
         `[PROMO_PRODUCT_SELECT] telecaller=${telecallerNumberId} all_exhausted=true — resetting rotation window`,
       );
-      eligible = allProducts;
+      // Even on reset, still respect the same-run excludeSkus (already tried and rejected this run)
+      eligible = allProducts.filter((p) => !excludeSet.has(p.sku ?? ''));
+      if (!eligible.length) eligible = allProducts; // absolute last resort
     }
 
     const selected = eligible[Math.floor(Math.random() * eligible.length)];

@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
 import { Interval } from '@nestjs/schedule';
 import { WhatsappNumber } from '../entities/whatsapp-number.entity';
 import { WhatsappMessageLog } from '../entities/whatsapp-message-log.entity';
@@ -28,6 +28,8 @@ export class EngineAutoPauseService {
     private readonly numberRepo: Repository<WhatsappNumber>,
     @InjectRepository(WhatsappMessageLog)
     private readonly logRepo: Repository<WhatsappMessageLog>,
+    @InjectDataSource()
+    private readonly ds: DataSource,
     private readonly auditService: EngineAuditService,
   ) {}
 
@@ -150,18 +152,38 @@ export class EngineAutoPauseService {
 
     if (total < MIN_SENDS_FOR_CHECK) return null;
 
-    // 2. High fail rate
+    // Detect if sends in this window are from promotional campaigns (is_promotion=true).
+    // Cold promotional outreach has naturally low read rates — read-rate pausing does not apply.
+    let isPromotional = false;
+    try {
+      const promoRows: { count: string }[] = await this.ds.query(
+        `SELECT COUNT(*)::text AS count
+         FROM whatsapp_message_logs l
+         JOIN marketing_campaigns c ON c.id = l.campaign_id
+         WHERE l.number_id = $1
+           AND l.sent_at >= $2
+           AND c.is_promotion = true`,
+        [numberId, windowStart],
+      );
+      isPromotional = parseInt(promoRows[0]?.count ?? '0', 10) > 0;
+    } catch { /* non-fatal — default to false, read-rate check remains active */ }
+
+    this.logger.log(
+      `[RISK_NUMBER_PROMO_CHECK] numberId=${numberId} phone=${phone} isPromotional=${isPromotional}`,
+    );
+
+    // 2. High fail rate — applies to all campaigns including promotional
     if (failRate > FAIL_RATE_THRESHOLD) {
       return `Number ${phone} fail rate ${Math.round(failRate)}% > ${FAIL_RATE_THRESHOLD}% (${failed}/${total} in last 2h)`;
     }
 
-    // 3. Delivery collapse
+    // 3. Delivery collapse — applies to all campaigns including promotional
     if (attemptTotal >= MIN_SENDS_FOR_CHECK && deliveryRate < DELIVERY_RATE_MIN) {
       return `Number ${phone} delivery collapsed: ${Math.round(deliveryRate)}% < ${DELIVERY_RATE_MIN}% (${delivered}/${attemptTotal} in last 2h)`;
     }
 
-    // 4. Read collapse
-    if (readBase >= MIN_SENDS_FOR_CHECK && readRate < READ_RATE_MIN) {
+    // 4. Read collapse — SKIPPED for promotional campaigns (cold outreach has naturally low read rates)
+    if (!isPromotional && readBase >= MIN_SENDS_FOR_CHECK && readRate < READ_RATE_MIN) {
       return `Number ${phone} read rate collapsed: ${Math.round(readRate)}% < ${READ_RATE_MIN}% (${read}/${readBase} in last 2h)`;
     }
 

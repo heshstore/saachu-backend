@@ -740,6 +740,25 @@ async function ensureProductionStageRefinements(): Promise<void> {
   }
 }
 
+async function ensureAudienceRegistrationColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS wa_registration_status VARCHAR(20)`,
+    ).catch(() => {});
+    await client.query(
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS last_validation_at TIMESTAMPTZ`,
+    ).catch(() => {});
+    await client.query(
+      `CREATE INDEX IF NOT EXISTS idx_ma_wa_reg_status ON marketing_audience(wa_registration_status) WHERE wa_registration_status IS NOT NULL`,
+    ).catch(() => {});
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 async function ensureLeadQualityColumns(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
   let client: Client | null = null;
@@ -961,7 +980,7 @@ async function bootstrap() {
   const missingEnv = REQUIRED_ENV.filter((k) => !process.env[k]);
   if (missingEnv.length > 0) {
     logger.error(`❌ STARTUP BLOCKED — missing required env vars: ${missingEnv.join(', ')}`);
-    logger.error('   Set these in the Render dashboard → Environment → Add Env Var');
+    logger.error('   Set these in ecosystem.config.js → env_production block, then redeploy');
     process.exit(1);
   }
   logger.log('✅ Required env vars present');
@@ -1139,6 +1158,13 @@ async function bootstrap() {
     logger.log('✅ Lead quality columns ready (lead_quality, quality_score)');
   } catch (err: any) {
     logger.error('Lead quality migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureAudienceRegistrationColumns();
+    logger.log('✅ Audience registration columns ready (wa_registration_status, last_validation_at)');
+  } catch (err: any) {
+    logger.error('Audience registration migration failed (non-fatal):', err?.message);
   }
 
   try {

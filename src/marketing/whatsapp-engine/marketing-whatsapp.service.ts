@@ -143,6 +143,9 @@ interface NumberClientState {
   qrGeneratedAt: Date | null;
   firstQrGeneratedAt: Date | null;
   phoneLinkCode: string | null;
+  // Resolve callback for requestPhoneLink — called by the 'code' event handler when
+  // the pairing code arrives from WhatsApp Web during phone-link initialization.
+  phoneLinkResolve: ((code: string) => void) | null;
   lastReadyAt: Date | null;
   reconnectCount: number;
   qrRefreshCount: number;
@@ -184,6 +187,7 @@ function makeState(): NumberClientState {
     qrGeneratedAt: null,
     firstQrGeneratedAt: null,
     phoneLinkCode: null,
+    phoneLinkResolve: null,
     lastReadyAt: null,
     reconnectCount: 0,
     qrRefreshCount: 0,
@@ -930,22 +934,31 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     phone: string,
     imageUrl: string,
     caption: string,
-  ): Promise<{ result: any; sentAsImage: boolean }> {
+  ): Promise<{ result: any; sentAsImage: boolean; imageFetchMs: number; imageSizeKb: number | null }> {
     let media: any;
+    let imageFetchMs = 0;
+    let imageSizeKb: number | null = null;
+
     try {
       const { MessageMedia } = require('whatsapp-web.js');
+      const fetchStart = Date.now();
       media = await Promise.race([
         MessageMedia.fromUrl(imageUrl, { unsafeMime: true }),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('IMAGE_FETCH_TIMEOUT')), 12_000),
         ),
       ]);
+      imageFetchMs = Date.now() - fetchStart;
+      // Estimate decoded size from base64 string length (base64 ≈ 4/3 of raw bytes)
+      if (media?.data) {
+        imageSizeKb = Math.round(media.data.length * 0.75 / 1024);
+      }
     } catch (err: any) {
       this.logger.warn(
         `[MKT_IMG_FETCH_FAIL] numberId=${numberId} imageUrl=${imageUrl} err="${err?.message}" — falling back to text`,
       );
       const result = await this.sendViaNumber(numberId, phone, caption);
-      return { result, sentAsImage: false };
+      return { result, sentAsImage: false, imageFetchMs, imageSizeKb: null };
     }
 
     const state = this.clients.get(numberId);
@@ -963,61 +976,172 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       );
       this.logger.log(
         `[MKT_IMG_SEND_OK] numberId=${numberId} phone=${phone} ` +
-        `messageId=${result?.id?._serialized ?? 'null'}`,
+        `messageId=${result?.id?._serialized ?? 'null'} fetchMs=${imageFetchMs} sizeKb=${imageSizeKb ?? 'unknown'}`,
       );
     } catch (sendErr: any) {
       this.logger.warn(
         `[MKT_IMG_SEND_FAIL] numberId=${numberId} phone=${phone} err="${sendErr?.message}" — falling back to text`,
       );
       const fallback = await this.sendViaNumber(numberId, phone, caption);
-      return { result: fallback, sentAsImage: false };
+      return { result: fallback, sentAsImage: false, imageFetchMs, imageSizeKb: null };
     }
 
-    return { result, sentAsImage: true };
+    return { result, sentAsImage: true, imageFetchMs, imageSizeKb };
   }
 
   /**
    * Request a phone-number pairing code instead of a QR code.
-   * The wwebjs client must already be initializing (call /connect first).
-   * Returns the 8-char code the operator enters in WhatsApp → Linked Devices → Link with phone number.
    *
-   * Safe to call when waState is 'initializing' or 'awaiting_scan'.
-   * The 'authenticated' event fires normally once the code is accepted by WA.
+   * Architecture: Destroys any existing QR-mode client and reinitializes with the
+   * pairWithPhoneNumber option set in the wwebjs Client constructor. This is required
+   * because WhatsApp Web's startAltLinkingFlow() rejects calls made on a page that was
+   * already initialized in QR mode (error "t"). The correct approach is to initialize
+   * the WhatsApp Web page in phone-link mode from the start.
+   *
+   * The 'authenticated' and 'ready' events fire normally after the operator enters the
+   * pairing code in their WhatsApp app.
+   *
+   * Phone number must include country code with no '+' (e.g. 919381852555 for India).
    */
   async requestPhoneLink(numberId: string, phoneNumber: string): Promise<{ code: string }> {
-    const state = this.clients.get(numberId);
-    if (!state || !state.client) {
-      throw new Error(`[WA_PHONE_LINK] ${numberId} — no active client. Call /connect first to start Chromium.`);
+    // ── Pre-flight snapshot ─────────────────────────────────────────────────
+    const existingState = this.clients.get(numberId);
+    const page      = existingState?.client?.pupPage    ?? null;
+    const browser   = existingState?.client?.pupBrowser ?? null;
+    const pageOpen  = page    ? !(page.isClosed?.())    : false;
+    const browserOk = browser ? browser.isConnected?.() : false;
+
+    this.logger.log(
+      `[WA_PHONE_LINK_PREFLIGHT] numberId=${numberId}` +
+      ` waState=${existingState?.waState ?? 'no_state'}` +
+      ` clientExists=${!!existingState?.client}` +
+      ` pageExists=${!!page}` +
+      ` pageOpen=${pageOpen}` +
+      ` browserConnected=${browserOk}` +
+      ` rawPhone="${phoneNumber}"`,
+    );
+
+    // ── State guard ─────────────────────────────────────────────────────────
+    // Block if auth is in progress (QR scan was accepted, do not interrupt).
+    if (existingState?.waState === 'authenticating') {
+      throw new Error(
+        `[WA_PHONE_LINK] ${numberId} — waState=authenticating; QR scan is in progress. ` +
+        `Wait for the current authentication to complete or reset the number first.`,
+      );
     }
-    const validStates: WaState[] = ['initializing', 'awaiting_scan'];
-    if (!validStates.includes(state.waState)) {
-      throw new Error(`[WA_PHONE_LINK] ${numberId} — waState=${state.waState}; must be initializing or awaiting_scan`);
+    if (existingState?.waState === 'ready') {
+      throw new Error(
+        `[WA_PHONE_LINK] ${numberId} — waState=ready; number is already connected.`,
+      );
     }
-    if (typeof state.client.requestPairingCode !== 'function') {
-      throw new Error(`[WA_PHONE_LINK] ${numberId} — requestPairingCode not available in this wwebjs version`);
+    if (existingState?.starting) {
+      throw new Error(
+        `[WA_PHONE_LINK] ${numberId} — client is already starting (waState=${existingState.waState}). Wait and retry.`,
+      );
     }
-    // Normalize: strip all non-digits (E.164 without '+')
+
+    // ── Phone normalization ─────────────────────────────────────────────────
     const normalized = phoneNumber.replace(/\D/g, '');
-    if (normalized.length < 10) {
+    if (normalized.length < 11) {
       throw new Error(
         `[WA_PHONE_LINK] Invalid phone number "${phoneNumber}" — must include country code ` +
-        `(e.g. 919940172777 for India). Got ${normalized.length} digits after stripping.`,
+        `(e.g. 919381852555 for India, not 9381852555). ` +
+        `Got ${normalized.length} digits after stripping — need at least 11.`,
       );
     }
-    this.logger.log(`[WA_OPERATOR_CONNECT] numberId=${numberId} method=phone_link phone=${normalized}`);
-    let code: string;
+
+    // ── Get or create state ─────────────────────────────────────────────────
+    let state = existingState;
+    if (!state) {
+      state = makeState();
+      this.clients.set(numberId, state);
+      this._startWatchdog(numberId, state);
+      state.sessionAvailable = this._hasRestorableSession(numberId);
+    }
+
+    this.logger.log(
+      `[WA_PHONE_LINK_REINIT] numberId=${numberId} normalizedPhone="${normalized}" ` +
+      `prevWaState=${state.waState} — destroying QR-mode client and reinitializing in phone-link mode`,
+    );
+
+    // ── Clear partial session dir so Chromium starts fresh ─────────────────
+    // The partial session (LevelDB without blob) is left on disk by _destroyClient.
+    // When a new Client reuses the same userDataDir, WA Web loads with stale IndexedDB
+    // data from the old QR-mode flow. This causes requestPairingCode()'s pupPage.evaluate()
+    // to hang (PairingCodeLinkUtils null) or throw new t("t") — either way the code event
+    // never fires. Deleting the directory forces a completely clean Chromium profile.
+    if (!this._hasRestorableSession(numberId)) {
+      const sessionDir = this._getSessionDir(numberId);
+      if (fs.existsSync(sessionDir)) {
+        this.logger.log(
+          `[WA_PHONE_LINK_SESSION_CLEAR] numberId=${numberId} ` +
+          `removing partial session at ${sessionDir} — no blob, LevelDB only`,
+        );
+        try {
+          fs.rmSync(sessionDir, { recursive: true, force: true });
+        } catch (e: any) {
+          this.logger.warn(
+            `[WA_PHONE_LINK_SESSION_CLEAR] numberId=${numberId} failed to remove session dir: ${e?.message}`,
+          );
+        }
+      }
+    } else {
+      this.logger.log(
+        `[WA_PHONE_LINK_SESSION_SKIP_CLEAR] numberId=${numberId} ` +
+        `restorable session present (blob exists) — keeping session dir`,
+      );
+    }
+
+    // ── Promise resolved by the 'code' event handler in _initClient ────────
+    const codePromise = new Promise<string>((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        state!.phoneLinkResolve = null;
+        reject(new Error(
+          `[WA_PHONE_LINK] 120s timeout — no pairing code received for ${numberId} phone="${normalized}". ` +
+          `Verify the phone number is registered on WhatsApp.`,
+        ));
+      }, 120_000);
+
+      state!.phoneLinkResolve = (code: string) => {
+        clearTimeout(timeoutId);
+        resolve(code);
+      };
+    });
+
+    // ── Reinitialize in phone-link mode ─────────────────────────────────────
+    state.starting = true;
+    state.isManualConnect = true;
+    state.autoReconnectAttempts = 0;
+    state.qrRefreshCount = 0;
+    state.firstQrGeneratedAt = null;
+    state.qrDataUrl = null;
+    // Reset to idle first — forward-only state machine blocks awaiting_scan → initializing
+    // (regression). Going via idle (always allowed) lets us then move forward cleanly.
+    this._transitionState(numberId, state, 'idle', 'phone_link_reinit_reset');
+    this._transitionState(numberId, state, 'initializing', 'phone_link_reinit');
+    await this._updateNumberWaState(numberId, 'initializing');
+
     try {
-      code = await state.client.requestPairingCode(normalized);
-    } catch (err: any) {
-      const msg = err?.message ?? String(err);
-      throw new Error(
-        `[WA_PHONE_LINK] requestPairingCode failed for ${numberId} — ` +
-        `phone="${normalized}" error="${msg}". ` +
-        `Ensure the number includes the country code and matches the WhatsApp account being linked.`,
+      await this._withInitLock(numberId, () => this._initClient(numberId, state!, 0, normalized));
+    } catch (initErr: any) {
+      state.phoneLinkResolve = null;
+      state.starting = false;
+      this.logger.error(
+        `[WA_PHONE_LINK_INIT_FAIL] numberId=${numberId} phone="${normalized}" ` +
+        `initError="${initErr?.message}"`,
       );
+      throw new Error(`[WA_PHONE_LINK] Chromium init failed for ${numberId}: ${initErr?.message}`);
+    } finally {
+      state.starting = false;
     }
-    state.phoneLinkCode = code;
-    this.logger.log(`[WA_PHONE_LINK_CODE] numberId=${numberId} code=${code} — operator should enter this in WhatsApp`);
+
+    this.logger.log(
+      `[WA_PHONE_LINK_WAITING] numberId=${numberId} phone="${normalized}" ` +
+      `— Chromium up, waiting for WhatsApp Web to generate pairing code (120s timeout)`,
+    );
+
+    const code = await codePromise;
+    this.logger.log(`[WA_PHONE_LINK_CODE] numberId=${numberId} code=${code} — operator should enter this in WhatsApp → Linked Devices → Link with phone number`);
     return { code };
   }
 
@@ -1202,7 +1326,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   // ── Core init per number ─────────────────────────────────────────────────────
 
-  private async _initClient(numberId: string, state: NumberClientState, _restoreRetry = 0): Promise<void> {
+  private async _initClient(numberId: string, state: NumberClientState, _restoreRetry = 0, phoneLinkNumber?: string): Promise<void> {
     this.logger.log(`[WA_INIT_ENTER] numberId=${numberId} waState=${state.waState} ts=${new Date().toISOString()}`);
 
     // Clean teardown before creating a new client — safe no-op if client is already null
@@ -1266,6 +1390,12 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       qrMaxRetries: 0,
       userAgent: false as unknown as string,
       webVersionCache: { type: 'none' },
+      // When phone linking is requested: initialize in phone-link mode so WhatsApp Web
+      // sets up ALT_DEVICE_LINKING internally from the start. Calling requestPairingCode()
+      // externally on a QR-mode client fails (WA Web error "t") because the page was already
+      // committed to QR mode. The pairWithPhoneNumber option makes wwebjs call
+      // requestPairingCode() during initialize() before any QR mode is established.
+      ...(phoneLinkNumber ? { pairWithPhoneNumber: { phoneNumber: phoneLinkNumber, showNotification: true } } : {}),
     });
     this.logger.log(`[WA_CLIENT_CREATED] ${numberId} — new wwebjs Client instantiated (waState=${state.waState})`);
 
@@ -1809,6 +1939,23 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
     state.listenersAttached = true;
 
+    // ── Phone-link mode: code event handler ─────────────────────────────────────
+    // When the client was created with pairWithPhoneNumber, wwebjs calls requestPairingCode()
+    // internally during initialize(). When WhatsApp Web generates the pairing code, wwebjs
+    // emits 'code'. We store it and resolve any pending requestPhoneLink() call.
+    if (phoneLinkNumber) {
+      state.client.on('code', (code: string) => {
+        beat();
+        this.logger.log(`[WA_PHONE_LINK_CODE_EVENT] numberId=${numberId} code=${code} — pairing code received from WhatsApp Web`);
+        state.phoneLinkCode = code;
+        if (state.phoneLinkResolve) {
+          const resolve = state.phoneLinkResolve;
+          state.phoneLinkResolve = null;
+          resolve(code);
+        }
+      });
+    }
+
     // ── initialize() — release init lock on first event, NOT on ready ─────────
     // initialize() stays pending while user scans QR. QR_READY is a valid stable state.
     // We only abort if Chromium fails to produce any event within BOOT_TIMEOUT_MS.
@@ -1862,6 +2009,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
         };
         state.client.once('loading_screen', onFirstEvent('loading_screen'));
         state.client.once('qr',             onFirstEvent('qr'));
+        state.client.once('code',           onFirstEvent('code'));  // phone-link mode: qr never fires
         state.client.once('authenticated',  onFirstEvent('authenticated'));
         state.client.once('ready',          onFirstEvent('ready'));
         state.client.once('auth_failure',   onFirstEvent('auth_failure'));
@@ -2209,6 +2357,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     state.bridgeReady = false;
     state.lastHeartbeat = null;
     state.phoneLinkCode = null;
+    state.qrDataUrl = null;
     try { client.removeAllListeners(); } catch { }
     try { await client.destroy(); } catch { }
     this.logger.log(`[WA_DESTROY_STAGE] ${numberId} — done`);

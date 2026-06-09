@@ -52,6 +52,7 @@ import { ProcessingWatchdogService } from './engine/processing-watchdog.service'
 import { SchemaValidatorService } from './engine/schema-validator.service';
 import { PromotionProductSelectionService } from './promotion/promotion-product-selection.service';
 import { PromotionAiTemplateService } from './promotion/promotion-ai-template.service';
+import { PromotionUrlAuditService } from './promotion/promotion-url-audit.service';
 import { EngineSettingsService } from './engine/engine-settings.service';
 import { PilotMonitoringService } from './engine/pilot-monitoring.service';
 import { AiDashboardService } from './engine/ai-dashboard.service';
@@ -110,6 +111,7 @@ import { AiDashboardService } from './engine/ai-dashboard.service';
     SchemaValidatorService,
     PromotionProductSelectionService,
     PromotionAiTemplateService,
+    PromotionUrlAuditService,
     EngineSettingsService,
     PilotMonitoringService,
     AiDashboardService,

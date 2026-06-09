@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { WhatsappMessageLog } from '../entities/whatsapp-message-log.entity';
 import { ShopifyCatalogItem } from '../../../shopify-catalog/entities/shopify-catalog-item.entity';
+import { buildCta } from '../shared/cta-builder';
 
 export interface PromotionGenerateInput {
   telecaller_number_id: string;
@@ -25,41 +26,81 @@ export interface PromotionGenerateResult {
   message: string;
   /** Shopify product image URL. Sender dispatches this as a WhatsApp image + caption. Null when unavailable. */
   imageUrl: string | null;
-  /** Product page URL — stored in message_payload for analytics; also included as View Product CTA. */
+  /** Product page URL — stored in message_payload for analytics; displayed below the product CTA label. */
   productUrl: string;
+  /** True when message scored above quality threshold within MAX_REGENERATION_ATTEMPTS. */
+  qualityPassed: boolean;
+  /** Quality scores and attempt count for the final generated message. */
+  quality: {
+    finalScore:   number;
+    attemptsUsed: number;
+    grade:        'PASS' | 'REVIEW' | 'FAIL';
+  };
   metadata: {
-    templateVariant:     string;
-    contentCategory:     ContentCategory;
-    softCtaUsed:         string;
-    hookType:            string;
-    messageLength:       number;
-    productSku:          string;
-    productClass:        ProductClass;
-    industryContext:     string | null;
-    knowledgeConfidence: number;
+    templateVariant:       string;
+    contentCategory:       ContentCategory;
+    hookType:              string;
+    messageLength:         number;
+    productSku:            string;
+    productClass:          ProductClass;
+    industryContext:       string | null;
+    knowledgeConfidence:   number;
+    businessProblem:       string;
+    /**
+     * How the product URL was resolved:
+     *   handle  — real Shopify handle used → /products/{handle}  (correct)
+     *   search  — no handle; SKU search fallback used → /search?q=SKU
+     *   rejected — no handle and no SKU; product was skipped
+     */
+    urlSource:             'handle' | 'search' | 'rejected';
+    /** First 1–2 lines of the message — appear in WhatsApp notification preview before opening. */
+    notificationHook:      string;
+    /** Validation flags from _validateHook — empty array = hook is clean. */
+    hookValidationFlags:   string[];
   };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// PRODUCT CLASSIFICATION
+// PRODUCT CLASSIFICATION — 6 Hesh divisions + general
 // ══════════════════════════════════════════════════════════════════════════════
 
-type ProductClass = 'display' | 'machine' | 'consumable' | 'component' | 'general';
+type ProductClass =
+  | 'display'       // DISPLAY FACTORY: wall displays, counters, lens trays, storage, mirrors
+  | 'machine'       // MACHINE COMPANY: refractometers, phoropters, slit lamps, edgers
+  | 'case'          // CASE FACTORY: EVA cases, metal cases, soft cases, plastic cases
+  | 'lens_cleaner'  // LENS CLEANER FACTORY: lens cleaner, cleaning kits
+  | 'microfiber'    // MICROFIBER FACTORY: cleaning cloth, GSM variations
+  | 'tool'          // TOOLS COMPANY: fitting supplies, maintenance items, optical accessories
+  | 'general';
 
-const DISPLAY_TERMS    = /display|panel|holder|rack|counter|wall|peg|shelf|stand|fixture|mount|grid|hook/i;
-const MACHINE_TERMS    = /machine|wheel|tool|blade|motor|cutter|press|drill|grinder|lathe|pump|conveyor/i;
-const CONSUMABLE_TERMS = /solution|liquid|cleaner|chemical|consumable|pad|lubric|solvent|spray|gel|powder/i;
-const COMPONENT_TERMS  = /component|part|accessory|connector|fitting|bracket|bolt|screw|clip|pin/i;
+const DISPLAY_TERMS    = /display|panel|tray|holder|rack|counter|wall|shelf|stand|fixture|mount|mirror|cabinet|sunglass\s*display|frame\s*display|lens\s*tray|display\s*furniture|storage\s*unit/i;
+const MACHINE_TERMS    = /refractometer|phoropter|slit\s*lamp|edger|lens\s*edger|autoref|auto\s*ref|lensometer|focimeter|keratometer|tonometer|perimeter|visual\s*field|instrument|equipment|machine/i;
+const CASE_TERMS       = /case|eva\s*case|metal\s*case|hard\s*case|soft\s*case|spectacle\s*case|eyewear\s*case|frame\s*case|glasses\s*case|pouch|box/i;
+const CLEANER_TERMS    = /lens\s*cleaner|cleaning\s*kit|cleaning\s*spray|cleaning\s*solution|lens\s*spray|lens\s*solution|cleaner\s*kit|optical\s*cleaner/i;
+const MICROFIBER_TERMS = /microfiber|micro\s*fiber|cleaning\s*cloth|gsm\s*cloth|optical\s*cloth|lens\s*cloth|cleaning\s*towel/i;
+const TOOL_TERMS       = /screw|screwdriver|plier|fitting\s*tool|nose\s*pad|temple|hinge|repair\s*kit|optical\s*tool|frame\s*tool|adjustment\s*tool|pd\s*ruler|pupillometer|height\s*gauge|pantoscopic|fitting\s*kit/i;
 
 function classifyProduct(product: ShopifyCatalogItem): ProductClass {
-  const text = [product.itemName, product.sku].filter(Boolean).join(' ');
-  // Unit-based consumable signal — liquids and weights are consumables even when name doesn't say so
+  const allText = [
+    product.itemName,
+    product.description,
+    product.tags,
+    product.productType,
+    product.handle,
+    product.vendor,
+    product.sku,
+  ].filter(Boolean).join(' ');
+
+  if (CLEANER_TERMS.test(allText))    return 'lens_cleaner';
+  if (MICROFIBER_TERMS.test(allText)) return 'microfiber';
+  if (MACHINE_TERMS.test(allText))    return 'machine';
+  if (DISPLAY_TERMS.test(allText))    return 'display';
+  if (CASE_TERMS.test(allText))       return 'case';
+  if (TOOL_TERMS.test(allText))       return 'tool';
+
   const unit = product.unit?.trim().toLowerCase() ?? '';
-  if (/^(l|ml|ltr|litre|liter|kg|g|gram|gm)$/.test(unit)) return 'consumable';
-  if (DISPLAY_TERMS.test(text))    return 'display';
-  if (MACHINE_TERMS.test(text))    return 'machine';
-  if (CONSUMABLE_TERMS.test(text)) return 'consumable';
-  if (COMPONENT_TERMS.test(text))  return 'component';
+  if (/^(l|ml|ltr|litre|liter)$/.test(unit)) return 'lens_cleaner';
+
   return 'general';
 }
 
@@ -68,715 +109,731 @@ function classifyProduct(product: ShopifyCatalogItem): ProductClass {
 // ══════════════════════════════════════════════════════════════════════════════
 
 type ContentCategory =
-  | 'educational'
-  | 'problem_sol'
-  | 'product_info'
-  | 'benefit'
-  | 'social_proof'
-  | 'direct_promo';
+  | 'problem_based'      // 35% — business pain this product solves
+  | 'observation_based'  // 25% — pattern observed in the industry
+  | 'workflow_based'     // 20% — day-to-day friction angle
+  | 'educational'        // 15% — teach something, earn trust
+  | 'lead_starter';      //  5% — direct intro to Hesh as manufacturer
 
-// Cumulative thresholds — educational=30, problem_sol=25, product_info=20, benefit=15, social_proof=8, direct_promo=2
+// Cumulative thresholds
 const CATEGORY_THRESHOLDS: [ContentCategory, number][] = [
-  ['educational',  30],
-  ['problem_sol',  55],
-  ['product_info', 75],
-  ['benefit',      90],
-  ['social_proof', 98],
-  ['direct_promo', 100],
+  ['problem_based',     35],
+  ['observation_based', 60],
+  ['workflow_based',    80],
+  ['educational',       95],
+  ['lead_starter',      100],
 ];
 
 // ══════════════════════════════════════════════════════════════════════════════
 // SHARED ROTATION POOLS
 // ══════════════════════════════════════════════════════════════════════════════
 
-const GREETINGS: ((name: string) => string)[] = [
-  (n) => `Hi ${n},`,
-  (n) => `Hello ${n},`,
-  (n) => `Hi ${n}.`,
-  (n) => `Hello ${n}.`,
-];
-
-const CALL_LABELS = ['Call us', 'Reach us', 'Contact us', 'Talk to us'];
-
-const SOFT_CTAS = [
-  'Can share pricing if relevant.',
-  'Can share dimensions if useful.',
-  'Can share available variants.',
-  'Can share MOQ details.',
-  'Can share specifications if needed.',
-  'Can share catalogue if useful.',
-  'Happy to share more details if this is relevant.',
-  'Can share stock availability if needed.',
-  'Can share technical specifications if required.',
-  'Happy to share options — just let me know what would be useful.',
-];
+// Rotate between natural WhatsApp call labels
+const CALL_LABELS = ['Call or WhatsApp Us', 'Call / WhatsApp Us'];
 
 // ══════════════════════════════════════════════════════════════════════════════
-// PRODUCT CLASS POOL TYPE
+// CONTENT BLOCK — short form, optimised for curiosity → understanding → action
+//
+// Structure in message:
+//   hook → pain → *product* → benefit → trigger → 🛍 CTA → 📞 CTA
+//
+// Rules:
+//   pain    — ≤12 words, 1 sentence, simple Indian English
+//   benefit — ≤12 words, 1 sentence, starts with action ("Helps", "Lets", "Keeps", etc.)
+//   trigger — ≤12 words, mandatory question, ends with ?
 // ══════════════════════════════════════════════════════════════════════════════
+
+interface ContentBlock {
+  pain:    string;  // ≤12 words — single sentence pain/observation
+  benefit: string;  // ≤12 words — what the product does (1 sentence max)
+  trigger: string;  // question ≤12 words, ends with ?
+}
 
 interface ProductClassPools {
-  ed_hooks:    ((city: string) => string)[];
-  ed_explains: string[];
-  ed_benefits: string[];
-  ps_blocks:   { problem: string; solution: string; outcome: string }[];
-  pi_hooks:    string[];
-  pi_explains: string[];
-  pi_benefits: string[];
-  bn_hooks:    ((city: string) => string)[];
-  bn_explains: string[];
-  bn_benefits: string[];
-  sp_blocks:   { hook: string; note: string; benefit: string }[];
-  dp_blocks:   { hook: string; detail: string; benefit: string }[];
+  problem_based:     ContentBlock[];
+  observation_based: ContentBlock[];
+  workflow_based:    ContentBlock[];
+  educational:       ContentBlock[];
+  lead_starter:      ContentBlock[];
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// DISPLAY PRODUCTS — panels, holders, racks, stands, wall fixtures
+// DISPLAY FACTORY — wall displays, counters, lens trays, storage, mirrors
 // ══════════════════════════════════════════════════════════════════════════════
 
 const DISPLAY_POOLS: ProductClassPools = {
 
-  ed_hooks: [
-    (_) => `Products become harder to manage when a range expands without a clear system in place.`,
-    (_) => `When products are grouped without separation, buyers often overlook items they were looking for.`,
-    (city) => city
-      ? `Managing a wide product range in ${city} usually comes down to how well each item is positioned and accessible.`
-      : `Managing a wide product range usually comes down to how well each item is positioned and accessible.`,
-    (_) => `A small change in how products are arranged can make a noticeable difference in how many items get examined.`,
-    (city) => city
-      ? `Buyers visiting stores in ${city} with a large range move quickly through areas where products are clearly separated.`
-      : `Buyers with a short list move quickly through ranges where each product is easy to find and pick up.`,
-  ],
-
-  ed_explains: [
-    `A display fixture for individual product placement. Keeps each item separated and accessible without stacking.`,
-    `Used in showroom and retail environments where products need clear, defined positions — no custom installation needed.`,
-    `A modular holder for organizing products individually. Each item gets its own slot in the layout.`,
-    `Designed for product separation in shared spaces. Easy to set up and adjust as the range changes.`,
-  ],
-
-  ed_benefits: [
-    `Reduces time spent rearranging products during the day.`,
-    `Each product is accessible without disturbing others in the same space.`,
-    `Suitable for setups where multiple products share limited wall or counter space.`,
-    `Simplifies daily restocking — each item returns to a defined position.`,
-  ],
-
-  ps_blocks: [
+  problem_based: [
     {
-      problem: `Products placed without separation are harder to pick up and examine individually.\nBuyers often skip past grouped items — even ones they were looking for.`,
-      solution: `Holds each item in a fixed, individual slot. Products are accessible one at a time without moving others.`,
-      outcome: `Each product can be examined without disturbing the rest of the arrangement.`,
+      pain:    `Most stores display under 20% of the frames they actually stock.`,
+      benefit: `Helps get more of your range on the floor and in front of customers.`,
+      trigger: `How much of your current range is sitting in storage right now?`,
     },
     {
-      problem: `Display setups that shift or tilt under regular use create extra effort to reset.\nThis happens more often when fixtures are not built for the load they carry.`,
-      solution: `Holds position under regular handling and restocking without needing constant readjustment.`,
-      outcome: `Reduces the effort required to maintain a consistent arrangement across the day.`,
+      pain:    `Customers cannot buy frames they never notice on your floor.`,
+      benefit: `Lets customers browse your full range without needing staff help.`,
+      trigger: `Does your display let customers browse on their own?`,
     },
     {
-      problem: `Adding new products to an existing display often means rearranging the whole layout.\nThis happens repeatedly as ranges grow.`,
-      solution: `Modular design — new items slot in alongside existing ones without disrupting the current setup.`,
-      outcome: `Range can grow without reorganizing what is already in place.`,
+      pain:    `Restocking after a busy day takes longer than it should.`,
+      benefit: `Keeps every frame in a fixed position so restocking is fast.`,
+      trigger: `How long does display restocking take after your busy hours?`,
     },
     {
-      problem: `Buyers visiting multiple branches expect consistent product placement at each location.\nWhen layouts differ, it is harder for them to locate items independently.`,
-      solution: `Standardized fixture that sets up the same way across different locations without customization.`,
-      outcome: `Consistent product placement across branches.`,
+      pain:    `Unsorted lens trays slow down the dispensing bench during peak hours.`,
+      benefit: `Keeps the dispensing bench sorted and accurate under pressure.`,
+      trigger: `How are you currently organizing lens stock at the bench?`,
     },
   ],
 
-  pi_hooks: [
-    `Quick note on something from our display range — might be relevant to your current setup.`,
-    `Sharing a fixture from our catalog that tends to suit businesses organizing a wide product range.`,
-    `One item worth knowing about if you are looking at how products are arranged in your space.`,
-    `Something from our display range that covers a common product organization requirement.`,
-  ],
-
-  pi_explains: [
-    `A display holder for organized, individual product placement. Works with most standard wall and counter configurations.`,
-    `Used in retail and showroom settings where each product needs a defined, accessible position — no installation required.`,
-    `Lightweight, modular fixture. Easy to adjust as the product range changes.`,
-    `A holder that keeps products separated and accessible. Suitable for both wall and countertop use.`,
-  ],
-
-  pi_benefits: [
-    `Standard configuration. No custom installation required.`,
-    `Durable under daily handling. Minimal ongoing maintenance.`,
-    `Easy to adjust as the product range changes.`,
-  ],
-
-  bn_hooks: [
-    (_) => `Products that are easy to pick up and examine get more attention than ones that require assistance.`,
-    (_) => `When each product has its own accessible position, buyers can move through a range at their own pace.`,
-    (city) => city
-      ? `For businesses in ${city} managing a growing product range, individual product access is usually the first thing that needs attention.`
-      : `For businesses managing a growing product range, individual product access is usually the first thing that needs attention.`,
-    (_) => `Organized product placement reduces the need for staff to guide buyers through the range.`,
-  ],
-
-  bn_explains: [
-    `Keeps each product in a fixed, accessible position. Items can be examined individually without moving others.`,
-    `Separates products in a shared space so each one is reachable without disrupting the arrangement.`,
-    `Gives every item a defined slot — easy to access, easy to restock.`,
-  ],
-
-  bn_benefits: [
-    `Useful when multiple products share limited space and each needs to be individually accessible.`,
-    `Reduces the need for buyers to ask staff for help locating items.`,
-    `Simplifies daily restocking — products return to the same position each time.`,
-    `Helpful when the product range is large and every item needs to be reachable.`,
-  ],
-
-  sp_blocks: [
+  observation_based: [
     {
-      hook: `A frequently requested item among businesses organizing product placement in retail and showroom environments.`,
-      note: `Commonly chosen for its straightforward installation and consistent results across different configurations.`,
-      benefit: `Practical across different wall and counter setups. Low ongoing maintenance.`,
+      pain:    `Frames customers cannot see on the floor, they assume you don't carry.`,
+      benefit: `Helps display your full range in a way customers can browse easily.`,
+      trigger: `How are your frames laid out — by brand, price, or style?`,
     },
     {
-      hook: `One of our more consistently ordered display fixtures among businesses managing a wide product range.`,
-      note: `Often selected when businesses want individual product slots without complex installation or custom fitting.`,
-      benefit: `Works immediately once set up. Easy to expand as the range grows.`,
+      pain:    `A badly placed mirror gets a quick glance, not a real try-on.`,
+      benefit: `Gives customers the right angle and space to try each frame properly.`,
+      trigger: `How many try-on mirrors do you have — and where are they?`,
     },
     {
-      hook: `A display item that is commonly added to subsequent orders as product ranges grow.`,
-      note: `Used in retail and showroom setups where organized, individual product placement is the goal.`,
-      benefit: `Each addition fits alongside the existing setup without modification.`,
+      pain:    `Higher-margin frames placed behind the front row rarely get tried.`,
+      benefit: `Spreads customer attention across all display zones, not just the front.`,
+      trigger: `Have you tracked which part of your display drives the most trials?`,
     },
   ],
 
-  dp_blocks: [
+  workflow_based: [
     {
-      hook: `Sharing something from our display range — might be relevant to your product placement needs.`,
-      detail: `A fixture for organized, individual product display. In stock. Standard configurations available.`,
-      benefit: `Fits most wall and counter setups. No special installation required.`,
+      pain:    `New arrivals go to storage when the floor has no space for them.`,
+      benefit: `Lets you expand display capacity without redesigning the full floor.`,
+      trigger: `How quickly do new arrivals actually make it onto your display?`,
     },
     {
-      hook: `Quick note on a display item from our catalog.`,
-      detail: `Used for organized product placement in retail and showroom environments. Easy to set up.`,
-      benefit: `Low maintenance. Works across different layout sizes.`,
+      pain:    `Mixed brand racks make customers miss entire segments they would browse.`,
+      benefit: `Keeps brand zones separate and clear without a full floor redesign.`,
+      trigger: `Are your brands displayed separately or sharing the same racks?`,
+    },
+    {
+      pain:    `A counter handling display, dispensing, and storage does none well.`,
+      benefit: `Separates the try-on and dispensing zones so each works properly.`,
+      trigger: `How is your counter space divided between display and dispensing?`,
+    },
+  ],
+
+  educational: [
+    {
+      pain:    `High-margin frames in low-traffic spots get fewer trials than they should.`,
+      benefit: `Puts your best frames in positions where customers naturally look first.`,
+      trigger: `Are your highest-margin frames in your most prominent position?`,
+    },
+    {
+      pain:    `A wall mirror doesn't give the angle a proper try-on station does.`,
+      benefit: `Gives customers the height and angle needed to evaluate each frame.`,
+      trigger: `What mirror setup are you using for frame trials right now?`,
+    },
+    {
+      pain:    `An unplanned floor layout takes weeks to replicate in a new branch.`,
+      benefit: `Replicates the same layout across branches without redesign or guesswork.`,
+      trigger: `If you opened a second branch today, how long would setup take?`,
+    },
+  ],
+
+  lead_starter: [
+    {
+      pain:    `Generic furniture isn't designed for how optical stores display frames.`,
+      benefit: `Built specifically for how spectacle frames need to be displayed and organized.`,
+      trigger: `What does your current display setup look like right now?`,
+    },
+    {
+      pain:    `Parts from multiple suppliers never quite match in size or finish.`,
+      benefit: `Designed to work together as a complete system — wall, counter, and tray.`,
+      trigger: `Are you upgrading specific parts or planning a full setup?`,
     },
   ],
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// MACHINE PRODUCTS — machines, tools, wheels, blades, motors, cutters
+// MACHINE COMPANY — refractometers, phoropters, slit lamps, edgers, lab equipment
 // ══════════════════════════════════════════════════════════════════════════════
 
 const MACHINE_POOLS: ProductClassPools = {
 
-  ed_hooks: [
-    (_) => `Equipment problems that start small tend to affect output before they are identified.`,
-    (_) => `Using general-purpose equipment for a specialized task usually creates more maintenance work than expected.`,
-    (city) => city
-      ? `Production businesses in ${city} often find that unplanned equipment downtime traces back to a small operational issue.`
-      : `Unplanned equipment downtime often traces back to a small operational issue that was straightforward to address.`,
-    (_) => `The right tool matched to a specific task reduces wear on surrounding equipment over time.`,
-    (_) => `Operational consistency is easier to maintain when equipment is built for the task it performs.`,
-  ],
-
-  ed_explains: [
-    `A machine designed for production or processing use. Built for operational settings where consistent output is needed.`,
-    `Used in manufacturing, fabrication, or processing environments. Handles regular workloads without frequent servicing.`,
-    `A tool for a specific production task. Designed to perform consistently under regular operational use.`,
-    `Industrial equipment for day-to-day production work. Standard configuration available — no complex setup required.`,
-  ],
-
-  ed_benefits: [
-    `Reduces variance in output when used for the task it is designed for.`,
-    `Designed for consistent performance across repeated use cycles.`,
-    `Useful where a dedicated tool removes the need for workarounds in the production process.`,
-    `Suitable for settings where equipment reliability directly affects daily operational output.`,
-  ],
-
-  ps_blocks: [
+  problem_based: [
     {
-      problem: `Using general-purpose equipment for a specialized task increases wear and reduces output quality.\nA tool built for the purpose is usually more reliable over time.`,
-      solution: `Designed specifically for the task — not adapted from a general-purpose alternative.`,
-      outcome: `More consistent output. Reduced wear on surrounding equipment.`,
+      pain:    `Slow refraction backs up the entire patient queue for the rest of the day.`,
+      benefit: `Gives accurate preliminary readings in under 2 minutes per patient.`,
+      trigger: `How long is the refraction stage taking on a busy afternoon?`,
     },
     {
-      problem: `Equipment that requires frequent mid-run adjustments slows the overall production process.\nOperators spend time correcting rather than producing.`,
-      solution: `Maintains its settings under regular operational use. Fewer corrections needed during a production run.`,
-      outcome: `Fewer interruptions during the production cycle.`,
+      pain:    `Sending lens jobs outside adds cost per lens and makes customers wait.`,
+      benefit: `Brings jobs back in-house with same-day turnaround on most work.`,
+      trigger: `What's your daily lens job volume — and how much goes outside?`,
     },
     {
-      problem: `When production equipment is shared between tasks, setup time adds up across the day.\nDedicated tooling reduces this significantly.`,
-      solution: `Configured for a specific operational purpose. No setup changes required between tasks.`,
-      outcome: `Less time setting up. More time on actual production.`,
-    },
-    {
-      problem: `Low-quality tooling produces inconsistent results that require rework or material waste.\nThis cost compounds across a production run.`,
-      solution: `Consistent performance across production cycles — reduces rework and material waste per cycle.`,
-      outcome: `Fewer corrections needed. More predictable cost per unit over time.`,
+      pain:    `One instrument down stops your entire patient flow for the day.`,
+      benefit: `Removes the single-point dependency so work continues when one is serviced.`,
+      trigger: `Do you have backup coverage for your key examination instruments?`,
     },
   ],
 
-  pi_hooks: [
-    `Quick note on a machine from our catalog — might be relevant depending on your production setup.`,
-    `Sharing a tool from our range that tends to come up with businesses running similar operations.`,
-    `One item worth knowing about if you are looking to supplement or replace current production equipment.`,
-    `Something from our production range that covers a common operational requirement.`,
-  ],
-
-  pi_explains: [
-    `A machine for production or processing work. Designed for operational environments where consistent output matters.`,
-    `Used in manufacturing and fabrication settings. Handles regular workloads without requiring frequent servicing.`,
-    `A tool for production use. Straightforward to integrate into an existing workflow.`,
-    `Industrial equipment suited for day-to-day production tasks. Standard configuration — operational from day one.`,
-  ],
-
-  pi_benefits: [
-    `Standard configuration. No complex installation required.`,
-    `Designed for regular use. Minimal adjustment needed once set up.`,
-    `Integrates with most standard production workflows.`,
-  ],
-
-  bn_hooks: [
-    (_) => `Production output is easier to keep consistent when the right tool is matched to the specific task.`,
-    (_) => `Equipment built for a purpose requires less maintenance than a general-purpose alternative used beyond its range.`,
-    (city) => city
-      ? `Businesses in ${city} running regular production often find that dedicated tooling reduces per-unit handling time.`
-      : `Dedicated tooling for a specific task reduces per-unit handling time compared to adapted alternatives.`,
-    (_) => `When a production process requires consistent results, the choice of equipment matters more than it appears.`,
-  ],
-
-  bn_explains: [
-    `Handles the specific task it is designed for — reduces the need for mid-run adjustments.`,
-    `Purpose-built for operational use. Performs consistently without requiring workarounds.`,
-    `Designed for the task. Reduces setup time and mid-run corrections across production cycles.`,
-  ],
-
-  bn_benefits: [
-    `Reduces setup time at the start of each production run.`,
-    `Useful when consistent output matters more than versatility.`,
-    `Simplifies the production process where a dedicated tool replaces a general-purpose workaround.`,
-    `Suitable for repeated use in regular production cycles without performance degradation.`,
-  ],
-
-  sp_blocks: [
+  observation_based: [
     {
-      hook: `A frequently requested item among businesses running similar production operations.`,
-      note: `Usually chosen when businesses need reliable, consistent performance without complex setup.`,
-      benefit: `Holds up under regular production use. Low ongoing maintenance.`,
+      pain:    `Patients who feel processed rather than examined rarely come back.`,
+      benefit: `Signals a clinical standard that builds patient trust from the first visit.`,
+      trigger: `What instruments are you using — and what are you thinking of adding?`,
     },
     {
-      hook: `One of our more consistently ordered machines among businesses in manufacturing and processing.`,
-      note: `Often selected when a dedicated tool is needed rather than adapting general equipment for the task.`,
-      benefit: `Operational from day one. Minimal adjustment required.`,
-    },
-    {
-      hook: `A machine that is commonly added to the standard production setup once in use.`,
-      note: `Used across a range of production environments where consistent output is the priority.`,
-      benefit: `Predictable performance across repeated production cycles.`,
+      pain:    `Patients notice when your equipment doesn't match what they've seen elsewhere.`,
+      benefit: `Improves both the speed and the feel of each examination.`,
+      trigger: `Are you currently using manual or digital equipment for refraction?`,
     },
   ],
 
-  dp_blocks: [
+  workflow_based: [
     {
-      hook: `Sharing something from our production equipment range — might be relevant to your current setup.`,
-      detail: `A machine for production or processing use. In stock. Standard and custom configurations available.`,
-      benefit: `Designed for operational use. No complex installation required.`,
+      pain:    `Inconsistent edging on drill-mount and rimless jobs creates fitting complaints.`,
+      benefit: `Removes operator variation so every job comes out to the same standard.`,
+      trigger: `What's your rework rate on drill-mount and rimless jobs currently?`,
     },
     {
-      hook: `Quick note on a machine from our catalog.`,
-      detail: `Used in manufacturing and processing environments for consistent production output. Easy to integrate.`,
-      benefit: `Reliable performance. Low ongoing maintenance.`,
+      pain:    `Skipping slit lamp means relying entirely on autorefractor readings alone.`,
+      benefit: `Takes only a few minutes and changes the depth of every consultation.`,
+      trigger: `Is slit lamp part of your standard consultation flow right now?`,
+    },
+    {
+      pain:    `One instrument handling the full day's load backs up everything behind it.`,
+      benefit: `Lets each stage run independently so no queue builds behind one step.`,
+      trigger: `Where is the slowest point in your current patient flow?`,
+    },
+  ],
+
+  educational: [
+    {
+      pain:    `Patients don't evaluate clinical quality but they notice how well they're treated.`,
+      benefit: `Equipment beyond basic refraction changes how every patient experiences the visit.`,
+      trigger: `What's driving patients to your practice over nearby alternatives?`,
+    },
+    {
+      pain:    `Progressive edging has a 1mm tolerance — outside errors come back as complaints.`,
+      benefit: `Gives direct control over fit quality on every progressive job.`,
+      trigger: `Are you edging progressive jobs in-house or sending them outside?`,
+    },
+  ],
+
+  lead_starter: [
+    {
+      pain:    `Most equipment purchases come with no clarity on what support follows.`,
+      benefit: `Covers installation, calibration, and after-purchase support for every instrument.`,
+      trigger: `What instruments are you using — and what's the next addition you're planning?`,
     },
   ],
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// CONSUMABLE PRODUCTS — solutions, cleaners, pads, chemicals, lubricants
+// CASE FACTORY — EVA cases, metal cases, soft cases, plastic cases
 // ══════════════════════════════════════════════════════════════════════════════
 
-const CONSUMABLE_POOLS: ProductClassPools = {
+const CASE_POOLS: ProductClassPools = {
 
-  ed_hooks: [
-    (_) => `Consumable items that run out unexpectedly create delays that are straightforward to prevent.`,
-    (_) => `Maintenance products are often overlooked until they affect output — usually at the wrong time.`,
-    (city) => city
-      ? `Businesses in ${city} running regular operations tend to manage consumables proactively rather than reactively.`
-      : `Businesses running regular operations tend to manage consumables proactively rather than reactively.`,
-    (_) => `Using the wrong maintenance product for a specific surface often creates more work than it saves.`,
-    (_) => `Consistent consumable quality reduces variation in results across different maintenance cycles.`,
-  ],
-
-  ed_explains: [
-    `A maintenance or cleaning product for regular operational use. Consistent formulation across every unit.`,
-    `Used in production, cleaning, or maintenance workflows where a reliable consumable is needed.`,
-    `A consumable designed for repeated application. Suitable for day-to-day maintenance tasks.`,
-    `A product for routine surface treatment or cleaning. No specialist equipment required for application.`,
-  ],
-
-  ed_benefits: [
-    `Consistent results across every application — reduces variation between maintenance cycles.`,
-    `Simplifies regular maintenance with a reliable consumable for recurring tasks.`,
-    `Suitable for regular use without concern about surface damage or residue buildup.`,
-    `Useful when a maintenance task needs a dedicated product rather than a general alternative.`,
-  ],
-
-  ps_blocks: [
+  problem_based: [
     {
-      problem: `Running out of a maintenance consumable mid-operation creates unplanned downtime.\nMost businesses only notice the gap once the disruption has started.`,
-      solution: `Available in quantities suited for regular replenishment cycles. Easy to order in advance.`,
-      outcome: `Reduces the risk of supply gaps disrupting the operational schedule.`,
+      pain:    `Customers without a proper case find their own storage — usually the wrong kind.`,
+      benefit: `Protects lenses from the very first day the glasses go home.`,
+      trigger: `Are you including a case with every purchase, or only on request?`,
     },
     {
-      problem: `Using the wrong cleaning product damages surfaces or leaves residue that creates additional work.\nThis is common when a general alternative is used for a task that needs a specific product.`,
-      solution: `Formulated for the specific surface or task — does not damage materials it is designed to clean.`,
-      outcome: `Consistent cleaning result without secondary damage or residue.`,
+      pain:    `Kids' eyewear has a much higher damage rate without a proper hard case.`,
+      benefit: `Absorbs the daily impact and handling from younger wearers.`,
+      trigger: `What case are you recommending for children's eyewear right now?`,
     },
     {
-      problem: `Inconsistent consumable quality produces varying results across batches.\nThis creates additional correction work to compensate.`,
-      solution: `Consistent formulation across every unit. Same result on every application.`,
-      outcome: `Predictable performance. Reduces rework caused by inconsistent results.`,
-    },
-    {
-      problem: `Maintenance products that leave residue create additional cleaning work after application.\nThe secondary step adds time to every maintenance cycle.`,
-      solution: `Clean application — no residue left on the treated surface.`,
-      outcome: `Reduces total time spent on each maintenance cycle.`,
+      pain:    `Handing over glasses in a thin sleeve doesn't match what was paid for.`,
+      benefit: `Makes the purchase feel complete and considered at the moment of handover.`,
+      trigger: `What case type are you using at handover across your price ranges?`,
     },
   ],
 
-  pi_hooks: [
-    `Quick note on a consumable from our range — relevant if this type of product is part of your regular routine.`,
-    `Sharing a maintenance product from our catalog that tends to come up with businesses running similar operations.`,
-    `One item worth knowing about if you are looking for a reliable consumable for regular use.`,
-    `Something from our catalog that covers a common maintenance or cleaning requirement.`,
-  ],
-
-  pi_explains: [
-    `A cleaning or maintenance product for regular use. Consistent formulation. No specialist equipment needed.`,
-    `Used in operational settings where a reliable consumable is needed for recurring maintenance tasks.`,
-    `A product for routine surface treatment or cleaning. Suitable for repeated application on standard materials.`,
-    `Formulated for consistent results across multiple applications. Works on compatible surfaces.`,
-  ],
-
-  pi_benefits: [
-    `Consistent results across every application. No variation between batches.`,
-    `Suitable for regular use. No surface damage under correct application.`,
-    `Available in quantities suited for regular replenishment.`,
-  ],
-
-  bn_hooks: [
-    (_) => `Maintenance consumables deliver the best results when matched to the specific surface or task.`,
-    (_) => `A dedicated product for a maintenance task is more reliable than a general alternative over repeated use.`,
-    (city) => city
-      ? `Businesses in ${city} with regular maintenance schedules find fewer disruptions when consumables are managed proactively.`
-      : `Businesses with regular maintenance schedules find fewer disruptions when consumables are managed proactively.`,
-    (_) => `Surface condition and equipment life are often determined by which maintenance product is used consistently.`,
-  ],
-
-  bn_explains: [
-    `A dedicated consumable for the task — removes the inconsistency of general-purpose alternatives.`,
-    `Designed for regular application. Consistent result every time it is used.`,
-    `Suited for the specific maintenance task — reduces correction work from inconsistent results.`,
-  ],
-
-  bn_benefits: [
-    `Reduces variation in results across different maintenance cycles.`,
-    `Simplifies procurement — one reliable product for a recurring task.`,
-    `Useful when consistency matters more than finding the lowest-cost alternative.`,
-    `Easier to plan replenishment when consumption is predictable.`,
-  ],
-
-  sp_blocks: [
+  observation_based: [
     {
-      hook: `A frequently reordered consumable among businesses managing regular maintenance schedules.`,
-      note: `Commonly chosen for its consistent results and compatibility with a range of standard materials.`,
-      benefit: `Reliable across repeated applications. Easy to incorporate into existing routines.`,
+      pain:    `Cheap soft pouches get lost — your brand goes with them.`,
+      benefit: `Stays in the customer's daily routine for years, keeping your store visible.`,
+      trigger: `Are you using branded cases or plain stock from your supplier?`,
     },
     {
-      hook: `One of our more consistently ordered maintenance products among businesses in this segment.`,
-      note: `Often selected when businesses want a reliable product for a recurring maintenance task.`,
-      benefit: `Consistent formulation. Same result every time.`,
-    },
-    {
-      hook: `A consumable that is commonly added to regular orders once businesses incorporate it into their routine.`,
-      note: `Used in settings where a dependable maintenance product simplifies the recurring task.`,
-      benefit: `Reduces time spent sourcing alternatives. Predictable performance.`,
+      pain:    `Most stores miss a simple upsell — no premium case is offered at checkout.`,
+      benefit: `Creates a natural upsell at checkout without any extra selling conversation.`,
+      trigger: `Do you offer premium case upgrades as a paid option?`,
     },
   ],
 
-  dp_blocks: [
+  workflow_based: [
     {
-      hook: `Sharing something from our consumables range — relevant if this is part of your regular maintenance.`,
-      detail: `A cleaning or maintenance product for repeated use. In stock. Available in standard pack sizes.`,
-      benefit: `Consistent results. No specialist equipment needed.`,
+      pain:    `Running out of the right size at checkout leaves the customer disappointed.`,
+      benefit: `Keeps checkout moving without last-minute substitutions or delays.`,
+      trigger: `How are you managing case inventory — bulk stock or ordered per sale?`,
     },
     {
-      hook: `Quick note on a consumable from our catalog.`,
-      detail: `Used in maintenance and cleaning workflows where a reliable consumable is needed regularly.`,
-      benefit: `Predictable performance. Easy to incorporate into an existing routine.`,
+      pain:    `A basic pouch with a high-value lens doesn't match the price the customer paid.`,
+      benefit: `Matches case quality to lens value so the handover makes sense.`,
+      trigger: `Do you match case quality to the lens value being dispensed?`,
+    },
+  ],
+
+  educational: [
+    {
+      pain:    `Soft pouches allow lens contact inside — that friction damages coatings over time.`,
+      benefit: `Prevents internal movement so coatings stay intact through daily use.`,
+      trigger: `What case type do you recommend for high-index or coated lenses?`,
+    },
+    {
+      pain:    `Plain generic cases carry no identity — customers forget your store quickly.`,
+      benefit: `Puts your store name in the customer's hand every single morning.`,
+      trigger: `Have you looked at branded case options, or still on plain stock?`,
+    },
+  ],
+
+  lead_starter: [
+    {
+      pain:    `Most stores source cases from multiple suppliers and get inconsistent quality.`,
+      benefit: `EVA, metal, and soft cases manufactured direct from our factory in Chennai.`,
+      trigger: `What case formats are you stocking — and what's your monthly volume?`,
     },
   ],
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// COMPONENT PRODUCTS — parts, accessories, connectors, brackets, fittings
+// LENS CLEANER FACTORY — lens cleaner, cleaning kits
 // ══════════════════════════════════════════════════════════════════════════════
 
-const COMPONENT_POOLS: ProductClassPools = {
+const LENS_CLEANER_POOLS: ProductClassPools = {
 
-  ed_hooks: [
-    (_) => `Small components often create the largest disruptions when they are missing or out of stock.`,
-    (_) => `Having the right part available when needed reduces equipment repair time significantly.`,
-    (city) => city
-      ? `Businesses in ${city} managing their own equipment often find that component sourcing is where delays actually start.`
-      : `Businesses managing their own equipment often find that component sourcing is where delays actually start.`,
-    (_) => `Equipment with standardized components is easier to maintain than setups that require unique parts.`,
-    (_) => `Sourcing common parts proactively is usually less costly than sourcing them under urgency.`,
-  ],
-
-  ed_explains: [
-    `A replacement or add-on component for equipment maintenance and repair. Compatible with standard configurations.`,
-    `Used to maintain, repair, or extend the function of existing equipment. No custom modification required.`,
-    `A spare or accessory part for regular replacement cycles. Straightforward to install.`,
-    `A component for integration into existing systems. Works with standard equipment in this category.`,
-  ],
-
-  ed_benefits: [
-    `Reduces repair downtime when kept as a planned stock item.`,
-    `Compatible with standard equipment — no custom modification needed.`,
-    `Simplifies maintenance planning when the component has a predictable replacement cycle.`,
-    `Reduces sourcing time when procured proactively rather than reactively.`,
-  ],
-
-  ps_blocks: [
+  problem_based: [
     {
-      problem: `Equipment downtime caused by a missing component is usually avoidable.\nBusinesses that stock common parts rarely face extended delays for straightforward repairs.`,
-      solution: `A stock item suitable for preventive maintenance and planned replacement cycles.`,
-      outcome: `Reduces unplanned downtime when a component fails or wears out.`,
+      pain:    `Most coating damage happens in the first few months — always the wrong cleaner.`,
+      benefit: `Prevents the most common coating damage pattern from the very first clean.`,
+      trigger: `Are you handing over a lens cleaner with every purchase?`,
     },
     {
-      problem: `Using a non-compatible part to keep equipment running creates secondary problems.\nThis often leads to further failure or reduced performance elsewhere.`,
-      solution: `Compatible with standard equipment configurations in this category. No adaptation required.`,
-      outcome: `Maintains equipment performance without introducing secondary issues.`,
-    },
-    {
-      problem: `Components sourced from multiple suppliers create complexity in tracking and reordering.\nThe administrative overhead adds up over time.`,
-      solution: `Available through a consistent supply source. Easy to add to an existing order.`,
-      outcome: `Simplifies component sourcing and inventory management.`,
-    },
-    {
-      problem: `Equipment maintenance takes longer when the right component is not readily available.\nThis extends downtime beyond what the repair itself requires.`,
-      solution: `Kept in stock and available for quick dispatch. No extended lead time.`,
-      outcome: `Reduces total downtime from the moment a component is needed.`,
+      pain:    `Most customers don't know the right way to clean coated lenses.`,
+      benefit: `Prevents post-sale coating complaints before they start.`,
+      trigger: `Do you walk customers through lens care at the point of handover?`,
     },
   ],
 
-  pi_hooks: [
-    `Quick note on a component from our catalog — relevant if this part fits your current equipment.`,
-    `Sharing a spare or accessory from our range useful for businesses maintaining similar equipment.`,
-    `One item worth knowing about if you are managing maintenance stock for this type of equipment.`,
-    `Something from our catalog that covers a common component requirement in this category.`,
-  ],
-
-  pi_explains: [
-    `A replacement or add-on component for standard equipment. Compatible with most configurations in this category.`,
-    `Used for maintenance and repair. Straightforward to install without custom modification.`,
-    `A spare part designed for regular replacement cycles. Fits standard equipment setups.`,
-    `A component for functional integration into existing systems. No special tooling required.`,
-  ],
-
-  pi_benefits: [
-    `Compatible with standard configurations. No modification needed.`,
-    `Suitable for planned replacement cycles. Predictable availability.`,
-    `Reduces sourcing time when stocked in advance.`,
-  ],
-
-  bn_hooks: [
-    (_) => `Having the right component in stock before it is needed is usually less costly than sourcing it urgently.`,
-    (_) => `Equipment maintenance runs more smoothly when common replacement parts are available in advance.`,
-    (city) => city
-      ? `Businesses in ${city} maintaining their own equipment tend to keep critical components stocked to reduce repair delays.`
-      : `Businesses maintaining their own equipment tend to keep critical components stocked to reduce repair delays.`,
-    (_) => `The time spent sourcing a missing component often exceeds the time it takes to install it.`,
-  ],
-
-  bn_explains: [
-    `A component suited for planned stock. Available for dispatch when needed.`,
-    `Works with standard equipment in this category — no custom sourcing required.`,
-    `A spare part with a predictable replacement cycle. Easy to add to regular procurement.`,
-  ],
-
-  bn_benefits: [
-    `Reduces repair time when the component is already in stock.`,
-    `Simplifies maintenance planning when sourced proactively.`,
-    `Useful when managing equipment that requires regular component replacement.`,
-    `Helpful when a single component affects the operation of a larger system.`,
-  ],
-
-  sp_blocks: [
+  observation_based: [
     {
-      hook: `A frequently ordered component among businesses managing maintenance stock for similar equipment.`,
-      note: `Often chosen for its compatibility with standard configurations and straightforward installation.`,
-      benefit: `Reliable across standard equipment setups. No adaptation needed.`,
+      pain:    `Repeat lens cleaner purchases go to pharmacies — not back to your counter.`,
+      benefit: `Captures that repeat purchase and keeps customers coming back to you.`,
+      trigger: `Are customers coming back to you for cleaning products?`,
     },
     {
-      hook: `One of our more consistently ordered parts among businesses maintaining this type of equipment.`,
-      note: `Usually selected when businesses want a reliable spare part from a consistent supply source.`,
-      benefit: `Available for quick dispatch. Reduces sourcing lead time.`,
-    },
-    {
-      hook: `A component that is commonly added to regular orders once businesses start stocking it proactively.`,
-      note: `Used in settings where having common parts available reduces equipment downtime.`,
-      benefit: `Predictable availability. Simplifies maintenance planning.`,
+      pain:    `Stores that wait to be asked about care products miss the moment entirely.`,
+      benefit: `Makes you the ongoing lens care expert, not just the place they dispensed from.`,
+      trigger: `What does your current post-sale lens care recommendation look like?`,
     },
   ],
 
-  dp_blocks: [
+  workflow_based: [
     {
-      hook: `Sharing something from our component range — relevant if you maintain equipment in this category.`,
-      detail: `A replacement or add-on component for standard equipment. In stock. Ready for dispatch.`,
-      benefit: `Compatible with standard configurations. No modification needed.`,
+      pain:    `Most stores skip the proactive offer and lose a clean add-on every transaction.`,
+      benefit: `Adds to transaction value at handover without any extra selling time.`,
+      trigger: `What's your current add-on rate at checkout — cleaning products, cases?`,
     },
     {
-      hook: `Quick note on a component from our catalog.`,
-      detail: `Used for equipment maintenance and repair. Straightforward to install.`,
-      benefit: `Reduces repair time when kept as a stock item.`,
+      pain:    `Running out mid-month means customers who ask leave your counter without one.`,
+      benefit: `Keeps the counter stocked and the repeat purchase reason intact.`,
+      trigger: `How many units are you moving per month — dispensing and retail combined?`,
+    },
+  ],
+
+  educational: [
+    {
+      pain:    `Different coatings have specific pH tolerances — wrong cleaners degrade them.`,
+      benefit: `Safe for all lens types — anti-reflective, blue-light, and photochromic.`,
+      trigger: `Do you recommend the same cleaner for all lens types right now?`,
+    },
+    {
+      pain:    `Most stores treat lens care as an afterthought — a pouch with no guidance.`,
+      benefit: `Turns handover into a moment of care that customers remember and mention.`,
+      trigger: `What's the last thing a customer receives before walking out of your store?`,
+    },
+  ],
+
+  lead_starter: [
+    {
+      pain:    `Retail-sourced cleaners often react poorly with advanced lens coatings.`,
+      benefit: `pH-balanced for anti-reflective, blue-light, and photochromic coatings.`,
+      trigger: `How many units per month — for dispensing and counter retail?`,
     },
   ],
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// GENERAL PRODUCTS — fallback for unclassified products
+// MICROFIBER FACTORY — cleaning cloth, GSM variations
+// ══════════════════════════════════════════════════════════════════════════════
+
+const MICROFIBER_POOLS: ProductClassPools = {
+
+  problem_based: [
+    {
+      pain:    `Customers using tissue or clothing cause coating damage from the first clean.`,
+      benefit: `Protects lens surfaces from abrasive damage starting from day one.`,
+      trigger: `What cleaning cloth are you sending out with every pair you dispense?`,
+    },
+    {
+      pain:    `Low-quality microfiber degrades after 8–10 washes — customers switch to tissue.`,
+      benefit: `Holds cleaning performance through 50+ wash cycles without losing texture.`,
+      trigger: `How long do customers use the cloth before they stop using it?`,
+    },
+  ],
+
+  observation_based: [
+    {
+      pain:    `Glasses handed over without a quality cloth feel like an incomplete purchase.`,
+      benefit: `Makes the handover feel complete and adds a branded daily touchpoint.`,
+      trigger: `Are you branding your microfiber cloths or using plain unbranded stock?`,
+    },
+    {
+      pain:    `Customers who need a replacement cloth buy it wherever is most convenient.`,
+      benefit: `Creates a simple repeat visit reason at very low inventory cost.`,
+      trigger: `Do you currently sell cloths separately as a retail item?`,
+    },
+  ],
+
+  workflow_based: [
+    {
+      pain:    `Using different cloths for different price ranges creates confusion and mismatches.`,
+      benefit: `One specification covers all lens types and frame price points cleanly.`,
+      trigger: `Do you use different cloth grades for different price ranges?`,
+    },
+    {
+      pain:    `Buying microfiber in small batches means paying near-retail rates every time.`,
+      benefit: `Brings unit cost down and removes the urgent reorder problem entirely.`,
+      trigger: `What's your monthly cloth volume — and how are you currently sourcing them?`,
+    },
+  ],
+
+  educational: [
+    {
+      pain:    `Most stores pick cloths on price — 200 GSM and 400 GSM perform very differently.`,
+      benefit: `Higher GSM cleans better, leaves no lint, and survives far more washes.`,
+      trigger: `Would it help to compare GSM options against what you currently stock?`,
+    },
+  ],
+
+  lead_starter: [
+    {
+      pain:    `General suppliers give inconsistent GSM and sizing from batch to batch.`,
+      benefit: `Consistent dimensions and cleaning performance in every order we supply.`,
+      trigger: `How many cloths per month — for dispensing and for retail sale?`,
+    },
+  ],
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TOOLS COMPANY — fitting supplies, maintenance items, optical accessories
+// ══════════════════════════════════════════════════════════════════════════════
+
+const TOOL_POOLS: ProductClassPools = {
+
+  problem_based: [
+    {
+      pain:    `A frame that doesn't fit properly at home means a return visit the next day.`,
+      benefit: `Ensures every frame leaves fitting correctly the first time.`,
+      trigger: `Do you have a full fitting toolkit at each counter, or one shared set?`,
+    },
+    {
+      pain:    `Minor repairs that take 10 minutes in-house are being sent out for a week.`,
+      benefit: `Handles the most common frame repairs in-house on the same day.`,
+      trigger: `What percentage of repairs are you currently handling in-house?`,
+    },
+    {
+      pain:    `Incorrect acetate adjustment can crack the frame — a difficult conversation follows.`,
+      benefit: `Reduces the risk of frame damage for every material type handled.`,
+      trigger: `Do your current tools differentiate between acetate, metal, and titanium?`,
+    },
+  ],
+
+  observation_based: [
+    {
+      pain:    `A poor or slow fitting leaves an impression the frame price can't fix.`,
+      benefit: `Signals professional competence from the moment the fitting begins.`,
+      trigger: `What does your current fitting process look like at handover?`,
+    },
+    {
+      pain:    `Progressive lens accuracy depends directly on getting measurements right.`,
+      benefit: `Takes the guesswork out of progressive dispensing with proper measurement.`,
+      trigger: `What measurement tools are you using when dispensing progressive lenses?`,
+    },
+  ],
+
+  workflow_based: [
+    {
+      pain:    `A fitting that should take 5 minutes is taking 15–20 without the right tools.`,
+      benefit: `Keeps fittings fast, accurate, and consistent across your full team.`,
+      trigger: `How long does a typical frame fitting take in your practice right now?`,
+    },
+    {
+      pain:    `Sharing one toolkit across counters slows every station during peak hours.`,
+      benefit: `Lets every dispensing counter work independently without waiting.`,
+      trigger: `How many dispensing counters do you have — each with its own toolkit?`,
+    },
+  ],
+
+  educational: [
+    {
+      pain:    `Progressive fitting has a ±1mm tolerance — small errors reduce optical performance.`,
+      benefit: `Removes guesswork from progressive dispensing with accurate measurements.`,
+      trigger: `What measurement tools do you use when dispensing progressive prescriptions?`,
+    },
+    {
+      pain:    `Different frame materials need completely different fitting and adjustment approaches.`,
+      benefit: `Prevents the most common fitting errors before they happen in front of customers.`,
+      trigger: `Which frame material does your team find most challenging to adjust?`,
+    },
+  ],
+
+  lead_starter: [
+    {
+      pain:    `Most opticians adapt adjustment tools from hardware or jewelry stores.`,
+      benefit: `Designed specifically for optical frame fitting — not adapted from other uses.`,
+      trigger: `What does your current fitting toolkit look like — any gaps you've noticed?`,
+    },
+  ],
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GENERAL — cross-division, Hesh manufacturer context
 // ══════════════════════════════════════════════════════════════════════════════
 
 const GENERAL_POOLS: ProductClassPools = {
 
-  ed_hooks: [
-    (_) => `Knowing what is available from a supplier before it is needed reduces lead time when the need arises.`,
-    (_) => `Using a purpose-built product for a recurring task is usually more reliable than adapting a general alternative.`,
-    (city) => city
-      ? `Businesses in ${city} with regular procurement needs often consolidate to a reliable supplier once they find one that fits.`
-      : `Businesses with regular procurement needs often consolidate to a reliable supplier once they find one that fits.`,
-    (_) => `A product sourced proactively is almost always less costly than one sourced under urgency.`,
-    (_) => `Operational routines that rely on a single, consistent product tend to be easier to manage over time.`,
-  ],
-
-  ed_explains: [
-    `A product from our catalog designed for a specific operational purpose. Suitable for regular use.`,
-    `Used in business settings where a dedicated product simplifies a recurring operational task.`,
-    `Designed for consistent performance under regular use. Standard configurations available.`,
-    `A product suited for the operational requirement it is designed to address.`,
-  ],
-
-  ed_benefits: [
-    `Useful when a specific product is needed rather than a general alternative.`,
-    `Reduces procurement lead time when sourced in advance.`,
-    `Simplifies operations where a dedicated product replaces a workaround.`,
-    `Suitable for regular use with predictable performance.`,
-  ],
-
-  ps_blocks: [
+  problem_based: [
     {
-      problem: `Using a general-purpose product for a specific task often creates more work than a dedicated option.\nThe workaround adds time and inconsistency to the process.`,
-      solution: `Designed for the specific task — not adapted from a general-purpose alternative.`,
-      outcome: `Reduces time spent correcting results from an ill-suited workaround.`,
+      pain:    `Every time you say 'we don't carry that', a customer finds another store.`,
+      benefit: `Keeps more conversations and more revenue inside your store.`,
+      trigger: `What are customers asking for that you're currently sending them elsewhere?`,
     },
     {
-      problem: `Sourcing products reactively — only when the need arises — creates avoidable delays.\nLead times add up when procurement is not planned.`,
-      solution: `Available through a consistent supply source. Straightforward to plan and reorder.`,
-      outcome: `Reduces lead time when sourced proactively as part of regular procurement.`,
-    },
-    {
-      problem: `Products from multiple suppliers add complexity to procurement and inventory management.\nConsolidating to fewer suppliers reduces the overhead.`,
-      solution: `Available to add to an existing order — no additional supplier relationship needed.`,
-      outcome: `Simplifies procurement without adding a new vendor to manage.`,
-    },
-    {
-      problem: `A product used outside its intended application often fails earlier than expected.\nThis creates unplanned costs that compound over time.`,
-      solution: `Designed for the specific application — performs as expected within intended use.`,
-      outcome: `More predictable performance and cost over regular use.`,
+      pain:    `Managing 4–5 suppliers for accessories and consumables adds hidden admin cost.`,
+      benefit: `Consolidating to fewer reliable suppliers removes that overhead significantly.`,
+      trigger: `How many suppliers are you currently managing for accessories?`,
     },
   ],
 
-  pi_hooks: [
-    `Quick note on something from our catalog — might be useful depending on what you are currently managing.`,
-    `Sharing a product from our range that tends to come up with businesses handling similar requirements.`,
-    `One item worth knowing about if you are looking for a reliable product in this category.`,
-    `Something from our catalog that may cover a requirement you are currently managing.`,
-  ],
-
-  pi_explains: [
-    `A product from our catalog for regular operational use. Works in most standard configurations.`,
-    `Used in business settings where a specific product is needed for a recurring task.`,
-    `Designed for consistent performance under regular use. Straightforward to integrate.`,
-    `A product suited for the operational requirement it is designed to address.`,
-  ],
-
-  pi_benefits: [
-    `Standard configuration. No customization required.`,
-    `Designed for regular use. Minimal maintenance.`,
-    `Works with most standard operational setups.`,
-  ],
-
-  bn_hooks: [
-    (_) => `The right product for a specific task is usually more reliable than a general-purpose alternative over time.`,
-    (_) => `Having a dedicated product for a recurring operational need reduces the effort involved each time.`,
-    (city) => city
-      ? `Businesses in ${city} often consolidate to a reliable product once they find one that fits their recurring requirements.`
-      : `Businesses often consolidate to a reliable product once they find one that fits their recurring requirements.`,
-    (_) => `A product suited to the task reduces the time spent correcting results from a less suitable alternative.`,
-  ],
-
-  bn_explains: [
-    `A product designed for the specific task — performs consistently without requiring adaptation.`,
-    `Suited to the operational need it addresses. No workaround required.`,
-    `Designed for regular use. Consistent results across repeated applications.`,
-  ],
-
-  bn_benefits: [
-    `Reduces the effort involved in each use compared to a general-purpose alternative.`,
-    `Useful when a dedicated product replaces an improvised workaround.`,
-    `Simplifies procurement when the need is recurring and predictable.`,
-    `Suitable when consistency matters more than versatility.`,
-  ],
-
-  sp_blocks: [
+  observation_based: [
     {
-      hook: `A consistently ordered product among businesses managing similar operational requirements.`,
-      note: `Usually chosen for its reliability and straightforward integration into existing workflows.`,
-      benefit: `Works in most standard configurations. Low ongoing maintenance.`,
+      pain:    `Stores focused only on frames give customers no reason to visit between cycles.`,
+      benefit: `Creates repeat visit reasons across the full prescription cycle.`,
+      trigger: `What percentage of your revenue comes from accessories versus frames and lenses?`,
     },
     {
-      hook: `One of our more regularly ordered items among businesses in this segment.`,
-      note: `Often selected when businesses want a reliable option for a recurring operational need.`,
-      benefit: `Consistent performance. Easy to add to regular procurement.`,
-    },
-    {
-      hook: `A product that is commonly incorporated into regular procurement once businesses start using it.`,
-      note: `Used where a dedicated product simplifies a task that previously needed a workaround.`,
-      benefit: `Reduces recurring operational friction. Predictable performance.`,
+      pain:    `Optical retail is shifting — stores that go beyond dispensing are growing faster.`,
+      benefit: `Deepens the relationship with customers you already have.`,
+      trigger: `Are you actively growing your accessory range, or staying focused on frames?`,
     },
   ],
 
-  dp_blocks: [
+  workflow_based: [
     {
-      hook: `Sharing something from our catalog — might be relevant to what you are currently managing.`,
-      detail: `A product for operational use. In stock. Standard configurations available.`,
-      benefit: `Fits most standard setups. No special requirements.`,
+      pain:    `Ordering when stock runs out creates gaps that interrupt smooth day-to-day work.`,
+      benefit: `Makes reordering predictable and removes the reactive stock problem.`,
+      trigger: `What are you currently sourcing reactively rather than planning in advance?`,
     },
     {
-      hook: `Quick note on a product from our range.`,
-      detail: `Used for recurring operational needs. Easy to integrate into an existing workflow.`,
-      benefit: `Consistent performance. Low maintenance.`,
+      pain:    `Follow-ups, mismatched deliveries, and invoices across 5 suppliers add up fast.`,
+      benefit: `Consolidates multiple categories into one relationship and one order cycle.`,
+      trigger: `How much time per week does your team spend on supplier follow-up?`,
+    },
+  ],
+
+  educational: [
+    {
+      pain:    `Most stores split 6 product categories across 5 or more different suppliers.`,
+      benefit: `Supplies displays, instruments, cases, cleaners, microfiber, and tools direct.`,
+      trigger: `Which of these categories are you sourcing from multiple different suppliers?`,
+    },
+    {
+      pain:    `Through a distributor, queries and complaints take weeks to reach the source.`,
+      benefit: `Direct manufacturer means queries reach the source on the same day.`,
+      trigger: `How much of your supply is manufacturer-direct versus through a distributor?`,
+    },
+  ],
+
+  lead_starter: [
+    {
+      pain:    `Going through distributors adds cost and lead time without adding product value.`,
+      benefit: `Displays, instruments, cases, cleaners, microfiber, and tools — all from factory.`,
+      trigger: `What are you sourcing that you'd explore with a direct manufacturer?`,
     },
   ],
 };
 
 const POOL_MAP: Record<ProductClass, ProductClassPools> = {
-  display:    DISPLAY_POOLS,
-  machine:    MACHINE_POOLS,
-  consumable: CONSUMABLE_POOLS,
-  component:  COMPONENT_POOLS,
-  general:    GENERAL_POOLS,
+  display:      DISPLAY_POOLS,
+  machine:      MACHINE_POOLS,
+  case:         CASE_POOLS,
+  lens_cleaner: LENS_CLEANER_POOLS,
+  microfiber:   MICROFIBER_POOLS,
+  tool:         TOOL_POOLS,
+  general:      GENERAL_POOLS,
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
-// KNOWLEDGE LAYER
+// NOTIFICATION HOOK POOLS — appear FIRST in message, shown in notification preview
+// Rules: 40–80 chars, max 2 lines, no product names, no greetings, no company
+//        name, no SKU, no URLs, no phone numbers, no emojis.
+// Goal: create curiosity before the message is even opened.
+// ══════════════════════════════════════════════════════════════════════════════
+
+const DISPLAY_HOOKS: readonly string[] = [
+  'Most optical stores display fewer than 20% of the frames they stock.',
+  "What customers can't see on the floor, they won't buy.",
+  'How much of your current range is sitting in storage right now?',
+  'The front row drives most trials. Frames behind it rarely get touched.',
+  'New arrivals that go to storage instead of the floor lose their window.',
+  'Daily display restocking after a busy shift — how long is that taking?',
+  'Your highest-margin frames may be in your least-noticed position.',
+];
+
+const MACHINE_HOOKS: readonly string[] = [
+  'Outsourcing lens edging adds cost per lens and makes every customer wait.',
+  'One refractometer out of service means your entire patient flow stops.',
+  'How long is refraction taking on a busy afternoon — and what queues behind?',
+  'Patients who feel processed rather than examined rarely refer others.',
+  'Progressive jobs edged outside the practice come back as adaptation complaints.',
+  'Every outsourced minor repair adds 3-7 days to a customer wait.',
+  'A nearby practice upgraded recently. Patients who have seen both notice.',
+];
+
+const CASE_HOOKS: readonly string[] = [
+  'Most lens coating damage starts with the wrong case — not the lens.',
+  'The case a customer takes home is in their hands every single morning.',
+  'Customers who damage lenses within 6 months usually blame the lens, not storage.',
+  'The handover moment is the last impression — what does yours say?',
+  'A cheap case is the most expensive thing an optical store puts in every bag.',
+  'Customers who get a good case are more likely to return when it needs replacing.',
+];
+
+const LENS_CLEANER_HOOKS: readonly string[] = [
+  'Most coating damage happens in the first 3 months — always the wrong cleaner.',
+  'Repeat lens cleaner purchases go to pharmacies — not back to you.',
+  'Coating complaints 6 months out are almost always a cleaning problem.',
+  'How much repeat-purchase revenue is walking out of your store monthly?',
+  'A lens cleaner at handover prevents the most common post-sale complaint.',
+];
+
+const MICROFIBER_HOOKS: readonly string[] = [
+  'Low-quality microfiber lasts 8-10 washes. After that, customers use their shirt.',
+  'The first lens scratch usually comes from the wrong cleaning cloth.',
+  'Customers finish the cloth you gave them and buy the next one somewhere else.',
+  "Branded cloths are in the customer's hands every morning. Plain ones aren't.",
+  'What cleaning cloth are you currently sending home with every pair you dispense?',
+];
+
+const TOOL_HOOKS: readonly string[] = [
+  "A frame that doesn't fit when the customer gets home is a return visit tomorrow.",
+  'Minor repairs that take 10 minutes in-house are being sent out for a week.',
+  'A fitting that should take 5 minutes is taking 15-20 in most dispensaries.',
+  'Progressive lens needs accurate fitting — not adjusting by feel.',
+  'Staff sharing one toolkit across counters slows every counter during peak hours.',
+  'How many frame repairs are you outsourcing that could be done in-house today?',
+];
+
+const GENERAL_HOOKS: readonly string[] = [
+  "Every time you say 'we don't carry that,' a customer finds another store.",
+  'How many suppliers are you managing for optical accessories and consumables?',
+  'Reactive sourcing means running out mid-month and repeating the same problem.',
+  'Accessories from 4-5 vendors — one supplier relationship can cover all of it.',
+  'Accessory stock creates more customer visits between prescription cycles.',
+  'Four suppliers, four invoices, four follow-ups — one could cover all of this.',
+  "How much repeat-purchase revenue is leaving through products you don't stock?",
+];
+
+const HOOK_POOLS: Record<ProductClass, readonly string[]> = {
+  display:      DISPLAY_HOOKS,
+  machine:      MACHINE_HOOKS,
+  case:         CASE_HOOKS,
+  lens_cleaner: LENS_CLEANER_HOOKS,
+  microfiber:   MICROFIBER_HOOKS,
+  tool:         TOOL_HOOKS,
+  general:      GENERAL_HOOKS,
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// BUSINESS CONTEXT LAYER
+// ══════════════════════════════════════════════════════════════════════════════
+
+interface BusinessContext {
+  businessProblem:   string;
+  usageScenario:     string;
+  businessValue:     string;
+  conversationAngle: string;
+}
+
+function deriveBusinessContext(
+  productClass: ProductClass,
+  knowledge: ProductKnowledge,
+): BusinessContext {
+  const use = knowledge.primaryUse;
+
+  switch (productClass) {
+    case 'display':
+      return {
+        businessProblem:   'under-displayed inventory and poor floor utilization',
+        usageScenario:     'organizing frame and product display across counters and wall panels',
+        businessValue:     'more active inventory, fewer products in dead storage, better customer self-navigation',
+        conversationAngle: 'how many products they currently display versus what they actually carry',
+      };
+    case 'machine':
+      return {
+        businessProblem:   'patient throughput bottlenecks and outsourcing dependency for lens work',
+        usageScenario:     use ?? 'examination and in-house lens processing',
+        businessValue:     'faster patient flow, in-house quality control, reduced outsourcing cost',
+        conversationAngle: 'what examination instruments they use and what work they currently outsource',
+      };
+    case 'case':
+      return {
+        businessProblem:   'lens damage complaints and generic handover experience',
+        usageScenario:     'packaging and protecting dispensed eyewear at point of sale',
+        businessValue:     'fewer post-sale complaints, higher perceived value, brand recall through daily use',
+        conversationAngle: 'what case type they currently use at handover and whether it matches their pricing',
+      };
+    case 'lens_cleaner':
+      return {
+        businessProblem:   'coating damage from improper cleaning and missed repeat purchase opportunities',
+        usageScenario:     'daily lens care and maintenance for dispensed eyewear',
+        businessValue:     'longer lens life, fewer coating complaints, repeat purchases at the counter',
+        conversationAngle: 'whether they provide cleaning products at handover and where customers currently buy them',
+      };
+    case 'microfiber':
+      return {
+        businessProblem:   'coating abrasion from wrong cleaning materials and weak handover experience',
+        usageScenario:     'daily lens surface cleaning and care',
+        businessValue:     'protected lens coatings, premium handover feel, branded daily-use touchpoint',
+        conversationAngle: 'what cloth they currently dispense and whether they are branding it',
+      };
+    case 'tool':
+      return {
+        businessProblem:   'inaccurate fittings and outsourced repairs that should be resolved in-house',
+        usageScenario:     'frame fitting, adjustment, and in-house repair at the dispensing counter',
+        businessValue:     'faster fittings, consistent accuracy, fewer return visits from poor adjustments',
+        conversationAngle: 'what tools they currently have at each counter and what repairs they send out',
+      };
+    default:
+      return {
+        businessProblem:   'fragmented supply and unmet customer requests from limited accessory range',
+        usageScenario:     use ?? 'regular optical business operations',
+        businessValue:     'fewer customer walk-aways, consolidated supply, more revenue per customer',
+        conversationAngle: 'what accessories they carry and how many suppliers they currently manage',
+      };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// KNOWLEDGE LAYER — optical-industry aware extraction
 // ══════════════════════════════════════════════════════════════════════════════
 
 interface ProductKnowledge {
@@ -786,119 +843,82 @@ interface ProductKnowledge {
   material:        string | null;
   industryContext: string | null;
   enrich:          string | null;
-  confidence:      number;  // 0–100; replaces the old boolean isRich
+  confidence:      number; // 0–100
 }
 
-// ── Industry keyword → context label ─────────────────────────────────────────
 const INDUSTRY_KEYWORDS: [string, string][] = [
-  ['optical',    'optical manufacturing'],
+  ['optical',    'optical retail and dispensing'],
+  ['optometry',  'optometry practice'],
+  ['ophthalmic', 'ophthalmic practice'],
   ['lens',       'optical lens processing'],
-  ['optic',      'optical manufacturing'],
-  ['dental',     'dental industry'],
-  ['ortho',      'dental industry'],
-  ['textile',    'textile industry'],
-  ['fabric',     'textile industry'],
-  ['garment',    'textile industry'],
-  ['automotive', 'automotive industry'],
-  ['vehicle',    'automotive industry'],
-  ['tyre',       'automotive industry'],
-  ['woodwork',   'woodworking'],
-  ['timber',     'woodworking'],
-  ['carpentry',  'woodworking'],
-  ['metal',      'metal fabrication'],
-  ['welding',    'metal fabrication'],
-  ['pharma',     'pharmaceutical industry'],
-  ['medical',    'healthcare'],
-  ['surgical',   'healthcare'],
-  ['glass',      'glass industry'],
-  ['ceramic',    'ceramics industry'],
-  ['printing',   'printing industry'],
-  ['packaging',  'packaging industry'],
-  ['food',       'food industry'],
+  ['spectacle',  'spectacle dispensing'],
+  ['eyewear',    'eyewear retail'],
+  ['dispensary', 'optical dispensary'],
+  ['refraction', 'optometry practice'],
+  ['dispensing', 'spectacle dispensing'],
+  ['frame',      'optical retail and dispensing'],
+  ['optic',      'optical retail and dispensing'],
+  ['lab',        'optical lab'],
+  ['edging',     'optical lens lab'],
 ];
 
-// ── Use-case keyword → primary use phrase ─────────────────────────────────────
 const USE_KEYWORDS: [string, string][] = [
-  ['edging',      'edge finishing'],
-  ['finishing',   'surface finishing'],
-  ['grinding',    'surface grinding'],
-  ['cutting',     'material cutting'],
-  ['polishing',   'surface polishing'],
-  ['deburring',   'deburring operations'],
-  ['drilling',    'drilling operations'],
-  ['milling',     'milling operations'],
-  ['cleaning',    'cleaning and maintenance'],
-  ['washing',     'cleaning and maintenance'],
-  ['lubricating', 'lubrication'],
-  ['lubrication', 'lubrication'],
-  ['fastener',    'fastening and assembly'],
-  ['fastening',   'fastening and assembly'],
-  ['mounting',    'equipment mounting'],
-  ['assembly',    'assembly operations'],
-  ['display',     'product display organization'],
+  ['refraction',  'eye examination and refraction'],
+  ['edging',      'lens edging and cutting'],
+  ['dispensing',  'spectacle dispensing'],
+  ['fitting',     'frame fitting and adjustment'],
+  ['cleaning',    'lens cleaning and maintenance'],
+  ['adjusting',   'frame adjustment'],
+  ['mounting',    'frame mounting and assembly'],
+  ['display',     'product display and organization'],
   ['organizing',  'product organization'],
-  ['sorting',     'product sorting and organization'],
+  ['testing',     'vision testing'],
 ];
 
-// ── Material keywords (whole-word) ────────────────────────────────────────────
 const MATERIAL_KEYWORDS: string[] = [
-  'diamond', 'carbide', 'abrasive', 'wire', 'stainless',
-  'aluminum', 'rubber', 'ceramic', 'silicon', 'brass',
-  'chrome', 'steel', 'iron', 'plastic', 'glass',
+  'acetate', 'titanium', 'polycarbonate', 'trivex', 'cr-39', 'stainless',
+  'aluminum', 'rubber', 'silicone', 'metal', 'plastic', 'glass',
+  'eva', 'nylon', 'carbon', 'fiber', 'microfiber',
 ];
 
-// ── Industry → who uses it ────────────────────────────────────────────────────
 const TARGET_USER_MAP: Record<string, string> = {
-  'optical manufacturing':    'optical labs',
-  'optical lens processing':  'optical lens labs',
-  'dental industry':          'dental practices and labs',
-  'textile industry':         'textile manufacturers',
-  'metal fabrication':        'metal fabrication units',
-  'woodworking':              'woodworking shops',
-  'glass industry':           'glass processing units',
-  'automotive industry':      'automotive workshops',
-  'surface finishing':        'manufacturing and finishing units',
-  'cleaning and maintenance': 'facilities and maintenance teams',
-  'pharmaceutical industry':  'pharmaceutical manufacturers',
-  'healthcare':               'healthcare facilities',
-  'packaging industry':       'packaging operations',
-  'food industry':            'food processing units',
+  'optical retail and dispensing':   'optical stores and dispensaries',
+  'optometry practice':              'optometrists and eye care practices',
+  'ophthalmic practice':             'ophthalmic practices and clinics',
+  'optical lens processing':         'optical lens labs',
+  'spectacle dispensing':            'optical dispensaries',
+  'eyewear retail':                  'eyewear retailers',
+  'optical dispensary':              'optical dispensaries',
+  'optical lab':                     'optical labs',
 };
 
-// ── HSN prefix → industry (last-resort only, must not override text signals) ──
 const HSN_INDUSTRY_MAP: Record<string, string> = {
-  '9001': 'optical manufacturing',
-  '9002': 'optical manufacturing',
-  '9003': 'optical manufacturing',
-  '9004': 'optical manufacturing',
-  '6804': 'surface finishing',
-  '6805': 'surface finishing',
-  '8460': 'metal fabrication',
-  '8461': 'metal fabrication',
-  '8467': 'woodworking',
-  '3402': 'cleaning and maintenance',
-  '3403': 'cleaning and maintenance',
-  '3405': 'cleaning and maintenance',
-  '7326': 'metal fabrication',
+  '9001': 'optical retail and dispensing',
+  '9002': 'optical retail and dispensing',
+  '9003': 'optical retail and dispensing',
+  '9004': 'optical retail and dispensing',
+  '9013': 'optical retail and dispensing',
+  '9018': 'ophthalmic practice',
+  '6307': 'optical retail and dispensing',
+  '3402': 'optical retail and dispensing',
+  '3405': 'lens cleaning and maintenance',
+  '6804': 'optical lens lab',
+  '8460': 'optical lens lab',
+  '8461': 'optical lens lab',
   '3920': 'packaging industry',
   '4015': 'healthcare',
 };
 
-// ── Product type nouns ────────────────────────────────────────────────────────
 const PRODUCT_TYPE_NOUNS: string[] = [
-  'wheel', 'blade', 'tool', 'machine', 'motor', 'drill', 'press', 'pump',
-  'grinder', 'cutter', 'lathe', 'conveyor', 'device',
-  'panel', 'holder', 'rack', 'stand', 'shelf', 'fixture', 'mount', 'grid',
-  'hook', 'counter',
-  'solution', 'liquid', 'cleaner', 'pad', 'spray', 'gel', 'lubricant',
-  'powder', 'solvent',
-  'bracket', 'connector', 'fitting', 'pin', 'bolt', 'screw', 'clip',
-  'component', 'part', 'accessory', 'kit', 'set',
+  'refractometer', 'phoropter', 'edger', 'lensometer', 'keratometer',
+  'display', 'panel', 'tray', 'rack', 'counter', 'stand', 'shelf', 'mirror', 'fixture',
+  'case', 'pouch', 'box',
+  'cleaner', 'solution', 'spray', 'kit',
+  'cloth', 'microfiber',
+  'tool', 'screwdriver', 'plier', 'gauge', 'ruler',
+  'wheel', 'blade', 'machine', 'device', 'instrument',
 ];
 
-// ── Text layer ordering: [text, sourceName, confidenceBonus] ─────────────────
-// Priority: description → tags → productType → name → handle → vendor
-// HSN is handled separately as a last-resort fallback.
 type TextLayer = [string, string, number];
 
 function buildTextLayers(product: ShopifyCatalogItem): TextLayer[] {
@@ -912,8 +932,6 @@ function buildTextLayers(product: ShopifyCatalogItem): TextLayer[] {
   ];
 }
 
-// ── Pure helper functions ─────────────────────────────────────────────────────
-
 function deriveProductType(words: string[]): string {
   for (const noun of PRODUCT_TYPE_NOUNS) {
     if (words.includes(noun)) return noun;
@@ -924,55 +942,18 @@ function deriveProductType(words: string[]): string {
 }
 
 function buildEnrichSentence(
-  productType: string,
-  primaryUse: string | null,
-  material: string | null,
-  industryContext: string | null,
-  targetUser: string | null,
+  _productType: string,
+  _primaryUse: string | null,
+  _material: string | null,
+  _industryContext: string | null,
+  _targetUser: string | null,
 ): string | null {
-  const typeWord = productType !== 'product' ? productType : null;
-
-  if (material && typeWord && primaryUse && industryContext) {
-    return `A ${material} ${typeWord} used for ${primaryUse} in ${industryContext}.`;
-  }
-  if (typeWord && primaryUse && targetUser) {
-    return `A ${typeWord} used by ${targetUser} for ${primaryUse}.`;
-  }
-  if (material && typeWord && primaryUse) {
-    return `A ${material} ${typeWord} designed for ${primaryUse}.`;
-  }
-  if (primaryUse && industryContext) {
-    return `Commonly used in ${industryContext} for ${primaryUse}.`;
-  }
-  if (primaryUse && targetUser) {
-    return `Used by ${targetUser} for ${primaryUse}.`;
-  }
-  if (typeWord && primaryUse) {
-    return `Designed for ${primaryUse} applications.`;
-  }
-  if (industryContext && targetUser) {
-    return `Used by ${targetUser} in ${industryContext}.`;
-  }
-  if (industryContext) {
-    return `Commonly used in ${industryContext}.`;
-  }
+  // Disabled — generated sentences were robotic and template-like.
   return null;
 }
 
-function deriveKnowledgeBenefit(knowledge: ProductKnowledge): string | null {
-  const { primaryUse, targetUser, industryContext } = knowledge;
-  if (primaryUse && targetUser) {
-    return `Useful for ${targetUser} where ${primaryUse} is a routine requirement.`;
-  }
-  if (primaryUse && industryContext) {
-    return `Suitable for ${industryContext} where ${primaryUse} is a regular operational need.`;
-  }
-  if (primaryUse) {
-    return `Useful when ${primaryUse} is a regular operational requirement.`;
-  }
-  if (targetUser) {
-    return `Often used by ${targetUser} as a dedicated product for this task.`;
-  }
+function deriveKnowledgeRelevance(_knowledge: ProductKnowledge): string | null {
+  // Disabled — produced corporate-sounding sentences.
   return null;
 }
 
@@ -981,12 +962,9 @@ function extractProductKnowledge(
   productClass: ProductClass,
 ): ProductKnowledge {
   const layers = buildTextLayers(product);
-
-  // All tokens combined — used for material and product-type extraction
   const allText = layers.map(([t]) => t).concat(product.sku?.toLowerCase() ?? '').join(' ');
   const words   = allText.replace(/[-_/]/g, ' ').split(/\s+/).filter(Boolean);
 
-  // ── Extract industryContext — first matching layer wins ──────────────────────
   let industryContext: string | null = null;
   let hsnFallbackUsed = false;
 
@@ -998,14 +976,12 @@ function extractProductKnowledge(
     if (industryContext) break;
   }
 
-  // HSN only as last resort — and NEVER for display products (prevents cross-class pollution)
   if (!industryContext && product.hsnCode && productClass !== 'display') {
     const prefix = product.hsnCode.substring(0, 4);
     const mapped = HSN_INDUSTRY_MAP[prefix];
     if (mapped) { industryContext = mapped; hsnFallbackUsed = true; }
   }
 
-  // ── Extract primaryUse — same priority order ─────────────────────────────────
   let primaryUse: string | null = null;
   for (const [layerText] of layers) {
     if (!layerText) continue;
@@ -1015,7 +991,6 @@ function extractProductKnowledge(
     if (primaryUse) break;
   }
 
-  // ── Extract material ──────────────────────────────────────────────────────────
   let material: string | null = null;
   for (const kw of MATERIAL_KEYWORDS) {
     if (words.includes(kw)) { material = kw; break; }
@@ -1025,8 +1000,6 @@ function extractProductKnowledge(
   const targetUser  = industryContext ? (TARGET_USER_MAP[industryContext] ?? null) : null;
   const enrich      = buildEnrichSentence(productType, primaryUse, material, industryContext, targetUser);
 
-  // ── Confidence scoring — each source that contributed ANY signal adds its bonus ─
-  // Scoring is independent of extraction priority so all useful sources are counted.
   let confidence = 0;
   for (const [layerText, , bonus] of layers) {
     if (!layerText) continue;
@@ -1042,8 +1015,19 @@ function extractProductKnowledge(
   return { productType, primaryUse, targetUser, material, industryContext, enrich, confidence };
 }
 
-// ── Safety patterns ───────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// SAFETY — banned phrases + forbidden patterns
+// ══════════════════════════════════════════════════════════════════════════════
+
 const FORBIDDEN_PATTERNS = [
+  /quick\s+note/i,
+  /sharing\s+(a\s+)?product/i,
+  /from\s+our\s+catalog/i,
+  /from\s+our\s+catalogue/i,
+  /product\s+from\s+our\s+range/i,
+  /commonly\s+used/i,
+  /may\s+be\s+useful/i,
+  /businesses?\s+usually/i,
   /limited\s+time/i,
   /last\s+chance/i,
   /hurry/i,
@@ -1053,18 +1037,181 @@ const FORBIDDEN_PATTERNS = [
   /\bfree\b/i,
   /\bdiscount\b/i,
   /\boffer\b/i,
+  /\bbuyers\b/i,
+  /\bshowroom\b/i,
+  /\bengagement\b/i,
+  /\bvisibility\b/i,
+  /improves?\s+sales/i,
+  // Corporate language — banned
+  /\bworkflow\b/i,
+  /\boperational\b/i,
+  /\befficiency\b/i,
+  /clinical\s+decision/i,
+  /\bsolutioning\b/i,
+  /\becosystem\b/i,
+  /process\s+optimization/i,
+  /\bsuitable\s+for\s+(setups?|use|applications?)/i,
+  /businesses?\s+handling/i,
+  /glass\s+processing\s+units?/i,
+  /textile\s+industr/i,
+  /\bsimilar\s+requirements?\b/i,
+];
+
+const CATALOG_PATTERNS = [
+  /this\s+is\s+a/i,
+  /made\s+of/i,
+  /available\s+in\s+(various|different|multiple)\s+(colors?|sizes?|variants?)/i,
+  /perfect\s+for/i,
+  /best\s+quality/i,
+  /high\s+quality/i,
+  /premium\s+quality/i,
+  /\bon\s+sale\b/i,
+  /buy\s+now/i,
+  /order\s+now/i,
 ];
 
 const STORE_BASE = 'https://www.heshstore.in';
 
 // ══════════════════════════════════════════════════════════════════════════════
+// MESSAGE QUALITY SCORING
+//
+// Target: 35–55 words preferred, 70 max
+// Sentence: ≤12 words
+// Paragraph: 1–2 lines
+// Question: mandatory before CTA
+// ══════════════════════════════════════════════════════════════════════════════
+
+export interface MessageQualityScore {
+  relevance:              number; // 0–10
+  naturalLanguage:        number; // 0–10
+  conversationPotential:  number; // 0–10
+  businessValue:          number; // 0–10
+  leadPotential:          number; // 0–10
+  total:                  number; // average of five
+  grade:                  'PASS' | 'REVIEW' | 'FAIL';
+  flags:                  string[];
+}
+
+export function scoreMessage(result: PromotionGenerateResult): MessageQualityScore {
+  const { message, metadata } = result;
+  const flags: string[] = [];
+
+  // ── Relevance ─────────────────────────────────────────────────────────────
+  let relevance = 4;
+  if (metadata.knowledgeConfidence >= 50)     relevance += 2;
+  if (metadata.industryContext)               relevance += 2;
+  if (metadata.contentCategory !== 'lead_starter') relevance += 2;
+  relevance = Math.min(relevance, 10);
+
+  // ── Natural Language ──────────────────────────────────────────────────────
+  let naturalLanguage = 7;
+
+  // Word count: 35–55 preferred, 70 max
+  const wordCount = message.split(/\s+/).filter(Boolean).length;
+  if (wordCount > 70)                          { naturalLanguage -= 3; flags.push('message_too_long'); }
+  else if (wordCount > 55)                     { naturalLanguage -= 1; flags.push('message_approaching_limit'); }
+  else if (wordCount >= 35 && wordCount <= 55) { naturalLanguage += 1; } // ideal range bonus
+
+  // Sentence count bonus + sentence length penalty (max 12 words per sentence)
+  // Structural lines (*product*, SKU:, 📞, 🛍, https://) are excluded so they don't merge
+  // with adjacent content sentences and inflate the word count.
+  const STRUCTURAL_LINE = /^(\*.*\*|SKU:|📞|🛍|https?:\/\/)/;
+  const contentLines = message.split('\n').filter(l => l.trim() && !STRUCTURAL_LINE.test(l.trim()));
+  const contentText = contentLines.join(' ');
+  const sentences = contentText.split(/[.!?]\s+/).filter(Boolean);
+  if (sentences.length >= 3 && sentences.length <= 12) naturalLanguage += 1;
+  const longSentences = sentences.filter(s => s.split(/\s+/).filter(Boolean).length > 12).length;
+  if (longSentences >= 2)       { naturalLanguage -= 2; flags.push('sentence_too_long'); }
+  else if (longSentences === 1) { naturalLanguage -= 1; flags.push('sentence_too_long'); }
+
+  // Paragraph length penalty (> 2 sentences in a single paragraph)
+  const paragraphs = message.split(/\n\n+/).filter(p => p.trim());
+  const longParagraphs = paragraphs.filter(p => {
+    const pSentences = p.split(/[.!?]\s+/).filter(Boolean);
+    return pSentences.length > 2;
+  }).length;
+  if (longParagraphs > 0) { naturalLanguage -= 1; flags.push('paragraph_too_long'); }
+
+  // Explanation too long: any non-structural body paragraph with > 1 sentence
+  const bodyParagraphs = paragraphs
+    .slice(1) // skip hook (first paragraph)
+    .filter(p => {
+      const t = p.trim();
+      return t.length > 0
+        && !t.startsWith('*')
+        && !t.startsWith('SKU:')
+        && !t.startsWith('📞')
+        && !t.startsWith('🛍')
+        && !/^https?:\/\//i.test(t);
+    });
+  const hasExplanationTooLong = bodyParagraphs.some(p => (p.match(/[.!?]/g) ?? []).length > 1);
+  if (hasExplanationTooLong) { naturalLanguage -= 1; flags.push('explanation_too_long'); }
+
+  for (const p of CATALOG_PATTERNS) {
+    if (p.test(message)) { naturalLanguage -= 2; flags.push(`catalog_pattern:${p.toString()}`); break; }
+  }
+  for (const p of FORBIDDEN_PATTERNS) {
+    if (p.test(message)) { naturalLanguage -= 3; flags.push(`forbidden:${p.toString()}`); break; }
+  }
+
+  // ── Hook penalties ────────────────────────────────────────────────────────
+  const hook      = metadata.notificationHook ?? '';
+  const hookFlags = metadata.hookValidationFlags ?? [];
+  if (!hook || hook.trim() === '') {
+    naturalLanguage -= 3; flags.push('missing_hook');
+  } else {
+    if (hookFlags.includes('hook_too_long'))          { naturalLanguage -= 1; flags.push('hook_too_long'); }
+    if (hookFlags.includes('hook_contains_product'))  { naturalLanguage -= 2; flags.push('hook_contains_product'); }
+    if (hookFlags.includes('hook_contains_greeting')) { naturalLanguage -= 2; flags.push('hook_contains_greeting'); }
+    if (hookFlags.includes('weak_hook'))              { naturalLanguage -= 1; flags.push('weak_hook'); }
+  }
+  naturalLanguage = Math.max(0, Math.min(naturalLanguage, 10));
+
+  // ── Conversation Potential — question is mandatory before CTA ─────────────
+  let conversationPotential = 4;
+  const hasCallCta = /📞/.test(message);
+  const hasTrigger = /\?/.test(message);
+  if (hasCallCta)  conversationPotential += 2;
+  if (hasTrigger)  conversationPotential += 4;
+  if (!hasTrigger) { flags.push('missing_question'); conversationPotential -= 2; }
+  conversationPotential = Math.min(Math.max(0, conversationPotential), 10);
+
+  // ── Business Value ────────────────────────────────────────────────────────
+  let businessValue = 4;
+  if (['problem_based', 'workflow_based'].includes(metadata.contentCategory)) businessValue += 2;
+  if (metadata.industryContext)           businessValue += 2;
+  if (metadata.knowledgeConfidence >= 65) businessValue += 2;
+  businessValue = Math.min(businessValue, 10);
+
+  // ── Lead Generation Potential ─────────────────────────────────────────────
+  let leadPotential = 4;
+  if (hasCallCta)         leadPotential += 2;
+  if (/🛍/.test(message)) leadPotential += 2;
+  if (hasTrigger)         leadPotential += 2;
+  leadPotential = Math.min(leadPotential, 10);
+
+  const total = parseFloat(
+    ((relevance + naturalLanguage + conversationPotential + businessValue + leadPotential) / 5).toFixed(1),
+  );
+
+  const hasForbidden = flags.some(f => f.startsWith('forbidden') || f.startsWith('catalog'));
+  const grade: MessageQualityScore['grade'] =
+    total >= 7.5 && !hasForbidden ? 'PASS' : total >= 5.0 ? 'REVIEW' : 'FAIL';
+
+  return { relevance, naturalLanguage, conversationPotential, businessValue, leadPotential, total, grade, flags };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // SERVICE
 // ══════════════════════════════════════════════════════════════════════════════
+
+const MAX_REGENERATION_ATTEMPTS = 3;
+const QUALITY_THRESHOLD         = 7.0;
 
 @Injectable()
 export class PromotionAiTemplateService {
   private readonly logger = new Logger(PromotionAiTemplateService.name);
-  private _softCtaHistory = new Map<string, string[]>();
+  private _hookHistory = new Map<string, string[]>();
 
   constructor(
     @InjectRepository(WhatsappMessageLog)
@@ -1075,54 +1222,201 @@ export class PromotionAiTemplateService {
     const { product, customer, telecaller_phone, offer } = input;
 
     const productName  = product.itemName ?? product.sku ?? 'this product';
-    const city         = customer.city ?? '';
-    const name         = customer.name?.trim() || 'there';
     const sku          = product.sku ?? '';
     const productClass = classifyProduct(product);
     const pools        = POOL_MAP[productClass];
     const knowledge    = extractProductKnowledge(product, productClass);
+    const context      = deriveBusinessContext(productClass, knowledge);
 
-    const category   = this._pickCategory();
-    const greeting   = this._pickRandom(GREETINGS)(name);
-    const softCta    = this._pickSoftCta(customer.phone);
-    const callLabel  = this._pickRandom(CALL_LABELS);
-    const productUrl = this._buildProductUrl(product);
+    const { productUrl, urlSource } = this._buildProductUrl(product);
 
-    const { hook, explain, benefit } = this._categoryContent(category, city, pools, knowledge);
+    // Reject immediately — no handle and no SKU means no safe URL can be built
+    if (urlSource === 'rejected') {
+      this.logger.warn(
+        `[PRODUCT_URL_REJECT] sku="${sku}" itemName="${product.itemName ?? ''}" id=${product.id} ` +
+        `— product skipped: no Shopify handle and no SKU`,
+      );
+      return {
+        message:      '',
+        imageUrl:     null,
+        productUrl:   '',
+        qualityPassed: false,
+        quality:      { finalScore: 0, attemptsUsed: 0, grade: 'FAIL' },
+        metadata: {
+          templateVariant:     'rejected',
+          contentCategory:     'lead_starter',
+          hookType:            'none',
+          messageLength:       0,
+          productSku:          sku,
+          productClass,
+          industryContext:     null,
+          knowledgeConfidence: 0,
+          businessProblem:     '',
+          urlSource:           'rejected',
+          notificationHook:    '',
+          hookValidationFlags: [],
+        },
+      };
+    }
 
+    const imageUrl  = product.image || null;
     const offerLine = offer?.text
       ? (offer.title ? `${offer.title}: ${offer.text}` : offer.text)
       : undefined;
 
-    const message = this._buildMessage({
-      greeting, productName, sku, hook, explain, benefit,
-      softCta, callLabel, telecallerPhone: telecaller_phone, productUrl, offerLine,
-    });
+    let result: PromotionGenerateResult | null = null;
+    let lastScore: ReturnType<typeof scoreMessage> | null = null;
 
-    this._assertSafe(message);
+    for (let attempt = 0; attempt < MAX_REGENERATION_ATTEMPTS; attempt++) {
+      const category  = this._pickCategory();
+      const callLabel = this._pickRandom(CALL_LABELS);
 
-    this.logger.log(
-      `[PROMO_AI] category=${category} class=${productClass} ` +
-      `industry=${knowledge.industryContext ?? 'none'} confidence=${knowledge.confidence} ` +
-      `sku=${sku} offer=${!!offerLine} customer=${customer.phone} length=${message.length}`,
+      const block = this._categoryBlock(category, pools);
+      const hook  = this._pickHook(productClass, customer.phone);
+      const hookValidationFlags = this._validateHook(hook, productName, sku);
+
+      if (hookValidationFlags.length > 0) {
+        this.logger.warn(
+          `[PROMO_AI_HOOK] hook_flags=${hookValidationFlags.join(',')} sku=${sku} hook="${hook.slice(0, 60)}"`,
+        );
+      }
+
+      const message = this._buildMessage({
+        hook, productName, sku,
+        pain: block.pain, benefit: block.benefit, trigger: block.trigger,
+        callLabel, telecallerPhone: telecaller_phone, productUrl, offerLine,
+      });
+
+      result = {
+        message,
+        imageUrl,
+        productUrl,
+        qualityPassed: false,
+        quality: { finalScore: 0, attemptsUsed: attempt + 1, grade: 'FAIL' },
+        metadata: {
+          templateVariant:     `v${attempt + 1}`,
+          contentCategory:     category,
+          hookType:            category,
+          messageLength:       message.length,
+          productSku:          sku,
+          productClass,
+          industryContext:     knowledge.industryContext ?? null,
+          knowledgeConfidence: knowledge.confidence,
+          businessProblem:     context.businessProblem,
+          urlSource,
+          notificationHook:    hook,
+          hookValidationFlags,
+        },
+      };
+
+      lastScore = scoreMessage(result);
+      result.quality = { finalScore: lastScore.total, attemptsUsed: attempt + 1, grade: lastScore.grade };
+
+      if (lastScore.total >= QUALITY_THRESHOLD && !lastScore.flags.some(f => f.startsWith('forbidden'))) {
+        result.qualityPassed = true;
+        this.logger.log(
+          `[PROMO_AI] attempt=${attempt + 1} grade=${lastScore.grade} score=${lastScore.total} ` +
+          `category=${category} class=${productClass} confidence=${knowledge.confidence} sku=${sku}`,
+        );
+        this._assertSafe(message);
+        return result;
+      }
+
+      this.logger.warn(
+        `[PROMO_AI_REGEN] attempt=${attempt + 1} score=${lastScore.total} flags=${lastScore.flags.join(',')} ` +
+        `category=${category} sku=${sku}`,
+      );
+    }
+
+    // All attempts exhausted — return with qualityPassed=false so sender can reject
+    this._assertSafe(result!.message);
+    this.logger.warn(
+      `[PROMO_AI_QUALITY_FAIL] sku=${sku} finalScore=${lastScore?.total ?? 0} ` +
+      `attempts=${MAX_REGENERATION_ATTEMPTS} — quality gate not passed`,
+    );
+    return result!;
+  }
+
+  // ── Validation report — 100 synthetic samples measuring reply potential ───────
+
+  async generateValidationReport(sampleCount = 100): Promise<{
+    avgWordCount:         number;
+    avgSentenceLength:    number;
+    avgReplyPotential:    number;
+    passRate:             number;
+    flagDistribution:     Record<string, number>;
+    rejectionBreakdown:   {
+      weakHooks:          number;
+      missingQuestions:   number;
+      longMessages:       number;
+      corporateLanguage:  number;
+    };
+  }> {
+    const testProducts = [
+      { id: 1, itemName: 'Frame Display Wall Panel', sku: 'DP001', productType: 'display', description: 'optical frame display wall panel', handle: 'frame-display-wall-panel', image: 'https://cdn.shopify.com/test.jpg', syncIgnored: false },
+      { id: 2, itemName: 'Auto Refractometer', sku: 'MR001', productType: 'optical instrument', description: 'auto refractometer optical instrument', handle: 'auto-refractometer', image: 'https://cdn.shopify.com/test.jpg', syncIgnored: false },
+      { id: 3, itemName: 'EVA Spectacle Case', sku: 'EC001', productType: 'spectacle case', description: 'eva spectacle case optical', handle: 'eva-spectacle-case', image: 'https://cdn.shopify.com/test.jpg', syncIgnored: false },
+      { id: 4, itemName: 'Lens Cleaning Spray 100ml', sku: 'LC001', productType: 'lens cleaner', description: 'optical lens cleaning spray', handle: 'lens-cleaning-spray', image: 'https://cdn.shopify.com/test.jpg', syncIgnored: false },
+      { id: 5, itemName: 'Optical Microfiber Cloth', sku: 'MC001', productType: 'microfiber cloth', description: 'optical microfiber cleaning cloth', handle: 'optical-microfiber-cloth', image: 'https://cdn.shopify.com/test.jpg', syncIgnored: false },
+      { id: 6, itemName: 'Optical Screwdriver Set', sku: 'TS001', productType: 'optical tool', description: 'optical screwdriver fitting tool', handle: 'optical-screwdriver-set', image: 'https://cdn.shopify.com/test.jpg', syncIgnored: false },
+    ] as unknown as ShopifyCatalogItem[];
+
+    const results: PromotionGenerateResult[] = [];
+
+    for (let i = 0; i < sampleCount; i++) {
+      const product = testProducts[i % testProducts.length];
+      const result  = await this.generate({
+        telecaller_number_id: 'validation',
+        telecaller_phone:     '+919999999999',
+        product,
+        customer: { name: 'Rajesh', city: 'Mumbai', business_type: 'optical_store' },
+      });
+      results.push(result);
+    }
+
+    const totalWords = results.reduce(
+      (sum, r) => sum + r.message.split(/\s+/).filter(Boolean).length, 0,
+    );
+    const avgWordCount = parseFloat((totalWords / results.length).toFixed(1));
+
+    const allSentences = results.flatMap(r => r.message.split(/[.!?]\s+/).filter(Boolean));
+    const totalSentenceWords = allSentences.reduce(
+      (sum, s) => sum + s.split(/\s+/).filter(Boolean).length, 0,
+    );
+    const avgSentenceLength = parseFloat((totalSentenceWords / allSentences.length).toFixed(1));
+
+    const scores = results.map(r => scoreMessage(r));
+    const avgReplyPotential = parseFloat(
+      (scores.reduce((sum, s) => sum + s.conversationPotential, 0) / scores.length).toFixed(1),
+    );
+    const passRate = parseFloat(
+      ((scores.filter(s => s.grade === 'PASS').length / scores.length) * 100).toFixed(1),
     );
 
-    return {
-      message,
-      imageUrl:   product.image || null,
-      productUrl,
-      metadata: {
-        templateVariant:     `v${Math.floor(Math.random() * 3) + 1}`,
-        contentCategory:     category,
-        softCtaUsed:         softCta,
-        hookType:            category,
-        messageLength:       message.length,
-        productSku:          sku,
-        productClass,
-        industryContext:     knowledge.industryContext ?? null,
-        knowledgeConfidence: knowledge.confidence,
-      },
+    const flagDistribution: Record<string, number> = {};
+    for (const s of scores) {
+      for (const flag of s.flags) {
+        flagDistribution[flag] = (flagDistribution[flag] ?? 0) + 1;
+      }
+    }
+
+    const rejectionBreakdown = {
+      weakHooks:         scores.filter(s => s.flags.includes('weak_hook')).length,
+      missingQuestions:  scores.filter(s => s.flags.includes('missing_question')).length,
+      longMessages:      scores.filter(s => s.flags.includes('message_too_long')).length,
+      corporateLanguage: scores.filter(s => s.flags.some(f => f.startsWith('forbidden:'))).length,
     };
+
+    this.logger.log(
+      `[PROMO_VALIDATION] samples=${results.length} avgWords=${avgWordCount} ` +
+      `avgSentLen=${avgSentenceLength} replyPotential=${avgReplyPotential} passRate=${passRate}% ` +
+      `rejected_weakHook=${rejectionBreakdown.weakHooks} ` +
+      `rejected_noQuestion=${rejectionBreakdown.missingQuestions} ` +
+      `rejected_tooLong=${rejectionBreakdown.longMessages} ` +
+      `rejected_corporate=${rejectionBreakdown.corporateLanguage}`,
+    );
+
+    return { avgWordCount, avgSentenceLength, avgReplyPotential, passRate, flagDistribution, rejectionBreakdown };
   }
 
   // ── Category selection ────────────────────────────────────────────────────────
@@ -1132,140 +1426,121 @@ export class PromotionAiTemplateService {
     for (const [cat, threshold] of CATEGORY_THRESHOLDS) {
       if (r < threshold) return cat;
     }
-    return 'direct_promo';
+    return 'lead_starter';
   }
 
-  // ── Content generation — two-stage: pool pull → knowledge override ────────────
+  // ── Block selection ───────────────────────────────────────────────────────────
 
-  private _categoryContent(
-    category: ContentCategory,
-    city: string,
-    p: ProductClassPools,
-    knowledge: ProductKnowledge,
-  ): { hook: string; explain: string; benefit: string } {
-    const { hook, poolExplain, poolBenefit } = this._pullFromPool(category, city, p);
-    const explain = this._resolveExplain(category, poolExplain, knowledge);
-    // Benefit override only at high confidence — weak knowledge must not create weak benefits.
-    const benefit = knowledge.confidence >= 70
-      ? (deriveKnowledgeBenefit(knowledge) ?? poolBenefit)
-      : poolBenefit;
-    return { hook, explain, benefit };
-  }
-
-  private _pullFromPool(
-    category: ContentCategory,
-    city: string,
-    p: ProductClassPools,
-  ): { hook: string; poolExplain: string; poolBenefit: string } {
-    switch (category) {
-      case 'educational':
-        return {
-          hook:        this._pickRandom(p.ed_hooks)(city),
-          poolExplain: this._pickRandom(p.ed_explains),
-          poolBenefit: this._pickRandom(p.ed_benefits),
-        };
-      case 'product_info':
-        return {
-          hook:        this._pickRandom(p.pi_hooks),
-          poolExplain: this._pickRandom(p.pi_explains),
-          poolBenefit: this._pickRandom(p.pi_benefits),
-        };
-      case 'benefit':
-        return {
-          hook:        this._pickRandom(p.bn_hooks)(city),
-          poolExplain: this._pickRandom(p.bn_explains),
-          poolBenefit: this._pickRandom(p.bn_benefits),
-        };
-      case 'problem_sol': {
-        const b = this._pickRandom(p.ps_blocks);
-        return { hook: b.problem, poolExplain: b.solution, poolBenefit: b.outcome };
-      }
-      case 'social_proof': {
-        const b = this._pickRandom(p.sp_blocks);
-        return { hook: b.hook, poolExplain: b.note, poolBenefit: b.benefit };
-      }
-      case 'direct_promo': {
-        const b = this._pickRandom(p.dp_blocks);
-        return { hook: b.hook, poolExplain: b.detail, poolBenefit: b.benefit };
-      }
-    }
-  }
-
-  // Confidence thresholds for explain override:
-  //   < 40  → pool explain always wins (knowledge too weak to trust)
-  //   40–70 → knowledge explain replaces pool explain; pool benefit retained
-  //   > 70  → knowledge explain; knowledge benefit (handled in _categoryContent)
-  private _resolveExplain(
-    category: ContentCategory,
-    poolExplain: string,
-    knowledge: ProductKnowledge,
-  ): string {
-    const { enrich, confidence } = knowledge;
-    if (!enrich || confidence < 40) return poolExplain;
-    // problem_sol: prepend product context before the solution (which addresses the stated problem)
-    if (category === 'problem_sol') return `${enrich}\n${poolExplain}`;
-    return enrich;
+  private _categoryBlock(category: ContentCategory, pools: ProductClassPools): ContentBlock {
+    return this._pickRandom(pools[category]);
   }
 
   // ── Message assembly ──────────────────────────────────────────────────────────
+  // Final structure: hook → pain → *product* → benefit → trigger → 🛍 CTA → 📞 CTA
+  // Word target: 35–55 preferred, 70 max.
 
   private _buildMessage(parts: {
-    greeting: string;
-    productName: string;
-    sku: string;
-    hook: string;
-    explain: string;
-    benefit: string;
-    softCta: string;
-    callLabel: string;
+    hook:            string;
+    productName:     string;
+    sku:             string;
+    pain:            string;
+    benefit:         string;
+    trigger:         string;
+    callLabel:       string;
     telecallerPhone: string;
-    productUrl: string;
-    offerLine?: string;
+    productUrl:      string;
+    offerLine?:      string;
   }): string {
     const {
-      greeting, productName, sku, hook, explain, benefit,
-      softCta, callLabel, telecallerPhone, productUrl, offerLine,
+      hook, productName, sku,
+      pain, benefit, trigger,
+      callLabel, telecallerPhone, productUrl, offerLine,
     } = parts;
 
     const lines: string[] = [
-      greeting, ``,
-      hook,     ``,
-      `*${productName}*`, `SKU: ${sku}`, ``,
-      explain,  ``,
-      benefit,
+      hook, ``,
+      pain, ``,
+      `*${productName}*`,
+      `SKU: ${sku}`, ``,
+      benefit, ``,
+      trigger,
     ];
 
     if (offerLine) lines.push(``, offerLine);
 
-    lines.push(``, softCta, ``,
-      `📞 ${callLabel}: ${telecallerPhone}`,
-      `🛍 View Product: ${productUrl}`,
+    lines.push(
+      ``,
+      buildCta({ type: 'product', url: productUrl }), ``,
+      buildCta({ type: 'call', phone: telecallerPhone, callLabel }),
     );
 
     return lines.join('\n');
   }
 
   // ── Product URL ───────────────────────────────────────────────────────────────
+  //
+  // Only two valid sources:
+  //   handle  → /products/{handle}   (Shopify-synced, guaranteed correct)
+  //   search  → /search?q={sku}      (SKU fallback when handle is missing)
+  //   rejected → product must be skipped — no slug generation, no guessing
+  //
+  // Name-derived slugs and AI-generated slugs are BANNED — they can produce
+  // URLs that resolve to the wrong product page.
 
-  private _buildProductUrl(product: ShopifyCatalogItem): string {
-    if (product.handle) return `${STORE_BASE}/products/${product.handle}`;
-    if (product.itemName) {
-      const derived = product.itemName
-        .toLowerCase()
-        .replace(/[^a-z0-9\s-]/g, '')
-        .trim()
-        .replace(/\s+/g, '-')
-        .replace(/-+/g, '-')
-        .replace(/^-|-$/g, '');
-      if (derived) return `${STORE_BASE}/products/${derived}`;
+  private _buildProductUrl(
+    product: ShopifyCatalogItem,
+  ): { productUrl: string; urlSource: 'handle' | 'search' | 'rejected' } {
+    const handle = product.handle?.trim() ?? '';
+    const sku    = product.sku?.trim() ?? '';
+
+    if (handle && /^[a-z0-9][a-z0-9-]*[a-z0-9]$/i.test(handle)) {
+      this.logger.log(
+        `[PRODUCT_URL_HANDLE] sku=${sku} handle=${handle} → ${STORE_BASE}/products/${handle}`,
+      );
+      return { productUrl: `${STORE_BASE}/products/${handle}`, urlSource: 'handle' };
     }
-    return STORE_BASE;
+
+    if (sku) {
+      const searchUrl = `${STORE_BASE}/search?q=${encodeURIComponent(sku)}`;
+      this.logger.warn(
+        `[PRODUCT_URL_SEARCH] sku=${sku} handle="${handle || 'missing'}" → ${searchUrl}`,
+      );
+      return { productUrl: searchUrl, urlSource: 'search' };
+    }
+
+    // No handle and no SKU — caller must reject this product
+    return { productUrl: '', urlSource: 'rejected' };
   }
 
   // ── Pickers ───────────────────────────────────────────────────────────────────
 
-  private _pickSoftCta(phone?: string): string {
-    return this._pickFromPool(SOFT_CTAS, this._softCtaHistory, phone);
+  private _pickHook(productClass: ProductClass, phone?: string): string {
+    const pool = HOOK_POOLS[productClass];
+    return this._pickFromPool(pool as readonly string[], this._hookHistory, phone);
+  }
+
+  private _validateHook(hook: string, productName: string, sku: string): string[] {
+    const f: string[] = [];
+    if (!hook || hook.trim() === '') return ['missing_hook'];
+
+    if (hook.length > 80) f.push('hook_too_long');
+    if (/\b(hi|hello|dear|greetings|namaste)\b/i.test(hook)) f.push('hook_contains_greeting');
+    if (/https?:\/\/|www\./i.test(hook)) f.push('hook_contains_url');
+    if (/\+?\d{10,}/.test(hook)) f.push('hook_contains_phone');
+    if (/\p{Emoji_Presentation}/u.test(hook)) f.push('hook_contains_emoji');
+    if (/\b(hesh|heshstore)\b/i.test(hook)) f.push('hook_contains_company');
+
+    const hookLower = hook.toLowerCase();
+    if (sku && sku.length > 2 && hookLower.includes(sku.toLowerCase())) {
+      f.push('hook_contains_product');
+    }
+    if (productName && productName !== 'this product' && productName.length > 6) {
+      if (hookLower.includes(productName.toLowerCase())) f.push('hook_contains_product');
+    }
+
+    if (hook.trim().length < 40) f.push('weak_hook');
+
+    return f;
   }
 
   private _pickRandom<T>(arr: T[]): T {

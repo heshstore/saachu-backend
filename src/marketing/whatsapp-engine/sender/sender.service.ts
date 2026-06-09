@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { Interval } from '@nestjs/schedule';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
 import { WhatsappMessageLog } from '../entities/whatsapp-message-log.entity';
+import { MarketingAudience } from '../entities/marketing-audience.entity';
 import { CTAType, MessageType, QueueStatus, TemplateMode } from '../entities/enums';
 import { QueueService } from '../queue/queue.service';
 import { TemplatesService } from '../templates/templates.service';
@@ -16,6 +17,7 @@ import { AudienceService } from '../audience/audience.service';
 import { PromotionProductSelectionService } from '../promotion/promotion-product-selection.service';
 import { PromotionAiTemplateService } from '../promotion/promotion-ai-template.service';
 import { CampaignsService } from '../campaigns/campaigns.service';
+import { buildCta } from '../shared/cta-builder';
 import { WhatsappNumber } from '../entities/whatsapp-number.entity';
 import { getActiveLimits } from '../shared/number-limits';
 
@@ -23,6 +25,10 @@ const CONTENT_FINGERPRINT_DAYS       = 3;
 // Test-mode campaigns use a 1-hour window so the same template can be resent quickly
 // during QA. Production behavior (3 days) is unaffected.
 const CONTENT_FINGERPRINT_HOURS_TEST = 1;
+
+// AI promo hardening constants
+const MAX_PRODUCT_ATTEMPTS           = 2;   // max distinct products tried per send before giving up
+const PRODUCT_CUSTOMER_COOLDOWN_DAYS = 7;   // same customer + same SKU cooldown window
 
 // Human-like inter-send delay: 30s–5min; 10% chance of 15–30min idle window
 const MIN_DELAY_MS  = 30_000;
@@ -63,6 +69,8 @@ export class SenderService implements OnModuleInit {
     private queueRepo: Repository<WhatsappMessageQueue>,
     @InjectRepository(WhatsappMessageLog)
     private logRepo: Repository<WhatsappMessageLog>,
+    @InjectRepository(MarketingAudience)
+    private audienceRepo: Repository<MarketingAudience>,
     private readonly queueService: QueueService,
     private readonly templatesService: TemplatesService,
     private readonly timingAi: TimingAiService,
@@ -323,8 +331,15 @@ export class SenderService implements OnModuleInit {
     let logRow: WhatsappMessageLog | null = null;
 
     try {
-      // ── Gate: TEST_ONLY ─────────────────────────────────────────────────────
-      if (process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true') {
+      // ── Gate: campaign test_mode — validation campaigns only send to test contacts ─
+      // Driven by campaign.test_mode, NOT the env var. This decouples validation mode
+      // from autonomous mode: autonomous campaigns have test_mode=false and send to all
+      // eligible promotional contacts; validation campaigns have test_mode=true and are
+      // restricted to is_test_contact=true phones.
+      const campaignTestMode = item.campaign_id
+        ? (await this.campaignsService.findOne(item.campaign_id).catch(() => null))?.test_mode === true
+        : false;
+      if (campaignTestMode) {
         const testPhones = await this.audienceService.getTestPhones();
         const normalizedQueue      = normalizePhone(item.customer_phone);
         const normalizedTestPhones = testPhones.map(normalizePhone);
@@ -338,10 +353,10 @@ export class SenderService implements OnModuleInit {
         if (!matched) {
           this.logger.warn(
             `[MKT_SKIP_DECISION] queue_id=${item.id} phone=${item.customer_phone} ` +
-            `rule=TEST_ONLY reason="not a test contact" condition_values="testPhones=${JSON.stringify(testPhones)}"`,
+            `rule=CAMPAIGN_TEST_MODE reason="not a test contact" condition_values="campaign_id=${item.campaign_id} testPhones=${JSON.stringify(testPhones)}"`,
           );
-          await this.queueService.markSkipped(item.id, 'TEST_ONLY mode: not a test contact');
-          this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=skipped attempts=${item.attempt_count ?? 0} failure_reason="TEST_ONLY: not a test contact"`);
+          await this.queueService.markSkipped(item.id, 'Campaign test_mode: not a test contact');
+          this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=skipped attempts=${item.attempt_count ?? 0} failure_reason="CAMPAIGN_TEST_MODE: not a test contact"`);
           return;
         }
       }
@@ -494,8 +509,8 @@ export class SenderService implements OnModuleInit {
         }
       }
 
-      // ── Resolve body ─────────────────────────────────────────────────────────
-      const body = await this._resolveBody(item, number?.phone ?? undefined, number?.id ?? undefined);
+      // ── Resolve body + image ─────────────────────────────────────────────────
+      const { body, imageUrl: resolvedImageUrl } = await this._resolveBody(item, number?.phone ?? undefined, number?.id ?? undefined);
       if (body === null) {
         this.logger.warn(
           `[MKT_SKIP_DECISION] queue_id=${item.id} phone=${item.customer_phone} ` +
@@ -507,6 +522,12 @@ export class SenderService implements OnModuleInit {
         return;
       }
 
+      if (resolvedImageUrl) {
+        this.logger.log(`[PROMOTION_IMAGE_ATTACHED] queue_id=${item.id} phone=${item.customer_phone} image_url=${resolvedImageUrl}`);
+      } else {
+        this.logger.log(`[PROMOTION_IMAGE_MISSING] queue_id=${item.id} phone=${item.customer_phone} — sending text-only`);
+      }
+
       // ── All gates passed — write log row BEFORE any send attempt ─────────────
       this.logger.log(`[MKT_LOG_CREATE_START] queue_id=${item.id} phone=${item.customer_phone} campaign_id=${item.campaign_id ?? 'none'}`);
       logRow = await this.logRepo.save(this.logRepo.create({
@@ -514,8 +535,9 @@ export class SenderService implements OnModuleInit {
         queue_id: item.id,
         number_id: number?.id ?? undefined,
         customer_phone: item.customer_phone,
-        message_type: MessageType.TEXT,
+        message_type: resolvedImageUrl ? MessageType.IMAGE : MessageType.TEXT,
         message_body: body,
+        media_url: resolvedImageUrl ?? undefined,
         status: QueueStatus.PROCESSING,
       }));
       this.logger.log(
@@ -551,7 +573,8 @@ export class SenderService implements OnModuleInit {
       if (!number?.id) throw new Error('Queue item has no eligible sender number — cannot send');
 
       // ── Actual WA send ───────────────────────────────────────────────────────
-      const imageUrl = (item.message_payload as Record<string, unknown>)?.['product_image'] as string | null | undefined;
+      // resolvedImageUrl comes from _resolveBody — never from stale in-memory payload
+      const imageUrl = resolvedImageUrl ?? null;
       this.logger.log(
         `[MKT_BEFORE_WA_SEND] id=${item.id} phone=${item.customer_phone} ` +
         `number_id=${number.id} body_length=${body.length} has_image=${!!imageUrl} body_preview="${body.slice(0, 60)}"`,
@@ -559,11 +582,15 @@ export class SenderService implements OnModuleInit {
 
       let waResult: any;
       let sentAsImage = false;
+      let imageFetchMs: number | null = null;
+      let imageSizeKb: number | null = null;
       try {
         if (imageUrl) {
           const imgResult = await this.whatsAppService.sendViaNumberWithImage(number.id, item.customer_phone, imageUrl, body);
-          waResult    = imgResult.result;
-          sentAsImage = imgResult.sentAsImage;
+          waResult     = imgResult.result;
+          sentAsImage  = imgResult.sentAsImage;
+          imageFetchMs = imgResult.imageFetchMs ?? null;
+          imageSizeKb  = imgResult.imageSizeKb  ?? null;
         } else {
           waResult = await this.whatsAppService.sendViaNumber(number.id, item.customer_phone, body);
         }
@@ -612,6 +639,21 @@ export class SenderService implements OnModuleInit {
           this.logger.log(`[MKT_MARK_SKIPPED] id=${item.id} phone=${item.customer_phone} reason="${errMsg}"`);
           await this.queueService.markSkipped(item.id, errMsg);
           this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=skipped attempts=${item.attempt_count ?? 0} failure_reason="${errMsg}"`);
+
+          // Mark audience contact as NOT_REGISTERED so future campaigns skip this number automatically
+          if (errMsg.includes('INVALID_WA_NUMBER')) {
+            this.audienceRepo.createQueryBuilder()
+              .update(MarketingAudience)
+              .set({ wa_registration_status: 'NOT_REGISTERED', last_validation_at: new Date() })
+              .where('phone = :phone', { phone: item.customer_phone })
+              .execute()
+              .catch((e: any) => this.logger.warn(
+                `[MKT_AUDIENCE_WA_STATUS_UPDATE_FAIL] phone=${item.customer_phone} error="${e?.message}"`,
+              ));
+            this.logger.log(
+              `[MKT_AUDIENCE_NOT_REGISTERED] phone=${item.customer_phone} — wa_registration_status=NOT_REGISTERED`,
+            );
+          }
         } else {
           this.logger.log(`[MKT_MARK_FAILED] id=${item.id} phone=${item.customer_phone} reason="${errMsg}"`);
           await this.queueService.markFailed(item.id, errMsg);
@@ -653,6 +695,15 @@ export class SenderService implements OnModuleInit {
       this.logger.log(
         `[MKT_MARK_SENT] id=${item.id} phone=${item.customer_phone} wa_message_id=${waMessageId}`,
       );
+
+      await this.queueService.patchPayload(item.id, {
+        image_analytics: {
+          sentAsImage,
+          imageAvailable: !!imageUrl,
+          imageFetchMs,
+          imageSizeKb,
+        },
+      }).catch(() => {});
       this.logger.log(
         `[MKT_SEND_SUCCESS] phone=${item.customer_phone} template_id=${item.template_id ?? 'none'} number_id=${number?.id ?? 'none'}`,
       );
@@ -695,79 +746,29 @@ export class SenderService implements OnModuleInit {
 
   private static readonly STORE_URL = 'https://www.heshstore.in';
 
-  private async _resolveBody(item: WhatsappMessageQueue, senderPhone?: string, senderNumberId?: string): Promise<string | null> {
+  private async _resolveBody(
+    item: WhatsappMessageQueue,
+    senderPhone?: string,
+    senderNumberId?: string,
+  ): Promise<{ body: string | null; imageUrl: string | null }> {
     // ── Payload-only path (no template) ─────────────────────────────────────
     if (!item.template_id) {
       const rawPayload = item.message_payload as Record<string, unknown> | null;
-      if (rawPayload?.['body']) return String(rawPayload['body']);
-      return null;
+      if (rawPayload?.['body']) {
+        return {
+          body: String(rawPayload['body']),
+          imageUrl: (rawPayload['product_image'] as string | null | undefined) ?? null,
+        };
+      }
+      return { body: null, imageUrl: null };
     }
 
     const template = await this.templatesService.findOne(item.template_id);
     const payload = (item.message_payload ?? {}) as Record<string, string>;
 
-    // ── AI path — full message generated by PromotionAiTemplateService ───────
+    // ── AI path — image-first, quality-gated, multi-product loop ────────────
     if (template.template_mode === TemplateMode.AI) {
-      const telecallerNumberId = senderNumberId ?? item.actual_sender_number_id ?? item.number_id ?? null;
-      if (!telecallerNumberId) {
-        this.logger.warn(`[MKT_AI_TEMPLATE_SKIP] queue_id=${item.id} reason=no_telecaller_number_id`);
-        return null;
-      }
-
-      const product = await this.promotionProductService.getEligibleProductForTelecaller(
-        telecallerNumberId,
-        { campaignId: item.campaign_id ?? undefined },
-      );
-      if (!product) {
-        this.logger.warn(`[MKT_AI_TEMPLATE_SKIP] queue_id=${item.id} reason=no_eligible_product telecaller=${telecallerNumberId}`);
-        return null;
-      }
-
-      // Resolve active offer from template — DB-sourced, date-bounded, never AI-generated
-      let activeOffer: { title?: string | null; text: string } | undefined;
-      if (template.offer_enabled && template.offer_text) {
-        const now = new Date();
-        const startOk = !template.offer_start_date || now >= new Date(template.offer_start_date);
-        const endOk   = !template.offer_end_date   || now <= new Date(template.offer_end_date);
-        if (startOk && endOk) {
-          activeOffer = { title: template.offer_title, text: template.offer_text };
-        }
-      }
-
-      const result = await this.promotionAiService.generate({
-        telecaller_number_id: telecallerNumberId,
-        telecaller_phone:     senderPhone ?? '',
-        product,
-        template_id:          item.template_id ?? undefined,
-        customer: {
-          name:          payload.name ?? '',
-          city:          payload.city ?? '',
-          business_type: payload.business_type ?? '',
-          phone:         item.customer_phone,
-        },
-        campaign_id: item.campaign_id ?? undefined,
-        offer:       activeOffer,
-      });
-
-      // Record rotation so this telecaller doesn't repeat the same product within 24h
-      await this.promotionProductService.recordProductSent(
-        telecallerNumberId,
-        product,
-        item.campaign_id ?? undefined,
-      );
-
-      // Persist AI metadata into queue payload for analytics / audit
-      await this.queueService.patchPayload(item.id, {
-        generated_message: result.message,
-        product_sku:       product.sku,
-        product_id:        product.id,
-        product_image:     result.imageUrl ?? null,
-        product_url:       result.productUrl,
-        ai_metadata:       result.metadata,
-        offer_applied:     !!activeOffer,
-      });
-
-      return result.message;
+      return this._resolveAiBody(item, template, payload, senderPhone, senderNumberId);
     }
 
     // Base flat context for {{name}}, {{city}}, etc.
@@ -805,20 +806,195 @@ export class SenderService implements OnModuleInit {
     );
 
     // ── Step 3: append CTA ───────────────────────────────────────────────────
-    if (template.cta_type && template.cta_type !== CTAType.NONE && template.cta_label) {
-      let ctaValue: string;
-      if (template.cta_type === CTAType.PHONE) {
-        // PHONE CTA — use the actual sender number assigned to this queue item
-        ctaValue = senderPhone ?? payload.sender_phone ?? template.cta_url ?? '';
-      } else {
-        // URL CTA — product link > template cta_url > store fallback
-        ctaValue = payload.product_link ?? template.cta_url ?? SenderService.STORE_URL;
+    if (template.cta_type && template.cta_type !== CTAType.NONE) {
+      const ctaPhone = senderPhone ?? payload.sender_phone ?? template.cta_url ?? '';
+      const ctaUrl   = payload.product_link ?? template.cta_url ?? SenderService.STORE_URL;
+      const ctaLabel = template.cta_label ?? undefined;
+
+      let ctaBlock: string | null = null;
+      if (template.cta_type === CTAType.PHONE && ctaPhone) {
+        ctaBlock = buildCta({ type: 'call', phone: ctaPhone, callLabel: ctaLabel });
+      } else if (template.cta_type === CTAType.URL && ctaUrl) {
+        ctaBlock = buildCta({ type: 'product', url: ctaUrl, viewLabel: ctaLabel });
+      } else if (template.cta_label) {
+        ctaBlock = template.cta_label;
       }
-      body = ctaValue
-        ? `${body}\n\n${template.cta_label}: ${ctaValue}`
-        : `${body}\n\n${template.cta_label}`;
+
+      if (ctaBlock) body = `${body}\n\n${ctaBlock}`;
     }
 
-    return body.trim() || null;
+    const trimmed = body.trim() || null;
+    const nonAiImageUrl = (payload.product_image as string | undefined) ?? null;
+    return { body: trimmed, imageUrl: nonAiImageUrl };
+  }
+
+  // ── AI body — image-first, quality-gated, multi-product loop ─────────────────
+  // Tries up to MAX_PRODUCT_ATTEMPTS distinct products per queue item.
+  // A product is rejected when it has no image OR content quality stays below threshold.
+  // Only the product that produces a passing result is recorded in the rotation log.
+
+  private async _resolveAiBody(
+    item: WhatsappMessageQueue,
+    template: any,
+    payload: Record<string, string>,
+    senderPhone: string | undefined,
+    senderNumberId: string | undefined,
+  ): Promise<{ body: string | null; imageUrl: string | null }> {
+    const telecallerNumberId = senderNumberId ?? item.actual_sender_number_id ?? item.number_id ?? null;
+    if (!telecallerNumberId) {
+      this.logger.warn(`[MKT_AI_TEMPLATE_SKIP] queue_id=${item.id} reason=no_telecaller_number_id`);
+      return { body: null, imageUrl: null };
+    }
+
+    // Resolve active offer once — same for all product attempts
+    let activeOffer: { title?: string | null; text: string } | undefined;
+    if (template.offer_enabled && template.offer_text) {
+      const now = new Date();
+      const startOk = !template.offer_start_date || now >= new Date(template.offer_start_date);
+      const endOk   = !template.offer_end_date   || now <= new Date(template.offer_end_date);
+      if (startOk && endOk) activeOffer = { title: template.offer_title, text: template.offer_text };
+    }
+
+    const triedSkus: string[] = [];
+
+    for (let productAttempt = 0; productAttempt < MAX_PRODUCT_ATTEMPTS; productAttempt++) {
+      const product = await this.promotionProductService.getEligibleProductForTelecaller(
+        telecallerNumberId,
+        { campaignId: item.campaign_id ?? undefined, excludeSkus: triedSkus },
+      );
+
+      if (!product) {
+        this.logger.warn(
+          `[MKT_AI_TEMPLATE_SKIP] queue_id=${item.id} attempt=${productAttempt + 1} ` +
+          `reason=no_eligible_product telecaller=${telecallerNumberId}`,
+        );
+        break;
+      }
+
+      triedSkus.push(product.sku ?? '');
+
+      // ── PART 5: customer-product cooldown ────────────────────────────────────
+      const onCooldown = await this._isCustomerProductCooldownActive(
+        item.customer_phone,
+        product.sku ?? '',
+        PRODUCT_CUSTOMER_COOLDOWN_DAYS,
+      );
+      if (onCooldown) {
+        this.logger.log(
+          `[PROMOTION_PRODUCT_SKIPPED] queue_id=${item.id} sku=${product.sku} ` +
+          `reason=customer_product_cooldown days=${PRODUCT_CUSTOMER_COOLDOWN_DAYS} phone=${item.customer_phone}`,
+        );
+        continue;
+      }
+
+      // ── Generate ──────────────────────────────────────────────────────────────
+      const result = await this.promotionAiService.generate({
+        telecaller_number_id: telecallerNumberId,
+        telecaller_phone:     senderPhone ?? '',
+        product,
+        template_id:          item.template_id ?? undefined,
+        customer: {
+          name:          payload.name ?? '',
+          city:          payload.city ?? '',
+          business_type: payload.business_type ?? '',
+          phone:         item.customer_phone,
+        },
+        campaign_id: item.campaign_id ?? undefined,
+        offer:       activeOffer,
+      });
+
+      // ── PART 1: image-first enforcement ──────────────────────────────────────
+      if (!result.imageUrl) {
+        this.logger.warn(
+          `[PROMOTION_IMAGE_REQUIRED] queue_id=${item.id} sku=${product.sku} attempt=${productAttempt + 1} ` +
+          `— AI promo requires product image; none found`,
+        );
+        this.logger.warn(
+          `[PROMOTION_PRODUCT_SKIPPED] queue_id=${item.id} sku=${product.sku} reason=no_image`,
+        );
+        continue;
+      }
+
+      // ── PART 3: hard quality gate ─────────────────────────────────────────────
+      if (!result.qualityPassed) {
+        this.logger.warn(
+          `[PROMOTION_WEAK_CONTENT] queue_id=${item.id} sku=${product.sku} attempt=${productAttempt + 1} ` +
+          `score=${result.quality.finalScore} grade=${result.quality.grade} attempts_used=${result.quality.attemptsUsed}`,
+        );
+        this.logger.warn(
+          `[PROMOTION_PRODUCT_SKIPPED] queue_id=${item.id} sku=${product.sku} ` +
+          `reason=weak_content score=${result.quality.finalScore}`,
+        );
+        continue;
+      }
+
+      // ── PART 4: URL source safety gate ───────────────────────────────────────
+      // Products with no Shopify handle and no SKU are rejected at generation time
+      // (urlSource='rejected'). Double-check here before writing to the queue so a
+      // future code path change cannot accidentally slip a blank URL through.
+      if (result.metadata.urlSource === 'rejected') {
+        this.logger.warn(
+          `[PROMOTION_PRODUCT_SKIPPED] queue_id=${item.id} sku=${product.sku} ` +
+          `reason=url_rejected url_source=rejected`,
+        );
+        continue;
+      }
+
+      // ── All gates passed — record rotation + persist payload ─────────────────
+      await this.promotionProductService.recordProductSent(
+        telecallerNumberId,
+        product,
+        item.campaign_id ?? undefined,
+      );
+
+      await this.queueService.patchPayload(item.id, {
+        generated_message: result.message,
+        product_sku:       product.sku,
+        product_id:        product.id,
+        product_image:     result.imageUrl,
+        product_url:       result.productUrl,
+        url_source:        result.metadata.urlSource,
+        ai_metadata:       result.metadata,
+        quality:           result.quality,
+        offer_applied:     !!activeOffer,
+      });
+
+      this.logger.log(
+        `[MKT_AI_TEMPLATE_OK] queue_id=${item.id} sku=${product.sku} ` +
+        `score=${result.quality.finalScore} product_attempt=${productAttempt + 1} ` +
+        `url_source=${result.metadata.urlSource}`,
+      );
+
+      return { body: result.message, imageUrl: result.imageUrl };
+    }
+
+    // All product attempts exhausted without a passing result
+    this.logger.warn(
+      `[MKT_AI_TEMPLATE_SKIP] queue_id=${item.id} reason=all_products_rejected ` +
+      `tried_skus=${JSON.stringify(triedSkus)} max_attempts=${MAX_PRODUCT_ATTEMPTS}`,
+    );
+    return { body: null, imageUrl: null };
+  }
+
+  // ── PART 5: customer-product cooldown query ───────────────────────────────────
+  // Prevents the same customer from receiving the same SKU within cooldownDays.
+  // Joins message_logs → message_queue on queue_id to read the JSONB product_sku.
+
+  private async _isCustomerProductCooldownActive(
+    customerPhone: string,
+    sku: string,
+    cooldownDays: number,
+  ): Promise<boolean> {
+    if (!sku) return false;
+    const cutoff = new Date(Date.now() - cooldownDays * 24 * 3_600_000);
+    const count = await this.logRepo
+      .createQueryBuilder('l')
+      .innerJoin('whatsapp_message_queue', 'q', 'l.queue_id = q.id')
+      .where('l.customer_phone = :phone', { phone: customerPhone })
+      .andWhere('l.sent_at >= :cutoff', { cutoff })
+      .andWhere(`q.message_payload->>'product_sku' = :sku`, { sku })
+      .andWhere('l.status IN (:...statuses)', { statuses: ['sent', 'delivered', 'read', 'replied'] })
+      .getCount();
+    return count > 0;
   }
 }

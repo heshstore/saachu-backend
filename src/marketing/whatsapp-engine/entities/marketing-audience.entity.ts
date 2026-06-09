@@ -95,6 +95,14 @@ export class MarketingAudience {
   })
   reply_status: ReplyStatus;
 
+  // Set to 'NOT_REGISTERED' when a send attempt returns INVALID_WA_NUMBER.
+  // Future campaign builders automatically exclude these contacts via findEligible().
+  @Column({ type: 'varchar', nullable: true })
+  wa_registration_status: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  last_validation_at: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   created_at: Date;
 

@@ -35,10 +35,8 @@ export class AnalyticsService {
     //    The date guard prevents pre-campaign autonomous-engine sends (which use null campaign_id
     //    for templates not linked to a running campaign) from being incorrectly attributed to this
     //    campaign just because they share the same template_id.
-    const rows = await this.ds.query<StatusRow[]>(`
-      SELECT l.status, COUNT(*)::text AS count
-      FROM whatsapp_message_logs l
-      WHERE l.campaign_id = $1
+    const campaignScope = `
+      (l.campaign_id = $1
          OR l.queue_id IN (
            SELECT q.id
            FROM whatsapp_message_queue q
@@ -52,15 +50,28 @@ export class AnalyticsService {
                   WHERE c.id = $1 AND c.template_id IS NOT NULL
                 )
               )
-         )
-      GROUP BY l.status
-    `, [campaignId]);
+         ))`;
+
+    const [rows, naRows] = await Promise.all([
+      this.ds.query<StatusRow[]>(
+        `SELECT l.status, COUNT(*)::text AS count FROM whatsapp_message_logs l WHERE ${campaignScope} GROUP BY l.status`,
+        [campaignId],
+      ),
+      this.ds.query<{ count: string }[]>(
+        `SELECT COUNT(*)::text AS count FROM whatsapp_message_logs l WHERE ${campaignScope} AND l.status = 'skipped' AND l.message_body ILIKE '%INVALID_WA_NUMBER%'`,
+        [campaignId],
+      ),
+    ]);
 
     const stats = this._buildStats(rows);
+    const notOnWhatsApp = parseInt(naRows[0]?.count ?? '0', 10);
+    stats.not_on_whatsapp = notOnWhatsApp;
+    stats.skipped = Math.max(0, (stats.skipped ?? 0) - notOnWhatsApp);
+
     this.logger.log(
       `[MKT_CAMPAIGN_STATS_QUERY] campaign_id=${campaignId} ` +
       `sent=${stats.sent} read=${stats.read} delivered=${stats.delivered} ` +
-      `failed=${stats.failed} skipped=${stats.skipped ?? 0} total=${stats.total}`,
+      `failed=${stats.failed} skipped=${stats.skipped} not_on_whatsapp=${notOnWhatsApp} total=${stats.total}`,
     );
     return stats;
   }
@@ -107,7 +118,8 @@ export class AnalyticsService {
     this.logger.log(`[MKT_DASHBOARD] endpoint=engine/dashboard starting stats fetch`);
 
     let active_numbers = 0, queue_pending = 0, sent_today = 0,
-        delivered_today = 0, read_today = 0, replied_today = 0, crm_leads_today = 0;
+        delivered_today = 0, read_today = 0, replied_today = 0, crm_leads_today = 0,
+        not_on_whatsapp_today = 0, failed_today = 0;
 
     try {
       // Use sent_at for ALL date filters — it is always set on log rows and avoids
@@ -122,6 +134,8 @@ export class AnalyticsService {
         delivered_today,
         read_today,
         replied_today,
+        not_on_whatsapp_today,
+        failed_today,
       ] = await Promise.all([
         this.numberRepo.count({ where: { is_active: true } }),
         this.queueRepo.count({ where: { status: QueueStatus.PENDING } }),
@@ -137,6 +151,15 @@ export class AnalyticsService {
         this.repo.createQueryBuilder('l')
           .where('l.status = :s', { s: QueueStatus.REPLIED })
           .andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
+        // Not On WhatsApp: skipped because INVALID_WA_NUMBER — use created_at (sent_at is null for skips)
+        this.repo.createQueryBuilder('l')
+          .where('l.status = :s', { s: QueueStatus.SKIPPED })
+          .andWhere("l.message_body ILIKE :pattern", { pattern: '%INVALID_WA_NUMBER%' })
+          .andWhere('l.created_at >= :mid', { mid: todayMidnight }).getCount(),
+        // Failed today — use created_at (sent_at is null for failures)
+        this.repo.createQueryBuilder('l')
+          .where('l.status = :s', { s: QueueStatus.FAILED })
+          .andWhere('l.created_at >= :mid', { mid: todayMidnight }).getCount(),
       ]);
     } catch (err: any) {
       this.logger.error(`[MKT_DASHBOARD] endpoint=engine/dashboard fail=stats_query reason=${err?.message}`);
@@ -157,10 +180,14 @@ export class AnalyticsService {
       `[MKT_DASHBOARD] endpoint=engine/dashboard success=true ` +
       `active_numbers=${active_numbers} queue_pending=${queue_pending} sent_today=${sent_today} ` +
       `delivered_today=${delivered_today} read_today=${read_today} replied_today=${replied_today} ` +
-      `crm_leads_today=${crm_leads_today}`,
+      `not_on_whatsapp_today=${not_on_whatsapp_today} failed_today=${failed_today} crm_leads_today=${crm_leads_today}`,
     );
 
-    return { active_numbers, queue_pending, sent_today, delivered_today, read_today, replied_today, crm_leads_today };
+    return {
+      active_numbers, queue_pending, sent_today, delivered_today,
+      read_today, replied_today, crm_leads_today,
+      not_on_whatsapp_today, failed_today,
+    };
   }
 
   // Per-template reply/read performance from last 30 days
@@ -230,7 +257,7 @@ export class AnalyticsService {
     const todayMidnight = new Date();
     todayMidnight.setHours(0, 0, 0, 0);
 
-    const [funnelRows, audienceStats, numbers, templatePerf] = await Promise.all([
+    const [funnelRows, naCountRows, audienceStats, numbers, templatePerf] = await Promise.all([
       this.repo
         .createQueryBuilder('l')
         .select('l.status', 'status')
@@ -238,6 +265,12 @@ export class AnalyticsService {
         .where('l.sent_at >= :since', { since: todayMidnight })
         .groupBy('l.status')
         .getRawMany<StatusRow>(),
+      // Not On WhatsApp count uses created_at (sent_at is null for skipped rows)
+      this.repo.createQueryBuilder('l')
+        .where('l.status = :s', { s: QueueStatus.SKIPPED })
+        .andWhere("l.message_body ILIKE :pattern", { pattern: '%INVALID_WA_NUMBER%' })
+        .andWhere('l.created_at >= :since', { since: todayMidnight })
+        .getCount(),
       this.ds.query(`
         SELECT
           COUNT(*)                                                                       AS total,
@@ -252,6 +285,7 @@ export class AnalyticsService {
 
     const funnel: Record<string, number> = {};
     for (const r of funnelRows) funnel[r.status] = parseInt(r.count, 10);
+    const notOnWhatsAppToday = naCountRows;
 
     let crm_leads_today = 0;
     try {
@@ -273,7 +307,8 @@ export class AnalyticsService {
         read: funnel['read'] ?? 0,
         replied: funnel['replied'] ?? 0,
         failed: funnel['failed'] ?? 0,
-        skipped: funnel['skipped'] ?? 0,
+        skipped: Math.max(0, (funnel['skipped'] ?? 0) - notOnWhatsAppToday),
+        not_on_whatsapp: notOnWhatsAppToday,
       },
       audience: {
         total:       parseInt(ar.total       ?? '0', 10),
@@ -400,8 +435,9 @@ export class AnalyticsService {
       delivered,
       read,
       replied,
-      failed:  raw['failed']  ?? 0,
-      skipped: raw['skipped'] ?? 0,
+      failed:           raw['failed']  ?? 0,
+      skipped:          raw['skipped'] ?? 0,
+      not_on_whatsapp:  0,  // populated by callers that run the INVALID_WA_NUMBER count query
       total,
     };
   }

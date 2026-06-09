@@ -3,6 +3,7 @@ import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource, DeepPartial } from 'typeorm';
 import { MarketingAudience } from '../entities/marketing-audience.entity';
 import { ReplyStatus } from '../entities/enums';
+import { AudienceAiService } from '../ai/audience-ai.service';
 
 @Injectable()
 export class AudienceService {
@@ -11,6 +12,7 @@ export class AudienceService {
     private repo: Repository<MarketingAudience>,
     @InjectDataSource()
     private readonly ds: DataSource,
+    private readonly audienceAi: AudienceAiService,
   ) {}
 
   findAll(): Promise<MarketingAudience[]> {
@@ -111,11 +113,30 @@ export class AudienceService {
       });
 
       if (safe.length) {
+        // Rule 5: compute quality score at import time so new contacts are
+        // immediately eligible without waiting for the 7AM score cron.
+        // Score is profile-based only (no log signals available at import time).
+        // Existing contacts keep their current score — ON CONFLICT only updates
+        // profile fields, not quality_score.
+        const safeWithScores = safe.map(r => ({
+          ...r,
+          quality_score: this.audienceAi._computeScore({
+            name: r.name ?? null,
+            city: r.city ?? null,
+            business_type: r.business_type ?? null,
+            customer_id: r.customer_id ?? null,
+            reply_status: r.reply_status ?? ReplyStatus.NONE,
+            last_contacted_at: null,
+            quality_score: 0,
+            fatigue_score: 0,
+          } as MarketingAudience),
+        }));
+
         await this.repo
           .createQueryBuilder()
           .insert()
           .into(MarketingAudience)
-          .values(safe as any)
+          .values(safeWithScores as any)
           .orUpdate(
             ['name', 'customer_name', 'company', 'mobile_2', 'email',
              'city', 'state', 'country', 'address', 'gst',
@@ -125,6 +146,21 @@ export class AudienceService {
           .execute();
         updated = safe.filter(r => existingMap.has(r.phone)).length;
         created += safe.length - updated;
+
+        // Backfill: existing contacts whose quality_score is still 0 (imported before
+        // score computation was added) are repaired with the profile-based score from
+        // this batch. New inserts already received the correct score from the INSERT path;
+        // the WHERE quality_score = 0 guard prevents overwriting any legitimately scored row.
+        await this.ds.query(
+          `UPDATE marketing_audience ma
+           SET quality_score = v.score
+           FROM (SELECT unnest($1::text[]) AS phone, unnest($2::numeric[]) AS score) v
+           WHERE ma.phone = v.phone AND ma.quality_score = 0`,
+          [
+            safeWithScores.map(r => r.phone),
+            safeWithScores.map(r => r.quality_score),
+          ],
+        );
       }
     }
 
@@ -163,7 +199,9 @@ export class AudienceService {
     const qb = this.repo
       .createQueryBuilder('a')
       .where('a.opt_out = false')
-      .andWhere('a.is_whatsapp_valid = true');
+      .andWhere('a.is_whatsapp_valid = true')
+      // Exclude confirmed-unregistered numbers — avoids wasting sends on invalid contacts
+      .andWhere('(a.wa_registration_status IS NULL OR a.wa_registration_status != :notReg)', { notReg: 'NOT_REGISTERED' });
 
     if (testOnly) {
       // Validation Mode: only safety filters apply — test contacts bypass cooldown + quality score

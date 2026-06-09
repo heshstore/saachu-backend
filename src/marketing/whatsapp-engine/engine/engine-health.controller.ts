@@ -9,6 +9,7 @@ import { ValidateService } from '../validate/validate.service';
 import { PilotMonitoringService } from './pilot-monitoring.service';
 import { AiDashboardService } from './ai-dashboard.service';
 import { AutonomousEngineService } from './autonomous-engine.service';
+import { PromotionUrlAuditService } from '../promotion/promotion-url-audit.service';
 
 @Controller('marketing/whatsapp-engine')
 export class EngineHealthController {
@@ -23,7 +24,22 @@ export class EngineHealthController {
     private readonly pilotMonitoring: PilotMonitoringService,
     private readonly aiDashboard: AiDashboardService,
     private readonly autonomousEngine: AutonomousEngineService,
+    private readonly urlAudit: PromotionUrlAuditService,
   ) {}
+
+  // ── Catalog URL audit ─────────────────────────────────────────────────────
+
+  /**
+   * Scan the active product catalog and report URL coverage.
+   * Shows: handle coverage %, search fallback count, rejected (no-link) products,
+   * duplicate handles, and up to 10 examples of each failure type.
+   *
+   * GET /marketing/whatsapp-engine/catalog/url-audit
+   */
+  @Get('catalog/url-audit')
+  getCatalogUrlAudit() {
+    return this.urlAudit.runAudit();
+  }
 
   // ── AI Promotion Dashboard ────────────────────────────────────────────────
 

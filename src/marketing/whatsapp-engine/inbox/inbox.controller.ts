@@ -5,6 +5,7 @@ import {
   Patch,
   Param,
   Body,
+  Query,
 } from '@nestjs/common';
 import { InboxService } from './inbox.service';
 
@@ -42,5 +43,11 @@ export class InboxController {
   @Post(':id/reply')
   sendReply(@Param('id') id: string, @Body() body: { message: string }) {
     return this.inboxService.sendReply(id, body.message);
+  }
+
+  // Product search — telecaller use only, Shopify catalog
+  @Get('products')
+  searchProducts(@Query('q') q: string) {
+    return this.inboxService.searchProducts(q || '');
   }
 }

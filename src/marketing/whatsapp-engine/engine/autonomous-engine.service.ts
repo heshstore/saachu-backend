@@ -114,10 +114,14 @@ export class AutonomousEngineService implements OnModuleInit {
 
       this.logger.log(`[Engine] Building daily queue — autonomous campaigns: ${numberToCampaign.size}`);
       const result = await this._buildQueue(numberToCampaign);
-      this.logger.log(`[Engine] Daily queue built: ${result.queued} items across ${result.numbers} numbers`);
+      this.logger.log(
+        `[Engine] Daily queue built: queued=${result.queued} connected=${result.connected_numbers} ` +
+        `capacity=${result.daily_capacity} remaining=${result.remaining_capacity} ` +
+        `eligible=${result.eligible_contacts} blocked=${result.blocked}`,
+      );
       await this.auditService.log({
         event: AuditEvent.QUEUE_CREATED,
-        reason: `Daily queue build: ${result.queued} items across ${result.numbers} numbers`,
+        reason: `Daily queue build: ${result.queued} items across ${result.connected_numbers} numbers`,
         metadata: result,
       });
     } finally {
@@ -136,12 +140,15 @@ export class AutonomousEngineService implements OnModuleInit {
     today.setHours(0, 0, 0, 0);
 
     const allNumbers = await this.numbersService.findAll();
-    const sendableNumbers = allNumbers.filter(
-      (n) => n.is_active && n.status === WhatsAppNumberStatus.ACTIVE && this.whatsAppService.isConnected(n.id),
+    // Rule 6: create campaigns for ALL active numbers, not just currently-connected ones.
+    // A number that is temporarily disconnected at 8:30 AM should still get a campaign
+    // so it can be filled when it reconnects (via fillRemainingCapacity).
+    const activeNumbers = allNumbers.filter(
+      (n) => n.is_active && n.status === WhatsAppNumberStatus.ACTIVE,
     );
 
-    if (!sendableNumbers.length) {
-      this.logger.warn('[Engine] _ensureDailyCampaigns: no connected numbers — skipping campaign creation');
+    if (!activeNumbers.length) {
+      this.logger.warn('[Engine] _ensureDailyCampaigns: no active numbers — skipping campaign creation');
       return new Map();
     }
 
@@ -159,7 +166,7 @@ export class AutonomousEngineService implements OnModuleInit {
 
     const numberToCampaign = new Map<string, string>();
 
-    for (const number of sendableNumbers) {
+    for (const number of activeNumbers) {
       // T-index: extract trailing number from name "Telecaller N" → N.
       // This preserves stable naming across connection order changes.
       // Falls back to 0 if name has no trailing digit, which will produce PROMO-T0-... (logged as warning).
@@ -188,7 +195,7 @@ export class AutonomousEngineService implements OnModuleInit {
         campaign_name: campaignName,
         status: CampaignStatus.RUNNING,
         is_promotion: true,
-        test_mode: testOnly,
+        test_mode: false,
         telecaller_number_id: number.id,
         promo_id: promoId,
         notes: `Auto-created by autonomous engine for ${number.phone} (T${telecallerIndex})`,
@@ -201,7 +208,7 @@ export class AutonomousEngineService implements OnModuleInit {
         metadata: { campaign_id: campaign.id, promo_id: promoId, number_phone: number.phone },
       });
       this.logger.log(
-        `[ENGINE_CAMPAIGN] created: promo_id=${promoId} id=${campaign.id} number=${number.phone} test_mode=${testOnly}`,
+        `[ENGINE_CAMPAIGN] created: promo_id=${promoId} id=${campaign.id} number=${number.phone} test_mode=false env_test_only=${testOnly}`,
       );
     }
 
@@ -410,50 +417,76 @@ export class AutonomousEngineService implements OnModuleInit {
     numberToCampaign: Map<string, string> = new Map(),
     audienceOverride?: MarketingAudience[],
     scheduleImmediately = false,
-  ): Promise<{ queued: number; numbers: number }> {
+  ): Promise<{
+    queued: number;
+    numbers: number;
+    connected_numbers: number;
+    daily_capacity: number;
+    remaining_capacity: number;
+    eligible_contacts: number;
+    blocked: number;
+  }> {
     this.logger.log(
       `[MKT_QUEUE_GATE] _buildQueue start — engine_enabled=${process.env.WHATSAPP_ENGINE_ENABLED} ` +
       `test_only=${process.env.WHATSAPP_ENGINE_TEST_ONLY} bypass=${process.env.MARKETING_TEST_BYPASS_SEND_WINDOW} ` +
-      `maxDaily=${process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE} autonomous_campaigns=${numberToCampaign.size}`,
+      `autonomous_campaigns=${numberToCampaign.size}`,
     );
 
     const allNumbers = await this.numbersService.findAll();
-    // wa_state === 'ready' DB check intentionally removed: DB value can lag in-memory
-    // state during startup pre-reset and _scheduleReconnect teardown. isConnected()
-    // is the authoritative check and is sufficient.
+    // Only connected numbers can receive queue items.
+    // wa_state DB check removed — isConnected() is the authoritative in-memory check.
     const sendableNumbers = allNumbers.filter(
       (n) =>
         n.is_active &&
         n.status === WhatsAppNumberStatus.ACTIVE &&
-        n.daily_sent < getActiveLimits(n.warmup_level).daily &&
         this.whatsAppService.isConnected(n.id),
     );
 
     this.logger.log(
-      `[MKT_QUEUE_GATE] numbers: total=${allNumbers.length} sendable=${sendableNumbers.length} ` +
-      `db_ready=${allNumbers.filter(n => n.wa_state === 'ready').length} ` +
-      `in_memory_connected=${sendableNumbers.length}`,
+      `[MKT_QUEUE_GATE] numbers: total=${allNumbers.length} connected=${sendableNumbers.length} ` +
+      `limits=${sendableNumbers.map(n => `${n.phone}:L${n.warmup_level}=${getActiveLimits(n.warmup_level).daily}/day`).join(' ')}`,
     );
     if (!sendableNumbers.length) {
-      this.logger.warn('[MKT_QUEUE_GATE] reason=no_connected_numbers — zero sendable numbers (is_active+ready+liveAndReady); skipping build');
-      return { queued: 0, numbers: 0 };
+      this.logger.warn('[MKT_QUEUE_GATE] reason=no_connected_numbers — zero sendable numbers; skipping build');
+      return { queued: 0, numbers: 0, connected_numbers: 0, daily_capacity: 0, remaining_capacity: 0, eligible_contacts: 0, blocked: 0 };
     }
 
-    // Dedup: skip phones already in an active (PENDING/PROCESSING) queue item
+    // Per-number capacity: warmup level is the sole gate — same table the sender enforces.
+    // Each number's remaining slots = warmup daily limit minus items already queued today.
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const todayRows: { number_id: string; cnt: string }[] = await this.ds.query(
+      `SELECT number_id, COUNT(*) AS cnt FROM whatsapp_message_queue WHERE created_at >= $1 AND number_id IS NOT NULL GROUP BY number_id`,
+      [todayStart],
+    );
+    const queuedTodayByNumber = new Map(todayRows.map(r => [r.number_id, parseInt(r.cnt, 10)]));
+
+    const daily_capacity   = sendableNumbers.reduce((sum, n) => sum + getActiveLimits(n.warmup_level).daily, 0);
+    const remaining_capacity = sendableNumbers.reduce((sum, n) => {
+      const lim = getActiveLimits(n.warmup_level).daily;
+      return sum + Math.max(0, lim - (queuedTodayByNumber.get(n.id) ?? 0));
+    }, 0);
+
+    this.logger.log(
+      `[MKT_QUEUE_CAPACITY] connected=${sendableNumbers.length} daily_capacity=${daily_capacity} ` +
+      `remaining=${remaining_capacity}`,
+    );
+
+    if (remaining_capacity === 0) {
+      this.logger.log('[MKT_QUEUE_GATE] Daily capacity exhausted for all numbers — nothing to queue');
+      return { queued: 0, numbers: sendableNumbers.length, connected_numbers: sendableNumbers.length, daily_capacity, remaining_capacity: 0, eligible_contacts: 0, blocked: 0 };
+    }
+
+    // Dedup: skip phones already queued today (any status)
     const activePhones = await this.queueService.findActivePhonesSet();
-    this.logger.log(`[MKT_QUEUE_GATE] active_queue_phones=${activePhones.size} phones=${JSON.stringify([...activePhones])}`);
+    this.logger.log(`[MKT_QUEUE_GATE] active_queue_phones=${activePhones.size}`);
 
     const rawAudience = audienceOverride ?? await this.audienceAi.filterByQuality(30);
-    // Honour daily audience cap (WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE) — critical for pilot safety
-    const maxDaily = parseInt(process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE || '999999', 10);
-    const audience = rawAudience.slice(0, maxDaily);
-    this.logger.log(`[MKT_QUEUE_GATE] audience: raw=${rawAudience.length} capped=${audience.length} maxDaily=${maxDaily} override=${!!audienceOverride}`);
+    // No audience cap: warmup limits per number are the sole gate on how many contacts are queued.
+    const audience = rawAudience;
+    this.logger.log(`[MKT_QUEUE_GATE] audience: raw=${rawAudience.length} capacity=${remaining_capacity} override=${!!audienceOverride}`);
     if (!audience.length) {
       this.logger.warn('[MKT_QUEUE_SKIP_REASON] No eligible audience — skipping build');
-      return { queued: 0, numbers: sendableNumbers.length };
-    }
-    if (rawAudience.length > audience.length) {
-      this.logger.log(`[MKT_QUEUE_GATE] Audience capped: ${audience.length}/${rawAudience.length} eligible (MAX_DAILY_AUDIENCE=${maxDaily})`);
+      return { queued: 0, numbers: sendableNumbers.length, connected_numbers: sendableNumbers.length, daily_capacity, remaining_capacity, eligible_contacts: 0, blocked: 0 };
     }
 
     const allTemplates = await this.templatesService.findAll();
@@ -462,12 +495,9 @@ export class AutonomousEngineService implements OnModuleInit {
     this.logger.log(`[MKT_QUEUE_GATE] templates: total=${allTemplates.length} active_ai=${activeTemplates.length}`);
     if (!activeTemplates.length) {
       this.logger.warn('[MKT_QUEUE_SKIP_REASON] No active AI-mode templates — skipping build');
-      return { queued: 0, numbers: sendableNumbers.length };
+      return { queued: 0, numbers: sendableNumbers.length, connected_numbers: sendableNumbers.length, daily_capacity, remaining_capacity, eligible_contacts: audience.length, blocked: audience.length };
     }
 
-    // Build template_id → campaign_id map from RUNNING campaigns
-    // Also build campaign_id → catalog product map for product-driven campaigns
-    // Also build campaign_id → daily_target for per-campaign queue cap
     const allCampaigns = await this.campaignsService.findAll();
     const templateToCampaign = new Map<string, string>();
     const campaignToProduct = new Map<string, ShopifyCatalogItem>();
@@ -492,68 +522,49 @@ export class AutonomousEngineService implements OnModuleInit {
       }
     }
 
-    // Load today's existing row counts per campaign — used to enforce daily_target idempotently
     const existingTodayCounts = runningCampaignIds.length
       ? await this.queueService.countTodayByCampaign(runningCampaignIds)
       : new Map<string, number>();
-    // Track how many rows we add this run per campaign
     const addedThisRunByCampaign = new Map<string, number>();
 
     this.logger.log(
-      `[MKT_QUEUE_GATE] campaign_map_entries=${templateToCampaign.size} product_campaigns=${campaignToProduct.size} ` +
-      `campaigns_with_targets=${campaignDailyTargets.size}`,
-    );
-
-    this.logger.log(
       `[MKT_QUEUE_INPUT] audience=${audience.length} templates=${activeTemplates.length} ` +
-      `sendable_numbers=${sendableNumbers.map(n => n.phone).join(',')} ` +
-      `audience_phones=${JSON.stringify(audience.map(a => a.phone))}`,
+      `connected_numbers=${sendableNumbers.map(n => n.phone).join(',')}`,
     );
 
     const items: Partial<WhatsappMessageQueue>[] = [];
+    // Rule 2: track per-number allocations from this run independently
     const allocatedPerNumber: Record<string, number> = {};
-    for (const n of sendableNumbers) {
-      allocatedPerNumber[n.id] = 0;
-    }
+    for (const n of sendableNumbers) allocatedPerNumber[n.id] = 0;
 
-    // Product rotation: no single category may exceed 40% of the day's queue
     const MAX_CATEGORY_SHARE = 0.40;
     const categoryCount: Record<string, number> = {};
 
-    for (let i = 0; i < audience.length; i++) {
-      const member = audience[i];
-      const number = sendableNumbers[i % sendableNumbers.length];
+    for (const member of audience) {
+      // Find the first number with remaining warmup capacity for today.
+      const number = sendableNumbers.find(n => {
+        const queuedToday = queuedTodayByNumber.get(n.id) ?? 0;
+        return queuedToday + (allocatedPerNumber[n.id] ?? 0) < getActiveLimits(n.warmup_level).daily;
+      });
+      if (!number) break; // all numbers at capacity
 
-      if (allocatedPerNumber[number.id] >= getActiveLimits(number.warmup_level).daily) continue;
-
-      // Skip phones already queued today (any status — sent, skipped, failed, or pending).
-      // Validation contacts bypass this: test numbers must always be re-queued for each run.
       if (activePhones.has(member.phone)) {
-        if (isValidationContact(member)) {
-          this.logger.log(
-            `[MKT_QUEUE_VALIDATION_BYPASS] phone=${member.phone} is_test_contact=true — bypassing today's queue dedup`,
-          );
-        } else {
-          this.logger.log(`[MKT_QUEUE_SKIP_DUPE] phone=${member.phone} already in today's queue — skipping`);
-          continue;
-        }
+        this.logger.log(`[MKT_QUEUE_SKIP_DUPE] phone=${member.phone} already in today's queue — skipping`);
+        continue;
       }
 
-      // Pick template, respecting category saturation
       const template = this._balancedTemplate(activeTemplates, categoryCount, audience.length, MAX_CATEGORY_SHARE);
       if (!template) continue;
 
       const campaignId = templateToCampaign.get(template.id) ?? null;
 
-      // Enforce per-campaign daily_target cap
       if (campaignId && campaignDailyTargets.has(campaignId)) {
-        const target  = campaignDailyTargets.get(campaignId)!;
+        const target   = campaignDailyTargets.get(campaignId)!;
         const existing = existingTodayCounts.get(campaignId) ?? 0;
         const added    = addedThisRunByCampaign.get(campaignId) ?? 0;
         if (existing + added >= target) {
           this.logger.log(
-            `[MKT_QUEUE_SKIP_CAP] campaign_id=${campaignId} target=${target} ` +
-            `existingToday=${existing} addedThisRun=${added} — daily cap reached, skipping phone=${member.phone}`,
+            `[MKT_QUEUE_SKIP_CAP] campaign_id=${campaignId} target=${target} existingToday=${existing} addedThisRun=${added} phone=${member.phone}`,
           );
           continue;
         }
@@ -563,9 +574,7 @@ export class AutonomousEngineService implements OnModuleInit {
         ? new Date()
         : await this.timingAi.getOptimalSendTime(member.phone);
 
-      // Autonomous per-number campaign takes priority; fall back to template-linked campaign.
       const resolvedCampaignId = numberToCampaign.get(number.id) ?? campaignId;
-
       const catalogItem = resolvedCampaignId ? campaignToProduct.get(resolvedCampaignId) ?? null : null;
 
       const productFields = catalogItem
@@ -598,37 +607,54 @@ export class AutonomousEngineService implements OnModuleInit {
       });
       this.logger.log(
         `[MKT_QUEUE_ITEM] phone=${member.phone} template="${template.template_name}" number=${number.phone} ` +
-        `campaign_id=${campaignId ?? 'none'} scheduled_at=${scheduledAt.toISOString()}`,
+        `campaign_id=${resolvedCampaignId ?? 'none'} scheduled_at=${scheduledAt.toISOString()}`,
       );
 
-      // Update per-campaign add counter
-      if (campaignId) {
-        addedThisRunByCampaign.set(campaignId, (addedThisRunByCampaign.get(campaignId) ?? 0) + 1);
-      }
+      if (campaignId) addedThisRunByCampaign.set(campaignId, (addedThisRunByCampaign.get(campaignId) ?? 0) + 1);
 
       const cat = template.product_category ?? 'general';
       categoryCount[cat] = (categoryCount[cat] ?? 0) + 1;
       allocatedPerNumber[number.id]++;
     }
 
-    this.logger.log(`[MKT_QUEUE_FINAL] items assembled=${items.length} phones=${JSON.stringify(items.map(i => i.customer_phone))}`);
     const queued = await this.queueService.bulkEnqueue(items);
     if (queued > 0) {
       this.logger.log(`[MKT_QUEUE_CREATED] queued=${queued} phones=${JSON.stringify(items.map(i => i.customer_phone))}`);
     }
 
-    // Per-campaign summary log
     for (const [cid, added] of addedThisRunByCampaign) {
-      const existingToday = existingTodayCounts.get(cid) ?? 0;
-      const dailyTarget   = campaignDailyTargets.get(cid) ?? 0;
       this.logger.log(
-        `[MKT_QUEUE_BUILD] campaignId=${cid} existingToday=${existingToday} ` +
-        `dailyTarget=${dailyTarget} newRows=${added} skippedDuplicates=${existingToday}`,
+        `[MKT_QUEUE_BUILD] campaignId=${cid} existingToday=${existingTodayCounts.get(cid) ?? 0} newRows=${added}`,
       );
     }
 
-    this.logger.log(`[MKT_QUEUE_GATE] _buildQueue complete: queued=${queued} numbers=${sendableNumbers.length}`);
-    return { queued, numbers: sendableNumbers.length };
+    const blocked = audience.length - queued;
+    // Rule 7: structured output
+    this.logger.log(
+      `[MKT_QUEUE_RESULT] connected_numbers=${sendableNumbers.length} daily_capacity=${daily_capacity} ` +
+      `remaining_capacity=${remaining_capacity} eligible_contacts=${audience.length} ` +
+      `queued=${queued} blocked=${blocked}`,
+    );
+    return { queued, numbers: sendableNumbers.length, connected_numbers: sendableNumbers.length, daily_capacity, remaining_capacity, eligible_contacts: audience.length, blocked };
+  }
+
+  /**
+   * Rule 3: fill remaining today's capacity with newly eligible contacts.
+   * Called automatically after bulk audience import so late-imported contacts
+   * are queued immediately without waiting for tomorrow's 8:30 AM cron.
+   * Idempotent — dedup in _buildQueue prevents double-queuing.
+   */
+  async fillRemainingCapacity(): Promise<{ queued: number; numbers: number }> {
+    if (process.env.WHATSAPP_ENGINE_ENABLED === 'false') return { queued: 0, numbers: 0 };
+    // TEST_ONLY gate removed: filterByQuality(30) inside _buildQueue already excludes
+    // test contacts via `is_test_contact IS NOT TRUE`, so test contacts cannot enter
+    // the autonomous queue regardless of the TEST_ONLY env flag.
+
+    this.logger.log('[Engine] fillRemainingCapacity triggered — checking for remaining daily capacity');
+    const numberToCampaign = await this._ensureDailyCampaigns();
+    const result = await this._buildQueue(numberToCampaign);
+    this.logger.log(`[Engine] fillRemainingCapacity: queued=${result.queued} remaining=${result.remaining_capacity}`);
+    return { queued: result.queued, numbers: result.numbers };
   }
 
   // Weighted template selection with category saturation guard.

@@ -185,40 +185,8 @@ export class AudienceAiService {
   async filterByQuality(minScore: number): Promise<MarketingAudience[]> {
     const now = new Date();
 
-    // Validation contacts: is_test_contact=true always pass — cooldown and quality score
-    // are bypassed so internal test numbers remain sendable for every validation run.
-    // Only hard safety rules (opt_out, is_whatsapp_valid) still apply.
-    const validationContacts = await this.repo
-      .createQueryBuilder('a')
-      .where('a.is_test_contact = true')
-      .andWhere('a.opt_out = false')
-      .andWhere('a.is_whatsapp_valid = true')
-      .orderBy('a.quality_score', 'DESC')
-      .getMany();
-
-    if (process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true') {
-      const allTestContacts = await this.repo.find({ where: { is_test_contact: true } });
-      this.logger.log(`[MKT_AUDIENCE_FETCH] validation contacts in DB: ${allTestContacts.length} total, ${validationContacts.length} eligible`);
-      for (const c of allTestContacts) {
-        const skippedByValidation = !validationContacts.find(v => v.id === c.id);
-        const skipReasons: string[] = [];
-        if (c.opt_out) skipReasons.push('opt_out=true');
-        if (!c.is_whatsapp_valid) skipReasons.push('is_whatsapp_valid=false');
-        const bypassedReasons: string[] = [];
-        if (Number(c.quality_score) < minScore) bypassedReasons.push(`quality_score=${c.quality_score}<${minScore}(BYPASSED)`);
-        if (c.cooldown_until && c.cooldown_until > now) bypassedReasons.push(`cooldown_until=${c.cooldown_until?.toISOString()}(BYPASSED)`);
-        this.logger.log(
-          `[MKT_AUDIENCE_FILTER] phone=${c.phone} is_test_contact=true ` +
-          `opt_out=${c.opt_out} is_whatsapp_valid=${c.is_whatsapp_valid} ` +
-          `quality_score=${c.quality_score} cooldown_until=${c.cooldown_until?.toISOString() ?? 'NULL'} ` +
-          `passes=${!skippedByValidation} ` +
-          `skip_reason=${skipReasons.join(', ') || 'none'} ` +
-          `bypassed=${bypassedReasons.join(', ') || 'none'}`,
-        );
-      }
-    }
-
-    // Regular contacts: full filter applies. Exclude test contacts (already in validationContacts).
+    // Test contacts are NEVER mixed into autonomous audience — they are strictly
+    // isolated to runValidationCampaign(). Rule 4: test isolation.
     const regularContacts = await this.repo
       .createQueryBuilder('a')
       .where('a.opt_out = false')
@@ -229,13 +197,10 @@ export class AudienceAiService {
       .orderBy('a.quality_score', 'DESC')
       .getMany();
 
-    const result = [...validationContacts, ...regularContacts];
     this.logger.log(
-      `[MKT_AUDIENCE_FETCH] filterByQuality(minScore=${minScore}): ` +
-      `${validationContacts.length} validation (bypassed restrictions) + ` +
-      `${regularContacts.length} regular = ${result.length} total`,
+      `[MKT_AUDIENCE_FETCH] filterByQuality(minScore=${minScore}): ${regularContacts.length} eligible (test contacts excluded)`,
     );
-    return result;
+    return regularContacts;
   }
 
   _computeScore(member: MarketingAudience, logs?: LogStats): number {

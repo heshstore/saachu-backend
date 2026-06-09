@@ -9,10 +9,14 @@ import {
 } from '@nestjs/common';
 import { AudienceService } from './audience.service';
 import { MarketingAudience } from '../entities/marketing-audience.entity';
+import { AutonomousEngineService } from '../engine/autonomous-engine.service';
 
 @Controller('marketing/whatsapp-engine/audience')
 export class AudienceController {
-  constructor(private readonly audienceService: AudienceService) {}
+  constructor(
+    private readonly audienceService: AudienceService,
+    private readonly autonomousEngine: AutonomousEngineService,
+  ) {}
 
   @Get()
   findAll() {
@@ -30,8 +34,12 @@ export class AudienceController {
   }
 
   @Post('bulk')
-  bulkUpsert(@Body() body: { rows: Partial<MarketingAudience>[] }) {
-    return this.audienceService.bulkUpsert(body.rows ?? []);
+  async bulkUpsert(@Body() body: { rows: Partial<MarketingAudience>[] }) {
+    const result = await this.audienceService.bulkUpsert(body.rows ?? []);
+    // Rule 3: immediately fill remaining daily capacity with newly eligible contacts.
+    // Fire-and-forget — import response returns instantly.
+    this.autonomousEngine.fillRemainingCapacity().catch(() => {});
+    return result;
   }
 
   /** Check which phones already exist — returns existing records for conflict resolution UI. */
