@@ -19,8 +19,10 @@ import { AudienceService } from '../audience/audience.service';
 import { EngineAuditService, AuditEvent } from './engine-audit.service';
 import { EngineSettingsService } from './engine-settings.service';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
-import { getActiveLimits } from '../shared/number-limits';
+import { getMatureDailyCapacity, getReleaseAllowance } from '../shared/number-limits';
 import { isValidationContact } from '../shared/validation-mode';
+import { getIstDayBounds } from '../shared/ist-time';
+import { NumberConnectionState } from '../shared/number-state';
 
 @Injectable()
 export class AutonomousEngineService implements OnModuleInit {
@@ -62,15 +64,15 @@ export class AutonomousEngineService implements OnModuleInit {
     private readonly whatsAppService: MarketingWhatsAppService,
   ) {}
 
-  // Reset daily sent counters at midnight
-  @Cron('0 0 * * *')
+  // Reset daily sent counters at midnight IST
+  @Cron('0 0 * * *', { timeZone: 'Asia/Kolkata' })
   async resetDailyCounters(): Promise<void> {
-    this.logger.log('[Engine] Resetting daily sent counters');
-    await this.numbersService.resetDailyCounts();
+    this.logger.log('[Engine] Resetting daily sent counters at IST midnight');
+    await this.numbersService.resetDailyCounts('cron_midnight_ist');
   }
 
   // Daily calibration at 7:00 AM: scores + cooldowns + template weights
-  @Cron('0 7 * * *')
+  @Cron('0 7 * * *', { timeZone: 'Asia/Kolkata' })
   async refreshAudienceScores(): Promise<void> {
     this.logger.log('[Engine] Running daily calibration');
     await this.audienceAi.updateScores();
@@ -80,7 +82,7 @@ export class AutonomousEngineService implements OnModuleInit {
   }
 
   // Build the day's queue at 8:30 AM
-  @Cron('30 8 * * *')
+  @Cron('30 8 * * *', { timeZone: 'Asia/Kolkata' })
   async buildDailyQueue(): Promise<void> {
     if (process.env.WHATSAPP_ENGINE_ENABLED === 'false') {
       this.logger.warn('[Engine] Disabled via WHATSAPP_ENGINE_ENABLED=false — skipping queue build');
@@ -93,6 +95,7 @@ export class AutonomousEngineService implements OnModuleInit {
     this._running = true;
 
     try {
+      await this.numbersService.ensureDailyCountsReset();
       // Step 1: Ensure one autonomous campaign exists per connected telecaller number.
       // This must run before the queue build so every queue row gets a non-null campaign_id.
       const numberToCampaign = await this._ensureDailyCampaigns();
@@ -136,8 +139,7 @@ export class AutonomousEngineService implements OnModuleInit {
    */
   async _ensureDailyCampaigns(): Promise<Map<string, string>> {
     const testOnly = process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true';
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const { start: today } = getIstDayBounds();
 
     const allNumbers = await this.numbersService.findAll();
     // Rule 6: create campaigns for ALL active numbers, not just currently-connected ones.
@@ -240,7 +242,7 @@ export class AutonomousEngineService implements OnModuleInit {
    * Audience: ONLY is_test_contact=true (opt_out+is_whatsapp_valid still apply).
    * Campaign naming: VALIDATION-YYYYMMDD-HHMMSS per connected number.
    * All customer-side restrictions (cooldown, fatigue, dedup) are bypassed
-   * via isValidationContact(); production caps (daily/hourly/send-window) are NOT bypassed.
+   * via isValidationContact(); production caps (daily/send-window) are NOT bypassed.
    */
   async runValidationCampaign(): Promise<{
     promo_id: string;
@@ -266,7 +268,9 @@ export class AutonomousEngineService implements OnModuleInit {
 
     const allNumbers = await this.numbersService.findAll();
     const sendableNumbers = allNumbers.filter(
-      n => n.is_active && n.status === WhatsAppNumberStatus.ACTIVE && this.whatsAppService.isConnected(n.id),
+      n => n.is_active &&
+        n.status === WhatsAppNumberStatus.ACTIVE &&
+        this.whatsAppService.getNumberState(n.id) === NumberConnectionState.CONNECTED,
     );
 
     if (!sendableNumbers.length) {
@@ -432,38 +436,40 @@ export class AutonomousEngineService implements OnModuleInit {
       `autonomous_campaigns=${numberToCampaign.size}`,
     );
 
+    await this.numbersService.ensureDailyCountsReset();
+
     const allNumbers = await this.numbersService.findAll();
     // Only connected numbers can receive queue items.
-    // wa_state DB check removed — isConnected() is the authoritative in-memory check.
+    // NumberConnectionState is the single source of truth. DB wa_state and UI both derive from it.
     const sendableNumbers = allNumbers.filter(
       (n) =>
         n.is_active &&
         n.status === WhatsAppNumberStatus.ACTIVE &&
-        this.whatsAppService.isConnected(n.id),
+        this.whatsAppService.getNumberState(n.id) === NumberConnectionState.CONNECTED,
     );
 
     this.logger.log(
       `[MKT_QUEUE_GATE] numbers: total=${allNumbers.length} connected=${sendableNumbers.length} ` +
-      `limits=${sendableNumbers.map(n => `${n.phone}:L${n.warmup_level}=${getActiveLimits(n.warmup_level).daily}/day`).join(' ')}`,
+      `planning=${sendableNumbers.map(n => `${n.phone}:L${n.warmup_level} release=${getReleaseAllowance(n.warmup_level)} queue_cap=${getMatureDailyCapacity()}`).join(' ')}`,
     );
     if (!sendableNumbers.length) {
       this.logger.warn('[MKT_QUEUE_GATE] reason=no_connected_numbers — zero sendable numbers; skipping build');
       return { queued: 0, numbers: 0, connected_numbers: 0, daily_capacity: 0, remaining_capacity: 0, eligible_contacts: 0, blocked: 0 };
     }
 
-    // Per-number capacity: warmup level is the sole gate — same table the sender enforces.
-    // Each number's remaining slots = warmup daily limit minus items already queued today.
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    // Queue planning uses mature capacity (150/number). Sender enforces release allowance by warmup stage.
+    const matureCap = getMatureDailyCapacity();
+    const { start: todayStart } = getIstDayBounds();
     const todayRows: { number_id: string; cnt: string }[] = await this.ds.query(
       `SELECT number_id, COUNT(*) AS cnt FROM whatsapp_message_queue WHERE created_at >= $1 AND number_id IS NOT NULL GROUP BY number_id`,
       [todayStart],
     );
     const queuedTodayByNumber = new Map(todayRows.map(r => [r.number_id, parseInt(r.cnt, 10)]));
 
-    const daily_capacity   = sendableNumbers.reduce((sum, n) => sum + getActiveLimits(n.warmup_level).daily, 0);
+    const daily_capacity   = sendableNumbers.length * matureCap;
     const remaining_capacity = sendableNumbers.reduce((sum, n) => {
-      const lim = getActiveLimits(n.warmup_level).daily;
-      return sum + Math.max(0, lim - (queuedTodayByNumber.get(n.id) ?? 0));
+      const queued = queuedTodayByNumber.get(n.id) ?? 0;
+      return sum + Math.max(0, matureCap - queued);
     }, 0);
 
     this.logger.log(
@@ -481,7 +487,7 @@ export class AutonomousEngineService implements OnModuleInit {
     this.logger.log(`[MKT_QUEUE_GATE] active_queue_phones=${activePhones.size}`);
 
     const rawAudience = audienceOverride ?? await this.audienceAi.filterByQuality(30);
-    // No audience cap: warmup limits per number are the sole gate on how many contacts are queued.
+    // Build queue for full eligible audience — release allowance is enforced by sender only.
     const audience = rawAudience;
     this.logger.log(`[MKT_QUEUE_GATE] audience: raw=${rawAudience.length} capacity=${remaining_capacity} override=${!!audienceOverride}`);
     if (!audience.length) {
@@ -536,16 +542,23 @@ export class AutonomousEngineService implements OnModuleInit {
     // Rule 2: track per-number allocations from this run independently
     const allocatedPerNumber: Record<string, number> = {};
     for (const n of sendableNumbers) allocatedPerNumber[n.id] = 0;
+    let numberCursor = 0;
 
     const MAX_CATEGORY_SHARE = 0.40;
     const categoryCount: Record<string, number> = {};
 
     for (const member of audience) {
-      // Find the first number with remaining warmup capacity for today.
-      const number = sendableNumbers.find(n => {
-        const queuedToday = queuedTodayByNumber.get(n.id) ?? 0;
-        return queuedToday + (allocatedPerNumber[n.id] ?? 0) < getActiveLimits(n.warmup_level).daily;
-      });
+      // Capacity-aware round-robin: every connected number gets its own independent queue.
+      let number: (typeof sendableNumbers)[0] | null = null;
+      for (let i = 0; i < sendableNumbers.length; i++) {
+        const candidate = sendableNumbers[(numberCursor + i) % sendableNumbers.length];
+        const queued = queuedTodayByNumber.get(candidate.id) ?? 0;
+        if (queued + (allocatedPerNumber[candidate.id] ?? 0) < matureCap) {
+          number = candidate;
+          numberCursor = (numberCursor + i + 1) % sendableNumbers.length;
+          break;
+        }
+      }
       if (!number) break; // all numbers at capacity
 
       if (activePhones.has(member.phone)) {

@@ -445,7 +445,7 @@ export class PilotMonitoringService {
     return { status: 'GREEN', reasons: ['All health checks passing'] };
   }
 
-  private _pilotCap(level: number): { daily: number; hourly: number } {
+  private _pilotCap(level: number): { daily: number } {
     return getActiveLimits(level);
   }
 }

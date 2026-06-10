@@ -5,7 +5,12 @@ import { DataSource, Repository } from 'typeorm';
 import { WhatsappNumber } from '../entities/whatsapp-number.entity';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 import { EngineSettingsService } from './engine-settings.service';
-import { getActiveLimits } from '../shared/number-limits';
+import { getReleaseAllowance, getWarmupLabel, getMatureDailyCapacity } from '../shared/number-limits';
+import { fetchAuthoritativeMetrics } from '../analytics/metrics.definitions';
+import { getIstDayBounds } from '../shared/ist-time';
+import { NumberConnectionState } from '../shared/number-state';
+import { WarmupProgressionService } from './warmup-progression.service';
+import { detectWarnings } from '../shared/warmup-health';
 
 @Injectable()
 export class AiDashboardService {
@@ -18,55 +23,52 @@ export class AiDashboardService {
     private readonly numberRepo: Repository<WhatsappNumber>,
     private readonly whatsAppService: MarketingWhatsAppService,
     private readonly engineSettings: EngineSettingsService,
+    private readonly warmupProgression: WarmupProgressionService,
   ) {}
 
   async getDashboard() {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const { start: today } = getIstDayBounds();
     const todayIso = today.toISOString();
 
     const [
       engineStatus,
       todayActivity,
+      todayActivityByTelecaller,
       campaigns,
-      campaignQueueDetail,
       telecallerPerformance,
-      validationQueue,
-      historicalQueue,
-      productRotation,
+      todayQueue,
       numberUtilization,
-      logStream,
       todayQueueByTelecaller,
+      audienceStatus,
     ] = await Promise.all([
       this._getEngineStatus(todayIso),
       this._getTodayActivity(todayIso),
+      this._getTodayActivityByTelecaller(todayIso),
       this._getAiCampaigns(todayIso),
-      this._getCampaignQueueDetail(todayIso),
       this._getTelecallerPerformance(todayIso),
-      this._getTodayValidationQueue(),
-      this._getAllTimeQueue(),
-      this._getProductRotation(todayIso),
-      this._getNumberUtilization(),
-      this._getLogStream(),
+      this._getTodayQueueSummary(todayIso),
+      this._getNumberUtilization(todayIso),
       this._getTodayQueueByTelecaller(todayIso),
+      this._getAudienceStatus(),
     ]);
 
     const isInconsistent = todayActivity.queue_items > 0 && todayActivity.campaigns_created === 0;
-    // Warnings use the all-time queue for stuck-pending detection (production monitoring)
-    const warnings = this._computeWarnings(todayActivity, engineStatus, historicalQueue);
+    const warnings = this._computeWarnings(todayActivity, engineStatus, todayQueue);
 
     return {
       engine_status:             engineStatus,
       today_activity:            todayActivity,
+      today_activity_by_telecaller: todayActivityByTelecaller,
       campaigns,
-      campaign_queue_detail:     campaignQueueDetail,
       telecaller_performance:    telecallerPerformance,
-      live_queue:                validationQueue,   // today's validation rows only
-      historical_queue:          historicalQueue,   // all-time production rows (collapsible)
-      product_rotation:          productRotation,
+      live_queue:                todayQueue,
+      today_queue:               todayQueue,
       number_utilization:        numberUtilization,
-      log_stream:                logStream,
       today_queue_by_telecaller: todayQueueByTelecaller,
+      audience_status: {
+        ...audienceStatus,
+        queue_built_today: todayActivity.queue_items,
+      },
       is_inconsistent:           isInconsistent,
       warnings,
       as_of:                     new Date().toISOString(),
@@ -78,7 +80,7 @@ export class AiDashboardService {
   private async _getEngineStatus(todayIso: string) {
     const autoAiMode      = await this.engineSettings.getAutoAiMode().catch(() => false);
     const allNumbers      = await this.numberRepo.find();
-    const connectedNumbers = allNumbers.filter(n => this.whatsAppService.isConnected(n.id));
+    const connectedNumbers = allNumbers.filter(n => this.whatsAppService.getNumberState(n.id) === NumberConnectionState.CONNECTED);
     const waConnected     = connectedNumbers.length > 0;
 
     const lastRunRows = await this.ds.query<{ created_at: string; metadata: unknown }[]>(
@@ -88,10 +90,10 @@ export class AiDashboardService {
     ).catch(() => []);
     const lastAiRun = lastRunRows[0]?.created_at ?? null;
 
-    const now  = new Date();
-    const next = new Date(now);
-    next.setHours(8, 30, 0, 0);
-    if (now >= next) next.setDate(next.getDate() + 1);
+    const now = new Date();
+    const { start: istTodayStart } = getIstDayBounds(now);
+    let next = new Date(istTodayStart.getTime() + ((8 * 60 + 30) * 60 * 1000));
+    if (now >= next) next = new Date(next.getTime() + 24 * 60 * 60 * 1000);
 
     const validationRows = await this.ds.query<{ cnt: string }[]>(
       `SELECT COUNT(*) AS cnt FROM marketing_audience WHERE is_test_contact = true AND opt_out = false AND is_whatsapp_valid = true`,
@@ -139,8 +141,9 @@ export class AiDashboardService {
           daily_limit:     n.daily_limit,
           is_active:       n.is_active,
           status:          n.status,
-          connected:       waStatus.connected,
+          connected:       waStatus.number_state === NumberConnectionState.CONNECTED,
           wa_state:        waStatus.waState,
+          number_state:    waStatus.number_state,
           partial_session: waStatus.partial_session,
         };
       }),
@@ -151,57 +154,115 @@ export class AiDashboardService {
   // Counts ALL today's queue rows — including campaign_id=NULL (pre-campaign) ones.
 
   private async _getTodayActivity(todayIso: string) {
-    const rows = await this.ds.query<{
-      campaigns_today:   string;
-      queue_items_today: string;
-      sent_today:        string;
-      failed_today:      string;
-      skipped_today:     string;
-    }[]>(`
-      SELECT
-        (SELECT COUNT(*) FROM marketing_campaigns
-         WHERE is_promotion = true AND created_at >= $1)           AS campaigns_today,
-
-        (SELECT COUNT(*) FROM whatsapp_message_queue
-         WHERE created_at >= $1)                                    AS queue_items_today,
-
-        (SELECT COUNT(*) FROM whatsapp_message_logs
-         WHERE created_at >= $1)                                    AS sent_today,
-
-        (SELECT COUNT(*) FROM whatsapp_message_queue
-         WHERE status = 'failed' AND updated_at >= $1)             AS failed_today,
-
-        (SELECT COUNT(*) FROM whatsapp_message_queue
-         WHERE status = 'skipped' AND updated_at >= $1)            AS skipped_today
-    `, [todayIso]).catch(() => []);
+    const since = new Date(todayIso);
+    const [rows, metrics] = await Promise.all([
+      this.ds.query<{
+        campaigns_today:   string;
+        queue_items_today: string;
+      }[]>(`
+        SELECT
+          (SELECT COUNT(*) FROM marketing_campaigns
+           WHERE is_promotion = true AND created_at >= $1) AS campaigns_today,
+          (SELECT COUNT(*) FROM whatsapp_message_queue
+           WHERE created_at >= $1) AS queue_items_today
+      `, [todayIso]).catch(() => []),
+      fetchAuthoritativeMetrics(this.ds, since),
+    ]);
 
     const r = rows[0] ?? {};
-
-    const repliesRows = await this.ds.query<{ cnt: string }[]>(
-      `SELECT COUNT(*) AS cnt FROM whatsapp_replies WHERE received_at >= $1`, [todayIso],
-    ).catch(() => [{ cnt: '0' }]);
-
-    const leadsRows = await this.ds.query<{ cnt: string }[]>(
-      `SELECT COUNT(*) AS cnt FROM leads WHERE source = 'WHATSAPP' AND created_at >= $1`, [todayIso],
-    ).catch(() => [{ cnt: '0' }]);
-
     const queueTotal   = parseInt(r.queue_items_today ?? '0', 10);
     const campaignsVal = parseInt(r.campaigns_today   ?? '0', 10);
 
     return {
       campaigns_created: campaignsVal,
-      // If queue rows exist but campaigns show 0, at least show 1 so the operator knows the engine ran
       campaigns_display: queueTotal > 0 && campaignsVal === 0 ? '—' : campaignsVal,
       queue_items:       queueTotal,
-      messages_sent:     parseInt(r.sent_today    ?? '0', 10),
-      replies:           parseInt(repliesRows[0]?.cnt ?? '0', 10),
-      leads_created:     parseInt(leadsRows[0]?.cnt   ?? '0', 10),
-      failures:          parseInt(r.failed_today  ?? '0', 10),
-      skipped:           parseInt(r.skipped_today ?? '0', 10),
+      messages_sent:     metrics.sent,
+      replies:           metrics.replied,
+      leads_created:     metrics.leads,
+      failures:          metrics.failed,
+      skipped:           metrics.skipped,
     };
   }
 
-  // ── Section C: AI Campaigns — TODAY + last 30 days ─────────────────────────
+  // ── Database summary counts (Customer DB + Promotional DB) ─────────────────
+
+  private async _getDatabaseCounts() {
+    const rows = await this.ds.query<{ customer_count: string; promotional_count: string }[]>(`
+      SELECT
+        (SELECT COUNT(*) FROM customer)           AS customer_count,
+        (SELECT COUNT(*) FROM marketing_audience) AS promotional_count
+    `).catch(() => [{ customer_count: '0', promotional_count: '0' }]);
+
+    const r = rows[0] ?? { customer_count: '0', promotional_count: '0' };
+    return {
+      customer_db_count:    parseInt(r.customer_count    ?? '0', 10),
+      promotional_db_count: parseInt(r.promotional_count ?? '0', 10),
+    };
+  }
+
+  // ── Audience Status (Promotional DB + Eligible Today) ─────────────────────
+  // Mirrors filterByQuality(30) criteria — same filters, COUNT only.
+
+  private async _getAudienceStatus() {
+    const rows = await this.ds.query<{
+      promotional_count: string;
+      customer_count:    string;
+      eligible_count:    string;
+    }[]>(`
+      SELECT
+        (SELECT COUNT(*) FROM marketing_audience)           AS promotional_count,
+        (SELECT COUNT(*) FROM customer)                     AS customer_count,
+        (SELECT COUNT(*) FROM marketing_audience a
+          WHERE a.opt_out = false
+            AND a.is_whatsapp_valid = true
+            AND a.quality_score >= 30
+            AND (a.cooldown_until IS NULL OR a.cooldown_until <= NOW())
+            AND a.is_test_contact IS NOT TRUE
+            AND (a.wa_registration_status IS NULL OR a.wa_registration_status != 'NOT_REGISTERED')
+        )                                                    AS eligible_count
+    `).catch(() => [{ promotional_count: '0', customer_count: '0', eligible_count: '0' }]);
+
+    const r = rows[0] ?? { promotional_count: '0', customer_count: '0', eligible_count: '0' };
+    return {
+      promotional_db_count:    parseInt(r.promotional_count ?? '0', 10),
+      customer_db_count:       parseInt(r.customer_count    ?? '0', 10),
+      eligible_audience_today: parseInt(r.eligible_count    ?? '0', 10),
+    };
+  }
+
+  async getQueueDetail() {
+    const { start: today } = getIstDayBounds();
+    return this._getCampaignQueueDetail(today.toISOString());
+  }
+
+  // ── Section B (per telecaller): Today's Activity ────────────────────────────
+  // All metrics scoped to each whatsapp_numbers row (telecaller_number_id).
+
+  private async _getTodayActivityByTelecaller(todayIso: string) {
+    const since = new Date(todayIso);
+    const numbers = await this.numberRepo.find({
+      where: { is_active: true },
+      order: { created_at: 'ASC' },
+    });
+
+    return Promise.all(numbers.map(async n => {
+      const m = await fetchAuthoritativeMetrics(this.ds, since, { numberId: n.id });
+      return {
+        number_id:       n.id,
+        phone:           n.phone,
+        name:            n.name,
+        messages_sent:   m.sent,
+        replies:         m.replied,
+        leads_created:   m.leads,
+        not_on_whatsapp: m.not_on_whatsapp,
+        failures:        m.failed,
+        pending_queue:   m.queue_pending,
+      };
+    }));
+  }
+
+  // ── Section C: AI Campaigns — TODAY ONLY ───────────────────────────────────
 
   private async _getAiCampaigns(todayIso: string) {
     const rows = await this.ds.query<{
@@ -227,16 +288,20 @@ export class AiDashboardService {
         n.phone AS telecaller_phone,
         (c.created_at >= $1) AS is_today,
         COUNT(q.id)                                              AS total_queue,
-        COUNT(q.id) FILTER (WHERE q.status = 'sent')            AS sent,
-        COUNT(q.id) FILTER (WHERE q.status = 'delivered')       AS delivered,
-        COUNT(q.id) FILTER (WHERE q.status = 'failed')          AS failed,
-        COUNT(q.id) FILTER (WHERE q.status = 'skipped')         AS skipped,
-        COUNT(q.id) FILTER (WHERE q.status = 'pending')         AS pending
+        (SELECT COUNT(*)::int FROM whatsapp_message_logs l
+          WHERE l.campaign_id = c.id
+            AND l.status IN ('sent','delivered','read','replied')) AS sent,
+        (SELECT COUNT(*)::int FROM whatsapp_message_logs l
+          WHERE l.campaign_id = c.id AND l.status = 'failed')       AS failed,
+        (SELECT COUNT(*)::int FROM whatsapp_message_logs l
+          WHERE l.campaign_id = c.id AND l.status = 'skipped'
+            AND l.message_body NOT ILIKE '%INVALID_WA_NUMBER%')   AS skipped,
+        COUNT(q.id) FILTER (WHERE q.status = 'pending')             AS pending
       FROM marketing_campaigns c
       LEFT JOIN whatsapp_message_queue q ON q.campaign_id = c.id
       LEFT JOIN whatsapp_numbers n ON n.id = c.telecaller_number_id
       WHERE c.is_promotion = true
-        AND c.created_at >= NOW() - INTERVAL '30 days'
+        AND c.created_at >= $1
       GROUP BY c.id, c.promo_id, c.campaign_name, c.created_at, c.status,
                c.is_promotion, c.test_mode, c.telecaller_number_id, n.phone
       ORDER BY c.created_at DESC
@@ -250,21 +315,24 @@ export class AiDashboardService {
       JOIN whatsapp_message_logs l ON l.customer_phone = r.customer_phone
         AND l.number_id = r.number_id
       WHERE l.campaign_id IS NOT NULL
+        AND r.received_at >= $1
       GROUP BY l.campaign_id
-    `).catch(() => []);
+    `, [todayIso]).catch(() => []);
     const replyMap = new Map<string, number>(
       replyRows.map(r => [r.campaign_id, parseInt(r.cnt, 10)] as [string, number]),
     );
 
     // Leads per campaign
     const leadRows = await this.ds.query<{ campaign_id: string; cnt: string }[]>(`
-      SELECT l.campaign_id, COUNT(*) AS cnt
+      SELECT l.campaign_id, COUNT(DISTINCT ld.id) AS cnt
       FROM leads ld
       JOIN whatsapp_message_logs l ON l.customer_phone = ld.phone
         AND l.campaign_id IS NOT NULL
+        AND l.number_id = (SELECT c2.telecaller_number_id FROM marketing_campaigns c2 WHERE c2.id = l.campaign_id)
       WHERE ld.source = 'WHATSAPP'
+        AND ld.created_at >= $1
       GROUP BY l.campaign_id
-    `).catch(() => []);
+    `, [todayIso]).catch(() => []);
     const leadMap = new Map<string, number>(
       leadRows.map(r => [r.campaign_id, parseInt(r.cnt, 10)] as [string, number]),
     );
@@ -329,6 +397,7 @@ export class AiDashboardService {
       product_sku:         string | null;
       product_title:       string | null;
       queue_status:        string;
+      skip_reason:         string | null;
       sent_at:             string | null;
       telecaller_phone:    string | null;
       read_at:             string | null;
@@ -355,12 +424,13 @@ export class AiDashboardService {
            WHERE s2.sku = (q.message_payload->>'product_sku') LIMIT 1)
         )                                          AS product_title,
         q.status                                   AS queue_status,
+        q.error_message                            AS skip_reason,
         q.sent_at,
-        COALESCE(q.actual_sender_phone, n.phone)   AS telecaller_phone,
+        n.phone                                    AS telecaller_phone,
         l.read_at,
         l.reply_received,
         l.reply_message,
-        (r.id IS NOT NULL)                         AS lead_created,
+        (ld.id IS NOT NULL)                        AS lead_created,
         l.message_body,
         q.message_payload->'ai_metadata'->>'hookType'  AS ai_hook_type,
         q.message_payload->'ai_metadata'->>'ctaUsed'   AS ai_cta_used,
@@ -372,8 +442,9 @@ export class AiDashboardService {
       LEFT JOIN whatsapp_numbers n        ON n.id = q.number_id
       LEFT JOIN shopify_catalog_items s   ON s.id = q.product_id
       LEFT JOIN whatsapp_message_logs l   ON l.queue_id = q.id
-      LEFT JOIN whatsapp_replies r        ON r.customer_phone = q.customer_phone
-        AND r.received_at >= $1
+      LEFT JOIN leads ld                  ON ld.phone = q.customer_phone
+        AND ld.source = 'WHATSAPP'
+        AND ld.created_at >= $1
       WHERE q.created_at >= $1
       ORDER BY q.created_at DESC
       LIMIT 100
@@ -388,6 +459,7 @@ export class AiDashboardService {
       product_sku:      r.product_sku ?? '—',
       product_title:    r.product_title ?? r.product_sku ?? '—',
       queue_status:     r.queue_status,
+      skip_reason:      r.skip_reason ?? null,
       sent_at:          r.sent_at ?? null,
       telecaller_phone: r.telecaller_phone ?? '—',
       read:             !!r.read_at,
@@ -406,68 +478,88 @@ export class AiDashboardService {
   // ── Section E: Telecaller Performance ─────────────────────────────────────
 
   private async _getTelecallerPerformance(todayIso: string) {
+    const since = new Date(todayIso);
     const numbers = await this.numberRepo.find({ order: { created_at: 'ASC' } });
 
-    const rows = await this.ds.query<{
-      number_id:   string;
-      campaign_id: string | null;
-      promo_id:    string | null;
-      pending:     string;
-      sent:        string;
-      failed:      string;
-      skipped:     string;
-      total:       string;
-    }[]>(`
-      SELECT
-        n.id                                                     AS number_id,
-        c.id                                                     AS campaign_id,
-        c.promo_id,
-        COUNT(q.id) FILTER (WHERE q.status = 'pending')         AS pending,
-        COUNT(q.id) FILTER (WHERE q.status = 'sent')            AS sent,
-        COUNT(q.id) FILTER (WHERE q.status = 'failed')          AS failed,
-        COUNT(q.id) FILTER (WHERE q.status = 'skipped')         AS skipped,
-        COUNT(q.id)                                              AS total
-      FROM whatsapp_numbers n
-      LEFT JOIN marketing_campaigns c ON c.telecaller_number_id = n.id
-        AND c.is_promotion = true
-        AND c.created_at >= $1
-      LEFT JOIN whatsapp_message_queue q ON q.number_id = n.id
-        AND q.created_at >= $1
-      GROUP BY n.id, c.id, c.promo_id
-      ORDER BY n.phone
+    const campRows = await this.ds.query<{ telecaller_number_id: string; id: string; promo_id: string | null }[]>(`
+      SELECT DISTINCT ON (telecaller_number_id) telecaller_number_id, id, promo_id
+      FROM marketing_campaigns
+      WHERE is_promotion = true AND telecaller_number_id IS NOT NULL AND created_at >= $1
+      ORDER BY telecaller_number_id, created_at DESC
     `, [todayIso]).catch(() => []);
+    const campMap = new Map<string, { id: string; promo_id: string | null }>(
+      campRows.map(c => [c.telecaller_number_id, c] as [string, { id: string; promo_id: string | null }]),
+    );
 
-    const numberMap = new Map(numbers.map(n => [n.id, n]));
+    const assignedRows = await this.ds.query<{ number_id: string; cnt: string }[]>(`
+      SELECT number_id, COUNT(*)::int AS cnt
+      FROM whatsapp_message_queue
+      WHERE created_at >= $1
+      GROUP BY number_id
+    `, [todayIso]).catch(() => []);
+    const assignedMap = new Map<string, number>(
+      assignedRows.map(r => [r.number_id, parseInt(r.cnt, 10)] as [string, number]),
+    );
 
-    return rows.map(r => {
-      const n       = numberMap.get(r.number_id);
-      const limits  = n ? getActiveLimits(n.warmup_level) : { daily: 0 };
-      const sent    = parseInt(r.sent ?? '0', 10);
-      const remaining = n ? Math.max(0, limits.daily - (n.daily_sent)) : 0;
-      return {
-        number_id:        r.number_id,
-        phone:            n?.phone ?? '—',
-        name:             n?.name  ?? '—',
-        campaign_id:      r.campaign_id ?? null,
-        promo_id:         r.promo_id    ?? null,
-        pending:          parseInt(r.pending ?? '0', 10),
-        sent,
-        failed:           parseInt(r.failed  ?? '0', 10),
-        skipped:          parseInt(r.skipped ?? '0', 10),
-        total:            parseInt(r.total   ?? '0', 10),
-        daily_cap:        limits.daily,
-        capacity_remaining: remaining,
-      };
-    });
+    return Promise.all(
+      numbers.filter(n => n.is_active).map(async n => {
+        const [m, lastRows] = await Promise.all([
+          fetchAuthoritativeMetrics(this.ds, since, { numberId: n.id }),
+          this.ds.query<{ last_activity: string | null }[]>(`
+            SELECT MAX(COALESCE(l.sent_at, q.sent_at, q.updated_at, q.created_at)) AS last_activity
+            FROM whatsapp_message_queue q
+            LEFT JOIN whatsapp_message_logs l ON l.queue_id = q.id
+            WHERE q.number_id = $1 AND q.created_at >= $2
+          `, [n.id, todayIso]).catch(() => [{ last_activity: null }]),
+        ]);
+        const camp = campMap.get(n.id);
+        const releaseAllowance = getReleaseAllowance(n.warmup_level);
+        const waStatus = this.whatsAppService.getNumberWaStatus(n.id);
+        const remaining = Math.max(0, releaseAllowance - m.sent);
+        const queueWaiting = m.queue_pending;
+        const health = await this.warmupProgression.getHealthMetrics(n.id);
+        const warnings = detectWarnings(health);
+        return {
+          number_id:          n.id,
+          phone:              n.phone,
+          name:               n.name ?? '—',
+          connection_status:  waStatus.number_state,
+          connected:          waStatus.number_state === NumberConnectionState.CONNECTED,
+          wa_state:           waStatus.waState,
+          warmup_level:       n.warmup_level,
+          warmup_label:       getWarmupLabel(n.warmup_level),
+          campaign_id:        camp?.id ?? null,
+          promo_id:           camp?.promo_id ?? null,
+          release_allowance:  releaseAllowance,
+          daily_cap:          releaseAllowance,
+          messages_released:  m.sent,
+          sent_today:         m.sent,
+          delivered_today:    m.delivered,
+          read_today:         m.read,
+          replies_today:      m.replied,
+          failed_today:       m.failed,
+          skipped_today:      m.skipped,
+          remaining_today:    remaining,
+          remaining_allowance: remaining,
+          queue_assigned:     assignedMap.get(n.id) ?? 0,
+          queue_waiting:      queueWaiting,
+          queue_pending:      queueWaiting,
+          health_score:       health.healthScore,
+          warnings,
+          last_activity:      lastRows[0]?.last_activity ?? null,
+          pending:            queueWaiting,
+          sent:               m.sent,
+          failed:             m.failed,
+          skipped:            m.skipped,
+          total:              assignedMap.get(n.id) ?? 0,
+          capacity_remaining: remaining,
+        };
+      }),
+    );
   }
 
-  // ── Section F: Today Validation Queue ────────────────────────────────────────
-  // Scoped to is_validation=true + created today. Zero means cleanup succeeded.
-
-  private async _getTodayValidationQueue() {
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-
+  // ── Section F: Today's Queue ────────────────────────────────────────────────
+  private async _getTodayQueueSummary(todayIso: string) {
     const rows = await this.ds.query<{
       status:       string;
       number_phone: string | null;
@@ -481,20 +573,18 @@ export class AiDashboardService {
         COUNT(*) AS cnt
       FROM whatsapp_message_queue q
       LEFT JOIN whatsapp_numbers n ON n.id = q.number_id
-      WHERE (q.message_payload->>'is_validation')::boolean = true
-        AND q.created_at >= $1
+      WHERE q.created_at >= $1
       GROUP BY q.status, n.phone, n.name
       ORDER BY n.phone, q.status
-    `, [todayStart]).catch(() => []);
+    `, [todayIso]).catch(() => []);
 
     const stuckRows = await this.ds.query<{ oldest: string | null }[]>(`
       SELECT MIN(q.scheduled_at) AS oldest
       FROM whatsapp_message_queue q
-      WHERE (q.message_payload->>'is_validation')::boolean = true
-        AND q.status = 'pending'
+      WHERE q.status = 'pending'
         AND q.created_at >= $1
         AND q.scheduled_at <= NOW()
-    `, [todayStart]).catch(() => []);
+    `, [todayIso]).catch(() => []);
     const oldestPending = stuckRows[0]?.oldest ?? null;
     const stuckMinutes  = oldestPending
       ? Math.floor((Date.now() - new Date(oldestPending).getTime()) / 60_000)
@@ -595,34 +685,50 @@ export class AiDashboardService {
 
   // ── Section H: Number Utilization ─────────────────────────────────────────
 
-  private async _getNumberUtilization() {
+  private async _getNumberUtilization(todayIso: string) {
+    const since = new Date(todayIso);
     const numbers = await this.numberRepo.find({ order: { created_at: 'ASC' } });
 
-    return numbers.map(n => {
-      const limits    = getActiveLimits(n.warmup_level);
-      const status    = this.whatsAppService.getNumberWaStatus(n.id);
-      const remaining = Math.max(0, limits.daily - n.daily_sent);
+    return Promise.all(numbers.map(async n => {
+      const releaseAllowance = getReleaseAllowance(n.warmup_level);
+      const status      = this.whatsAppService.getNumberWaStatus(n.id);
+      const metrics     = await fetchAuthoritativeMetrics(this.ds, since, { numberId: n.id });
+      const sentToday   = metrics.sent;
+      const remaining   = Math.max(0, releaseAllowance - sentToday);
+      const health      = await this.warmupProgression.getHealthMetrics(n.id);
       return {
         id:                n.id,
         phone:             n.phone,
         name:              n.name,
         warmup_level:      n.warmup_level,
+        warmup_label:      getWarmupLabel(n.warmup_level),
         last_connected_at: n.last_connected_at,
         is_active:         n.is_active,
         wa_state:          status.waState,
-        connected:         status.connected,
+        number_state:      status.number_state,
+        connected:         status.number_state === NumberConnectionState.CONNECTED,
         fully_operational: status.fullyOperational,
-        daily_sent:        n.daily_sent,
-        daily_cap:         limits.daily,
+        daily_sent:        sentToday,
+        sent_today:        sentToday,
+        delivered_today:   metrics.delivered,
+        read_today:        metrics.read,
+        replies_today:     metrics.replied,
+        failed_today:      metrics.failed,
+        release_allowance: releaseAllowance,
+        queue_capacity:    getMatureDailyCapacity(),
+        queue_waiting:     metrics.queue_pending,
+        health_score:      health.healthScore,
+        warnings:          detectWarnings(health),
         remaining_today:   remaining,
-        utilization_pct:   limits.daily > 0 ? Math.round((n.daily_sent / limits.daily) * 100) : 0,
+        remaining_allowance: remaining,
+        utilization_pct:   releaseAllowance > 0 ? Math.round((sentToday / releaseAllowance) * 100) : 0,
       };
-    });
+    }));
   }
 
   // ── Section I: Log Stream ──────────────────────────────────────────────────
 
-  private async _getLogStream() {
+  private async _getLogStream(todayIso: string) {
     const rows = await this.ds.query<{
       id:              string;
       event:           string;
@@ -646,9 +752,10 @@ export class AiDashboardService {
       FROM engine_audit_logs al
       LEFT JOIN marketing_campaigns c ON c.id = al.campaign_id
       LEFT JOIN whatsapp_numbers n    ON n.id = al.number_id
+      WHERE al.created_at >= $1
       ORDER BY al.created_at DESC
       LIMIT 60
-    `).catch(() => []);
+    `, [todayIso]).catch(() => []);
 
     return rows.map(r => {
       const ts = new Date(r.created_at);
@@ -685,20 +792,25 @@ export class AiDashboardService {
       product_skus:     string[] | null;
     }[]>(`
       SELECT
-        n.id                                                              AS number_id,
+        eff.number_id,
         n.phone                                                           AS telecaller_phone,
         n.name                                                            AS number_name,
         COUNT(q.id)                                                       AS total,
-        COUNT(q.id) FILTER (WHERE q.status = 'sent')                     AS sent,
-        COUNT(q.id) FILTER (WHERE q.status = 'pending')                  AS pending,
+        COUNT(q.id) FILTER (WHERE q.status IN ('sent','delivered','read','replied')) AS sent,
+        COUNT(q.id) FILTER (WHERE q.status = 'pending' AND q.number_id = eff.number_id) AS pending,
         COUNT(q.id) FILTER (WHERE q.status = 'failed')                   AS failed,
         COUNT(q.id) FILTER (WHERE q.status = 'skipped')                  AS skipped,
         array_agg(DISTINCT q.message_payload->>'product_sku')
           FILTER (WHERE (q.message_payload->>'product_sku') IS NOT NULL
             AND (q.message_payload->>'product_sku') != '')                AS product_skus
-      FROM whatsapp_numbers n
-      LEFT JOIN whatsapp_message_queue q ON q.number_id = n.id AND q.created_at >= $1
-      GROUP BY n.id, n.phone, n.name
+      FROM (
+        SELECT q.*, COALESCE(q.actual_sender_number_id, q.number_id) AS number_id
+        FROM whatsapp_message_queue q
+        WHERE q.created_at >= $1
+      ) eff
+      JOIN whatsapp_numbers n ON n.id = eff.number_id
+      JOIN whatsapp_message_queue q ON q.id = eff.id
+      GROUP BY eff.number_id, n.phone, n.name
       HAVING COUNT(q.id) > 0
       ORDER BY total DESC
     `, [todayIso]).catch(() => []);
@@ -721,7 +833,7 @@ export class AiDashboardService {
   private _computeWarnings(
     activity: Awaited<ReturnType<typeof this._getTodayActivity>>,
     status:   Awaited<ReturnType<typeof this._getEngineStatus>>,
-    queue:    Awaited<ReturnType<typeof this._getAllTimeQueue>>,
+    queue:    Awaited<ReturnType<typeof this._getTodayQueueSummary>>,
   ): string[] {
     const now          = new Date();
     const hour         = now.getHours();
@@ -744,10 +856,6 @@ export class AiDashboardService {
         warnings.push(`High failure rate: ${Math.round(failRate)}% — check number health`);
       }
     }
-    if (activity.messages_sent >= 10 && activity.replies === 0) {
-      warnings.push(`${activity.messages_sent} messages sent with zero replies — check inbox`);
-    }
-
     return warnings;
   }
 }

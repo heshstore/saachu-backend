@@ -38,10 +38,11 @@ export interface StabilityReport {
   // Day-by-day trend
   daily_trend: DailyTrendRow[];
 
-  // Operational events from audit log (all 6 governance signals from Phase 11 Step 8)
+  // Operational events from audit log. Low delivery/read events are warnings only.
   events: {
-    auto_pause_count: number;
-    auto_pause_reasons: string[];
+    low_delivery_warning_count: number;
+    low_read_warning_count: number;
+    warning_reasons: string[];
     number_recovered_count: number;
     scale_up_count: number;
     manual_reenable_count: number;
@@ -99,10 +100,11 @@ export class StabilityReportService {
     const totals = this._buildTotals(totalsRows);
     const daily = this._buildDailyTrend(dailyRows);
 
-    const autoPauses      = auditRows.filter((r: any) => r.event === 'AUTO_PAUSE');
-    const recoveries      = auditRows.filter((r: any) => r.event === 'NUMBER_RECOVERED');
-    const scaleUps        = auditRows.filter((r: any) => r.event === 'SCALE_UP');
-    const manualReEnables = auditRows.filter((r: any) => r.event === 'MANUAL_REENABLE');
+    const deliveryWarnings = auditRows.filter((r: any) => r.event === 'LOW_DELIVERY_WARNING');
+    const readWarnings     = auditRows.filter((r: any) => r.event === 'LOW_READ_WARNING');
+    const recoveries       = auditRows.filter((r: any) => r.event === 'NUMBER_RECOVERED');
+    const scaleUps         = auditRows.filter((r: any) => r.event === 'SCALE_UP');
+    const manualReEnables  = auditRows.filter((r: any) => r.event === 'MANUAL_REENABLE');
     const fingerprintSkips = auditRows.filter((r: any) => r.event === 'FINGERPRINT_SKIP');
     const hardLimitHits   = auditRows.filter((r: any) => r.event === 'HARD_LIMIT_HIT');
 
@@ -118,8 +120,6 @@ export class StabilityReportService {
 
     // Stability verdict
     const issues: string[] = [];
-    if (autoPauses.length > 0)
-      issues.push(`${autoPauses.length} AUTO_PAUSE event(s) in last ${days} days — investigate before scaling`);
     if (totals.fail_rate_pct > 25)
       issues.push(`Elevated fail rate: ${totals.fail_rate_pct}%`);
     if (totals.delivery_rate_pct < 50 && totals.sent > 20)
@@ -148,13 +148,14 @@ export class StabilityReportService {
       totals,
       daily_trend: daily,
       events: {
-        auto_pause_count:       autoPauses.length,
-        auto_pause_reasons:     autoPauses.map((r: any) => r.reason ?? '').filter(Boolean),
-        number_recovered_count: recoveries.length,
-        scale_up_count:         scaleUps.length,
-        manual_reenable_count:  manualReEnables.length,
-        fingerprint_skip_count: fingerprintSkips.length,
-        hard_limit_hit_count:   hardLimitHits.length,
+        low_delivery_warning_count: deliveryWarnings.length,
+        low_read_warning_count:     readWarnings.length,
+        warning_reasons:            [...deliveryWarnings, ...readWarnings].map((r: any) => r.reason ?? '').filter(Boolean),
+        number_recovered_count:     recoveries.length,
+        scale_up_count:             scaleUps.length,
+        manual_reenable_count:      manualReEnables.length,
+        fingerprint_skip_count:     fingerprintSkips.length,
+        hard_limit_hit_count:       hardLimitHits.length,
       },
       audience: {
         total,
@@ -256,7 +257,8 @@ export class StabilityReportService {
       return this.ds.query<{ event: string; reason: string | null }[]>(
         `SELECT event, reason FROM engine_audit_logs
          WHERE event IN (
-           'AUTO_PAUSE', 'NUMBER_RECOVERED',
+           'LOW_DELIVERY_WARNING', 'LOW_READ_WARNING',
+           'NUMBER_RECOVERED',
            'SCALE_UP', 'MANUAL_REENABLE',
            'FINGERPRINT_SKIP', 'HARD_LIMIT_HIT'
          )

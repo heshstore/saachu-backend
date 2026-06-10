@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import { WhatsappNumber } from '../entities/whatsapp-number.entity';
 import { WhatsappMessageLog } from '../entities/whatsapp-message-log.entity';
 import { WhatsAppNumberStatus } from '../entities/enums';
-import { getActiveLimits } from '../shared/number-limits';
+import { getReleaseAllowance } from '../shared/number-limits';
 
 @Injectable()
 export class RiskAiService {
@@ -21,7 +21,6 @@ export class RiskAiService {
     const number = await this.numberRepo.findOne({ where: { id: numberId } });
     if (!number) return 0;
 
-    // Immediately return 100 for banned numbers
     if (number.status === WhatsAppNumberStatus.BANNED) return 100;
 
     const sevenDaysAgo = new Date();
@@ -52,24 +51,20 @@ export class RiskAiService {
       const failRate = (failed / total) * 100;
       const replyRate = (replied / total) * 100;
 
-      if (failRate > 30) {
-        score += 40;
-      } else if (failRate > 15) {
-        score += 20;
-      }
+      if (failRate > 30) score += 40;
+      else if (failRate > 15) score += 20;
 
-      if (replyRate < 2 && total > 20) {
-        score += 20;
-      }
+      if (replyRate < 2 && total > 20) score += 20;
     }
 
-    // daily_sent vs warmup cap
-    const dailyCap = getActiveLimits(number.warmup_level).daily;
-    if (dailyCap > 0 && (number.daily_sent / dailyCap) >= 0.9) {
+    const releaseAllowance = getReleaseAllowance(number.warmup_level);
+    if (releaseAllowance > 0 && (number.daily_sent / releaseAllowance) >= 0.9) {
       score += 15;
     }
 
-    return Math.min(100, score);
+    const finalScore = Math.min(100, score);
+    await this.numberRepo.update(numberId, { risk_score: finalScore });
+    return finalScore;
   }
 
   async isNumberSafe(numberId: string): Promise<boolean> {
@@ -77,19 +72,8 @@ export class RiskAiService {
     return score < 60;
   }
 
-  async shouldPauseNumber(numberId: string): Promise<boolean> {
-    const score = await this.calculateRiskScore(numberId);
-
-    if (score >= 80) {
-      await this.numberRepo.update(numberId, {
-        status: WhatsAppNumberStatus.INACTIVE,
-        risk_score: score,
-      });
-      this.logger.warn(`[RiskAI] Paused number ${numberId} with risk score ${score}`);
-      return true;
-    }
-
-    await this.numberRepo.update(numberId, { risk_score: score });
+  /** Display-only — never pauses or deactivates numbers. */
+  async shouldPauseNumber(_numberId: string): Promise<boolean> {
     return false;
   }
 
@@ -101,43 +85,8 @@ export class RiskAiService {
       .getMany();
   }
 
-  // Detect short-burst block pattern: >30% failure rate in last hour with at least 5 sends
-  async checkHourlyBlockDetection(numberId: string): Promise<boolean> {
-    const number = await this.numberRepo.findOne({ where: { id: numberId } });
-    if (!number || number.status === WhatsAppNumberStatus.BANNED) return false;
-
-    const oneHourAgo = new Date(Date.now() - 3_600_000);
-    const rows: { status: string; count: string }[] = await this.logRepo
-      .createQueryBuilder('l')
-      .select('l.status', 'status')
-      .addSelect('COUNT(*)', 'count')
-      .where('l.number_id = :numberId', { numberId })
-      .andWhere('l.sent_at >= :oneHourAgo', { oneHourAgo })
-      .groupBy('l.status')
-      .getRawMany();
-
-    let total = 0;
-    let failed = 0;
-    for (const row of rows) {
-      const n = parseInt(row.count, 10);
-      total += n;
-      if (row.status === 'failed') failed = n;
-    }
-
-    if (total < 5) return false;
-
-    const hourlyFailRate = (failed / total) * 100;
-    if (hourlyFailRate > 30) {
-      await this.numberRepo.update(numberId, {
-        is_active: false,
-        status: WhatsAppNumberStatus.INACTIVE,
-      });
-      this.logger.warn(
-        `[RiskAI] Block detected on number ${numberId}: ${failed}/${total} failures in last hour — cooldown applied`,
-      );
-      return true;
-    }
-
+  /** Display-only — never deactivates numbers. */
+  async checkHourlyBlockDetection(_numberId: string): Promise<boolean> {
     return false;
   }
 }

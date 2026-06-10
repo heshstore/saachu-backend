@@ -7,6 +7,11 @@ import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity'
 import { QueueStatus } from '../entities/enums';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 import { getActiveLimits } from '../shared/number-limits';
+import {
+  fetchAuthoritativeMetrics,
+  rollupCumulativeFromStatusRows,
+  startOfToday,
+} from './metrics.definitions';
 
 type StatusRow = { status: string; count: string };
 
@@ -27,74 +32,22 @@ export class AnalyticsService {
   ) {}
 
   async getCampaignStats(campaignId: string): Promise<Record<string, number>> {
-    // Three-tier resolution for historical data where campaign_id was not persisted on queue rows:
-    // 1. Log row has campaign_id directly (current path)
-    // 2. Log row's queue_id points to a queue item with campaign_id set
-    // 3. (Historical fallback) queue item has no campaign_id but template matches this campaign.
-    //    Scoped to q.campaign_id IS NULL AND q.created_at >= campaign.created_at.
-    //    The date guard prevents pre-campaign autonomous-engine sends (which use null campaign_id
-    //    for templates not linked to a running campaign) from being incorrectly attributed to this
-    //    campaign just because they share the same template_id.
-    const campaignScope = `
-      (l.campaign_id = $1
-         OR l.queue_id IN (
-           SELECT q.id
-           FROM whatsapp_message_queue q
-           WHERE q.campaign_id = $1
-              OR (
-                q.campaign_id IS NULL
-                AND q.created_at >= (SELECT c2.created_at FROM marketing_campaigns c2 WHERE c2.id = $1)
-                AND q.template_id IN (
-                  SELECT c.template_id
-                  FROM marketing_campaigns c
-                  WHERE c.id = $1 AND c.template_id IS NOT NULL
-                )
-              )
-         ))`;
-
-    const [rows, naRows] = await Promise.all([
-      this.ds.query<StatusRow[]>(
-        `SELECT l.status, COUNT(*)::text AS count FROM whatsapp_message_logs l WHERE ${campaignScope} GROUP BY l.status`,
-        [campaignId],
-      ),
-      this.ds.query<{ count: string }[]>(
-        `SELECT COUNT(*)::text AS count FROM whatsapp_message_logs l WHERE ${campaignScope} AND l.status = 'skipped' AND l.message_body ILIKE '%INVALID_WA_NUMBER%'`,
-        [campaignId],
-      ),
-    ]);
-
-    const stats = this._buildStats(rows);
-    const notOnWhatsApp = parseInt(naRows[0]?.count ?? '0', 10);
-    stats.not_on_whatsapp = notOnWhatsApp;
-    stats.skipped = Math.max(0, (stats.skipped ?? 0) - notOnWhatsApp);
+    const stats = await fetchAuthoritativeMetrics(this.ds, new Date(0), { campaignId });
 
     this.logger.log(
       `[MKT_CAMPAIGN_STATS_QUERY] campaign_id=${campaignId} ` +
       `sent=${stats.sent} read=${stats.read} delivered=${stats.delivered} ` +
-      `failed=${stats.failed} skipped=${stats.skipped} not_on_whatsapp=${notOnWhatsApp} total=${stats.total}`,
+      `failed=${stats.failed} skipped=${stats.skipped} not_on_whatsapp=${stats.not_on_whatsapp} total=${stats.total}`,
     );
-    return stats;
+    return { ...stats };
   }
 
   async getDashboardStats(): Promise<Record<string, number>> {
-    const rows = await this.repo
-      .createQueryBuilder('l')
-      .select('l.status', 'status')
-      .addSelect('COUNT(*)', 'count')
-      .groupBy('l.status')
-      .getRawMany<StatusRow>();
-    return this._buildStats(rows);
+    return { ...(await fetchAuthoritativeMetrics(this.ds, new Date(0))) };
   }
 
   async getNumberStats(numberId: string): Promise<Record<string, number>> {
-    const rows = await this.repo
-      .createQueryBuilder('l')
-      .select('l.status', 'status')
-      .addSelect('COUNT(*)', 'count')
-      .where('l.number_id = :numberId', { numberId })
-      .groupBy('l.status')
-      .getRawMany<StatusRow>();
-    return this._buildStats(rows);
+    return { ...(await fetchAuthoritativeMetrics(this.ds, new Date(0), { numberId })) };
   }
 
   async findLogs(filters: {
@@ -112,81 +65,41 @@ export class AnalyticsService {
   }
 
   async getEngineDashboardStats(): Promise<Record<string, number | string>> {
-    const todayMidnight = new Date();
-    todayMidnight.setHours(0, 0, 0, 0);
-
+    const todayMidnight = startOfToday();
     this.logger.log(`[MKT_DASHBOARD] endpoint=engine/dashboard starting stats fetch`);
 
-    let active_numbers = 0, queue_pending = 0, sent_today = 0,
-        delivered_today = 0, read_today = 0, replied_today = 0, crm_leads_today = 0,
-        not_on_whatsapp_today = 0, failed_today = 0;
+    let active_numbers = 0;
+    let metrics = {
+      sent: 0, delivered: 0, read: 0, replied: 0, leads: 0,
+      failed: 0, skipped: 0, not_on_whatsapp: 0, queue_pending: 0,
+    };
 
     try {
-      // Use sent_at for ALL date filters — it is always set on log rows and avoids
-      // the delivered_at / read_at columns that may be absent in older DB schemas.
-      // [CAMPAIGN_AUDIT] Use cumulative IN-list counts so that a message at READ
-      // is also counted as delivered and sent. This matches the _buildStats rollup
-      // and prevents sent_today < read_today on the dashboard.
-      [
-        active_numbers,
-        queue_pending,
-        sent_today,
-        delivered_today,
-        read_today,
-        replied_today,
-        not_on_whatsapp_today,
-        failed_today,
-      ] = await Promise.all([
+      [active_numbers, metrics] = await Promise.all([
         this.numberRepo.count({ where: { is_active: true } }),
-        this.queueRepo.count({ where: { status: QueueStatus.PENDING } }),
-        this.repo.createQueryBuilder('l')
-          .where('l.status IN (:...ss)', { ss: [QueueStatus.SENT, QueueStatus.DELIVERED, QueueStatus.READ, QueueStatus.REPLIED] })
-          .andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
-        this.repo.createQueryBuilder('l')
-          .where('l.status IN (:...ss)', { ss: [QueueStatus.DELIVERED, QueueStatus.READ, QueueStatus.REPLIED] })
-          .andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
-        this.repo.createQueryBuilder('l')
-          .where('l.status IN (:...ss)', { ss: [QueueStatus.READ, QueueStatus.REPLIED] })
-          .andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
-        this.repo.createQueryBuilder('l')
-          .where('l.status = :s', { s: QueueStatus.REPLIED })
-          .andWhere('l.sent_at >= :mid', { mid: todayMidnight }).getCount(),
-        // Not On WhatsApp: skipped because INVALID_WA_NUMBER — use created_at (sent_at is null for skips)
-        this.repo.createQueryBuilder('l')
-          .where('l.status = :s', { s: QueueStatus.SKIPPED })
-          .andWhere("l.message_body ILIKE :pattern", { pattern: '%INVALID_WA_NUMBER%' })
-          .andWhere('l.created_at >= :mid', { mid: todayMidnight }).getCount(),
-        // Failed today — use created_at (sent_at is null for failures)
-        this.repo.createQueryBuilder('l')
-          .where('l.status = :s', { s: QueueStatus.FAILED })
-          .andWhere('l.created_at >= :mid', { mid: todayMidnight }).getCount(),
+        fetchAuthoritativeMetrics(this.ds, todayMidnight),
       ]);
     } catch (err: any) {
       this.logger.error(`[MKT_DASHBOARD] endpoint=engine/dashboard fail=stats_query reason=${err?.message}`);
     }
 
-    try {
-      const rows: { count: string }[] = await this.ds.query(
-        // Match all WHATSAPP-source leads created today.
-        // Previously used context LIKE '%Marketing Engine%' which never matched the actual
-        // stored context value ('WHATSAPP – Inbound Message' from LeadContext.WHATSAPP_INBOUND).
-        `SELECT COUNT(*) AS count FROM leads WHERE source = $1 AND created_at >= $2`,
-        ['WHATSAPP', todayMidnight],
-      );
-      crm_leads_today = parseInt(rows[0]?.count ?? '0', 10);
-    } catch { crm_leads_today = 0; }
-
     this.logger.log(
       `[MKT_DASHBOARD] endpoint=engine/dashboard success=true ` +
-      `active_numbers=${active_numbers} queue_pending=${queue_pending} sent_today=${sent_today} ` +
-      `delivered_today=${delivered_today} read_today=${read_today} replied_today=${replied_today} ` +
-      `not_on_whatsapp_today=${not_on_whatsapp_today} failed_today=${failed_today} crm_leads_today=${crm_leads_today}`,
+      `active_numbers=${active_numbers} queue_pending=${metrics.queue_pending} sent_today=${metrics.sent} ` +
+      `delivered_today=${metrics.delivered} read_today=${metrics.read} replied_today=${metrics.replied} ` +
+      `not_on_whatsapp_today=${metrics.not_on_whatsapp} failed_today=${metrics.failed} crm_leads_today=${metrics.leads}`,
     );
 
     return {
-      active_numbers, queue_pending, sent_today, delivered_today,
-      read_today, replied_today, crm_leads_today,
-      not_on_whatsapp_today, failed_today,
+      active_numbers,
+      queue_pending: metrics.queue_pending,
+      sent_today: metrics.sent,
+      delivered_today: metrics.delivered,
+      read_today: metrics.read,
+      replied_today: metrics.replied,
+      crm_leads_today: metrics.leads,
+      not_on_whatsapp_today: metrics.not_on_whatsapp,
+      failed_today: metrics.failed,
     };
   }
 
@@ -254,23 +167,10 @@ export class AnalyticsService {
     risk_alerts: number;
     env: { pilot_mode: boolean; test_only: boolean; max_daily_audience: string };
   }> {
-    const todayMidnight = new Date();
-    todayMidnight.setHours(0, 0, 0, 0);
+    const todayMidnight = startOfToday();
 
-    const [funnelRows, naCountRows, audienceStats, numbers, templatePerf] = await Promise.all([
-      this.repo
-        .createQueryBuilder('l')
-        .select('l.status', 'status')
-        .addSelect('COUNT(*)', 'count')
-        .where('l.sent_at >= :since', { since: todayMidnight })
-        .groupBy('l.status')
-        .getRawMany<StatusRow>(),
-      // Not On WhatsApp count uses created_at (sent_at is null for skipped rows)
-      this.repo.createQueryBuilder('l')
-        .where('l.status = :s', { s: QueueStatus.SKIPPED })
-        .andWhere("l.message_body ILIKE :pattern", { pattern: '%INVALID_WA_NUMBER%' })
-        .andWhere('l.created_at >= :since', { since: todayMidnight })
-        .getCount(),
+    const [metrics, audienceStats, numbers, templatePerf] = await Promise.all([
+      fetchAuthoritativeMetrics(this.ds, todayMidnight),
       this.ds.query(`
         SELECT
           COUNT(*)                                                                       AS total,
@@ -283,18 +183,7 @@ export class AnalyticsService {
       this.getTemplatePerformance(),
     ]);
 
-    const funnel: Record<string, number> = {};
-    for (const r of funnelRows) funnel[r.status] = parseInt(r.count, 10);
-    const notOnWhatsAppToday = naCountRows;
-
-    let crm_leads_today = 0;
-    try {
-      const cr: { count: string }[] = await this.ds.query(
-        `SELECT COUNT(*) AS count FROM leads WHERE source = 'WHATSAPP' AND context LIKE '%Marketing Engine%' AND created_at >= $1`,
-        [todayMidnight],
-      );
-      crm_leads_today = parseInt(cr[0]?.count ?? '0', 10);
-    } catch { crm_leads_today = 0; }
+    const crm_leads_today = metrics.leads;
 
     const ar = audienceStats[0] ?? {};
     const riskAlerts = numbers.filter((n) => Number(n.risk_score) >= 60).length;
@@ -302,13 +191,13 @@ export class AnalyticsService {
     return {
       date: todayMidnight.toISOString().slice(0, 10),
       delivery_funnel: {
-        sent: funnel['sent'] ?? 0,
-        delivered: funnel['delivered'] ?? 0,
-        read: funnel['read'] ?? 0,
-        replied: funnel['replied'] ?? 0,
-        failed: funnel['failed'] ?? 0,
-        skipped: Math.max(0, (funnel['skipped'] ?? 0) - notOnWhatsAppToday),
-        not_on_whatsapp: notOnWhatsAppToday,
+        sent: metrics.sent,
+        delivered: metrics.delivered,
+        read: metrics.read,
+        replied: metrics.replied,
+        failed: metrics.failed,
+        skipped: metrics.skipped,
+        not_on_whatsapp: metrics.not_on_whatsapp,
       },
       audience: {
         total:       parseInt(ar.total       ?? '0', 10),
@@ -361,14 +250,19 @@ export class AnalyticsService {
       replied: string;
     };
 
-    const [funnelRows, leadRows] = await Promise.all([
+    const [funnelRows, replyCountRows, leadRows] = await Promise.all([
       this.ds.query<FunnelRow[]>(
         `SELECT
            COUNT(DISTINCT l.customer_phone) AS unique_messaged,
            COUNT(l.id)                      AS messages_sent,
-           COUNT(l.id) FILTER (WHERE l.reply_received = true) AS replied
+           0                                AS replied
          FROM whatsapp_message_logs l
-         WHERE l.sent_at >= $1`,
+         WHERE l.sent_at >= $1
+           AND l.status IN ('sent','delivered','read','replied')`,
+        [since],
+      ),
+      this.ds.query<{ cnt: string }[]>(
+        `SELECT COUNT(*)::int AS cnt FROM whatsapp_replies r WHERE r.received_at >= $1`,
         [since],
       ),
       this.ds.query<{ crm_leads: string; followed_up: string }[]>(
@@ -377,7 +271,6 @@ export class AnalyticsService {
            COUNT(DISTINCT ld.id) FILTER (WHERE ld.status NOT IN ('new', 'unassigned', 'junk'))                AS followed_up
          FROM leads ld
          WHERE ld.source = 'WHATSAPP'
-           AND ld.context LIKE '%Marketing Engine%'
            AND ld.created_at >= $1`,
         [since],
       ),
@@ -388,7 +281,7 @@ export class AnalyticsService {
 
     const uniqueMessaged = parseInt(f?.unique_messaged ?? '0', 10);
     const messagesSent   = parseInt(f?.messages_sent   ?? '0', 10);
-    const replied        = parseInt(f?.replied         ?? '0', 10);
+    const replied        = parseInt(replyCountRows[0]?.cnt ?? '0', 10);
     const crmLeads       = parseInt(l?.crm_leads       ?? '0', 10);
     const followedUp     = parseInt(l?.followed_up     ?? '0', 10);
 
@@ -405,8 +298,146 @@ export class AnalyticsService {
     };
   }
 
+  async getHistoricalPromotionAnalytics(days = 90): Promise<Record<string, unknown>> {
+    const since = new Date(Date.now() - Math.max(1, days) * 86_400_000);
+
+    const [
+      previousCampaigns,
+      historicalQueue,
+      productRotationHistory,
+      validationHistory,
+      dailyTrends,
+      weeklyTrends,
+      monthlyTrends,
+      warmupHistory,
+      promotionHistory,
+    ] = await Promise.all([
+      this.ds.query(`
+        SELECT
+          c.id, c.promo_id, c.campaign_name, c.status, c.test_mode,
+          c.telecaller_number_id, n.phone AS telecaller_phone, c.created_at,
+          COUNT(q.id)::int AS queue_total,
+          COUNT(q.id) FILTER (WHERE q.status = 'pending')::int AS queue_pending
+        FROM marketing_campaigns c
+        LEFT JOIN whatsapp_numbers n ON n.id = c.telecaller_number_id
+        LEFT JOIN whatsapp_message_queue q ON q.campaign_id = c.id
+        WHERE c.is_promotion = true AND c.created_at < $1
+        GROUP BY c.id, n.phone
+        ORDER BY c.created_at DESC
+        LIMIT 100
+      `, [startOfToday()]).catch(() => []),
+      this.ds.query(`
+        SELECT
+          q.status, q.error_message AS skip_reason,
+          n.phone AS telecaller_phone, n.name AS telecaller_name,
+          COUNT(*)::int AS count
+        FROM whatsapp_message_queue q
+        LEFT JOIN whatsapp_numbers n ON n.id = q.number_id
+        WHERE q.created_at >= $1
+        GROUP BY q.status, q.error_message, n.phone, n.name
+        ORDER BY n.phone, q.status
+      `, [since]).catch(() => []),
+      this.ds.query(`
+        SELECT
+          r.sku, s.item_name AS product_name, r.campaign_id, c.promo_id,
+          n.phone AS telecaller_phone,
+          COUNT(DISTINCT r.id)::int AS times_used,
+          MAX(r.sent_at) AS last_sent_at
+        FROM promotion_product_rotation r
+        LEFT JOIN shopify_catalog_items s ON s.id = r.product_id
+        LEFT JOIN marketing_campaigns c ON c.id = r.campaign_id
+        LEFT JOIN whatsapp_numbers n ON n.id = r.telecaller_number_id
+        WHERE r.sent_at >= $1
+        GROUP BY r.sku, s.item_name, r.campaign_id, c.promo_id, n.phone
+        ORDER BY last_sent_at DESC
+        LIMIT 100
+      `, [since]).catch(() => []),
+      this.ds.query(`
+        SELECT
+          c.id, c.promo_id, c.campaign_name, c.status, c.created_at,
+          COUNT(q.id)::int AS queue_total,
+          COUNT(q.id) FILTER (WHERE q.status = 'sent')::int AS sent,
+          COUNT(q.id) FILTER (WHERE q.status = 'failed')::int AS failed,
+          COUNT(q.id) FILTER (WHERE q.status = 'skipped')::int AS skipped
+        FROM marketing_campaigns c
+        LEFT JOIN whatsapp_message_queue q ON q.campaign_id = c.id
+        WHERE (c.promo_id LIKE 'VALIDATION-%' OR c.campaign_name LIKE 'VALIDATION-%')
+          AND c.created_at >= $1
+        GROUP BY c.id
+        ORDER BY c.created_at DESC
+        LIMIT 100
+      `, [since]).catch(() => []),
+      this._trendRows('day', since),
+      this._trendRows('week', since),
+      this._trendRows('month', since),
+      this.ds.query(`
+        SELECT
+          al.created_at,
+          al.number_id,
+          n.phone AS telecaller_phone,
+          n.name AS telecaller_name,
+          al.event,
+          al.reason,
+          al.metadata
+        FROM engine_audit_logs al
+        LEFT JOIN whatsapp_numbers n ON n.id = al.number_id
+        WHERE al.event IN ('WARMUP_RESET', 'WARMUP_PROMOTED')
+          AND al.created_at >= $1
+        ORDER BY al.created_at DESC
+        LIMIT 200
+      `, [since]).catch(() => []),
+      this.ds.query(`
+        SELECT
+          al.created_at,
+          al.number_id,
+          n.phone AS telecaller_phone,
+          al.event,
+          al.reason,
+          al.metadata
+        FROM engine_audit_logs al
+        LEFT JOIN whatsapp_numbers n ON n.id = al.number_id
+        WHERE al.event IN ('LOW_DELIVERY_WARNING', 'LOW_READ_WARNING', 'LOW_REPLY_WARNING')
+          AND al.created_at >= $1
+        ORDER BY al.created_at DESC
+        LIMIT 200
+      `, [since]).catch(() => []),
+    ]);
+
+    return {
+      since: since.toISOString(),
+      previous_campaigns: previousCampaigns,
+      campaign_history: previousCampaigns,
+      historical_queue: historicalQueue,
+      product_rotation_history: productRotationHistory,
+      validation_history: validationHistory,
+      daily_trends: dailyTrends,
+      weekly_trends: weeklyTrends,
+      monthly_trends: monthlyTrends,
+      warmup_history: warmupHistory,
+      promotion_history: promotionHistory,
+    };
+  }
+
+  private async _trendRows(bucket: 'day' | 'week' | 'month', since: Date): Promise<Record<string, unknown>[]> {
+    return this.ds.query(`
+      SELECT
+        DATE_TRUNC('${bucket}', l.sent_at AT TIME ZONE 'Asia/Kolkata')::date AS period,
+        COUNT(*) FILTER (WHERE l.status IN ('sent','delivered','read','replied'))::int AS sent,
+        COUNT(*) FILTER (WHERE l.status IN ('delivered','read','replied'))::int AS delivered,
+        COUNT(*) FILTER (WHERE l.status IN ('read','replied'))::int AS read,
+        COUNT(*) FILTER (WHERE l.status = 'failed')::int AS failed,
+        COUNT(r.id)::int AS replies
+      FROM whatsapp_message_logs l
+      LEFT JOIN whatsapp_replies r ON r.customer_phone = l.customer_phone
+        AND r.number_id IS NOT DISTINCT FROM l.number_id
+        AND r.received_at >= l.sent_at
+      WHERE l.sent_at >= $1
+      GROUP BY 1
+      ORDER BY 1 ASC
+    `, [since]).catch(() => []);
+  }
+
   private _buildStats(rows: StatusRow[]): Record<string, number> {
-    // Count raw exclusive per-status first
     const raw: Record<string, number> = {};
     let total = 0;
     for (const r of rows) {
@@ -415,29 +446,18 @@ export class AnalyticsService {
       total += n;
     }
 
-    // [CAMPAIGN_AUDIT] Cumulative funnel: a message at READ was also DELIVERED and SENT.
-    // Status upgrades (SENT → DELIVERED → READ) mean the DB row holds only the latest
-    // status. Without this rollup, sent_count falls as messages progress, causing read > sent.
-    const replied   = raw['replied']   ?? 0;
-    const read      = (raw['read']     ?? 0) + replied;
-    const delivered = (raw['delivered'] ?? 0) + read;
-    const sent      = (raw['sent']     ?? 0) + delivered;
+    const rolled = rollupCumulativeFromStatusRows(raw);
 
     this.logger.log(
       `[CAMPAIGN_AUDIT] _buildStats cumulative rollup: ` +
-      `raw={sent:${raw['sent'] ?? 0},delivered:${raw['delivered'] ?? 0},read:${raw['read'] ?? 0},replied:${replied}} ` +
-      `cumulative={sent:${sent},delivered:${delivered},read:${read},replied:${replied}} ` +
-      `failed:${raw['failed'] ?? 0} skipped:${raw['skipped'] ?? 0} total:${total}`,
+      `raw={sent:${raw['sent'] ?? 0},delivered:${raw['delivered'] ?? 0},read:${raw['read'] ?? 0},replied:${raw['replied'] ?? 0}} ` +
+      `cumulative={sent:${rolled.sent},delivered:${rolled.delivered},read:${rolled.read},replied:${rolled.replied}} ` +
+      `failed:${rolled.failed} skipped:${rolled.skipped} total:${total}`,
     );
 
     return {
-      sent,
-      delivered,
-      read,
-      replied,
-      failed:           raw['failed']  ?? 0,
-      skipped:          raw['skipped'] ?? 0,
-      not_on_whatsapp:  0,  // populated by callers that run the INVALID_WA_NUMBER count query
+      ...rolled,
+      not_on_whatsapp: 0,
       total,
     };
   }

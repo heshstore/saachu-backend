@@ -19,7 +19,9 @@ import { PromotionAiTemplateService } from '../promotion/promotion-ai-template.s
 import { CampaignsService } from '../campaigns/campaigns.service';
 import { buildCta } from '../shared/cta-builder';
 import { WhatsappNumber } from '../entities/whatsapp-number.entity';
-import { getActiveLimits } from '../shared/number-limits';
+import { getReleaseAllowance } from '../shared/number-limits';
+import { NumberConnectionState } from '../shared/number-state';
+import { normalizeSkipReason, SkipReason } from '../shared/skip-reason';
 
 const CONTENT_FINGERPRINT_DAYS       = 3;
 // Test-mode campaigns use a 1-hour window so the same template can be resent quickly
@@ -62,7 +64,7 @@ export class SenderService implements OnModuleInit {
   private readonly logger = new Logger(SenderService.name);
   private _tickSelecting = false;
   private readonly _numberLocks = new Map<string, boolean>();
-  private _nextAllowedSend: Date = new Date(0); // initially ready immediately
+  private readonly _nextAllowedSendByNumber = new Map<string, Date>();
 
   constructor(
     @InjectRepository(WhatsappMessageQueue)
@@ -108,33 +110,39 @@ export class SenderService implements OnModuleInit {
     this._numberLocks.set(numberId, false);
   }
 
+  private _nextAllowedSend(numberId: string): Date {
+    return this._nextAllowedSendByNumber.get(numberId) ?? new Date(0);
+  }
+
+  private _setNextAllowedSend(numberId: string): void {
+    this._nextAllowedSendByNumber.set(numberId, new Date(Date.now() + humanDelay()));
+  }
+
   @Interval(15_000)
   async tick(): Promise<void> {
     const connected    = this.whatsAppService.isAnyConnected();
     const enabled      = process.env.WHATSAPP_ENGINE_ENABLED !== 'false';
     const inWindow     = this.timingAi.isWithinSendWindow();
     const testBypass   = isTestBypassMode();
-    const delayMs      = Math.max(0, this._nextAllowedSend.getTime() - Date.now());
-    // In TEST_ONLY+BYPASS mode all human delay is disabled so testing is never blocked.
-    const delayPending = !testBypass && delayMs > 0;
     const lockedNumbers = [...this._numberLocks.entries()].filter(([, v]) => v).map(([k]) => k);
+    const delayedNumbers = [...this._nextAllowedSendByNumber.entries()]
+      .filter(([, dt]) => dt.getTime() > Date.now())
+      .map(([numberId, dt]) => ({ numberId, nextAllowedSend: dt.toISOString() }));
 
     this.logger.log(
       `[MKT_SENDER_TICK] enabled=${enabled} connected=${connected} ` +
       `inWindow=${inWindow} lockedNumbers=${JSON.stringify(lockedNumbers)} ` +
-      `delayPending=${delayPending} nextAllowedSend=${this._nextAllowedSend.toISOString()} ` +
+      `delayedNumbers=${JSON.stringify(delayedNumbers)} ` +
       `testOnly=${process.env.WHATSAPP_ENGINE_TEST_ONLY} bypass=${process.env.MARKETING_TEST_BYPASS_SEND_WINDOW}`,
     );
     this.logger.log(
       `[MKT_DELAY_DEBUG] now=${new Date().toISOString()} ` +
-      `nextAllowedSend=${this._nextAllowedSend.toISOString()} ` +
-      `delayMs=${delayMs} ` +
-      `source=${testBypass ? 'bypassed_test_mode' : delayMs > 0 ? 'human_delay_active' : 'clear'}`,
+      `delayedNumbers=${JSON.stringify(delayedNumbers)} ` +
+      `source=${testBypass ? 'bypassed_test_mode' : 'per_number_delay'}`,
     );
 
     if (!enabled)            { this.logger.log('[MKT_SENDER_TICK_SKIP] reason=engine_disabled'); this.logger.warn('[SENDER_AUDIT] tick_blocked: reason=WHATSAPP_ENGINE_ENABLED=false'); return; }
     if (this._tickSelecting) { this.logger.log('[MKT_SENDER_TICK_SKIP] reason=tick_selecting'); return; }
-    if (delayPending)        { this.logger.log(`[MKT_SENDER_TICK_SKIP] reason=human_delay until=${this._nextAllowedSend.toISOString()}`); return; }
     if (!connected)          { this.logger.log('[MKT_SENDER_TICK_SKIP] reason=no_wa_connection — waiting for client ready'); this.logger.warn('[SENDER_AUDIT] tick_blocked: reason=no_connected_wa_number'); return; }
 
     // Window check: outside business hours blocks live sends but not test_mode campaigns.
@@ -160,125 +168,79 @@ export class SenderService implements OnModuleInit {
     // _tickSelecting serializes fetch+select+lock so two concurrent @Interval firings
     // cannot race to claim the same pending item before either calls markProcessing.
     this._tickSelecting = true;
-    let selectedItem: WhatsappMessageQueue | null = null;
-    let selectedNumber: WhatsappNumber | null = null;
+    const assignments: { item: WhatsappMessageQueue; number: WhatsappNumber }[] = [];
 
     try {
       this.logger.log(
         `[MKT_SENDER_QUEUE_PATH] windowBypassed=${windowBypassed} inWindow=${inWindow} ` +
-        `using=${windowBypassed ? 'findTestModePending' : 'findPending'} ` +
+        `using=${windowBypassed ? 'findNextPendingForNumber(test)' : 'findNextPendingForNumber'} ` +
         `testBypass=${testBypass}`,
       );
-      const pending = windowBypassed
-        ? await this.queueService.findTestModePending(10)
-        : await this.queueService.findPending(10);
 
+      const allNumbers = await this.numbersService.findAll();
       this.logger.log(
-        `[MKT_PENDING_QUERY_RESULT] count=${pending.length} phones=${JSON.stringify(pending.map(p => p.customer_phone))} ids=${JSON.stringify(pending.map(p => p.id))}`,
+        `[MKT_POOL_STAGE_1] total=${allNumbers.length} ` +
+        `numbers=${JSON.stringify(allNumbers.map(n => ({
+          id: n.id, phone: n.phone,
+          is_active: n.is_active, status: n.status,
+          number_state: this.whatsAppService.getNumberState(n.id),
+          wa_state: n.wa_state,
+          daily_sent: n.daily_sent,
+          db_daily_limit: n.daily_limit,
+          release_allowance: getReleaseAllowance(n.warmup_level),
+          warmup_level: n.warmup_level,
+        })))}`,
       );
-      this.logger.log(`[MKT_QUEUE_FETCHED] pending_count=${pending.length} ids=${JSON.stringify(pending.map(p => p.id))}`);
 
-      if (pending.length) {
-        const allNumbers = await this.numbersService.findAll();
-
-        // ── STAGE 1: total pool ───────────────────────────────────────────────
-        this.logger.log(
-          `[MKT_POOL_STAGE_1] total=${allNumbers.length} ` +
-          `numbers=${JSON.stringify(allNumbers.map(n => ({
-            id: n.id, phone: n.phone,
-            is_active: n.is_active, status: n.status,
-            wa_state: n.wa_state,
-            daily_sent: n.daily_sent,
-            db_daily_limit: n.daily_limit,
-            effective_daily_cap: getActiveLimits(n.warmup_level).daily,
-            warmup_level: n.warmup_level,
-          })))}`,
-        );
-
-        // ── STAGE 2: after is_active filter ──────────────────────────────────
-        const s2: typeof allNumbers = [];
-        for (const n of allNumbers) {
-          if (n.is_active) { s2.push(n); }
-          else { this.logger.log(`[MKT_POOL_STAGE_2_DROP] id=${n.id} phone=${n.phone} reason=is_active=false`); }
+      const eligibleNumbers: WhatsappNumber[] = [];
+      for (const n of allNumbers) {
+        const releaseAllowance = getReleaseAllowance(n.warmup_level);
+        const diag = this.whatsAppService.getConnectionDiagnostics(n.id);
+        if (!n.is_active) {
+          this.logger.log(`[MKT_POOL_DROP] id=${n.id} phone=${n.phone} reason=is_active=false`);
+          continue;
         }
-        this.logger.log(`[MKT_POOL_STAGE_2] after_active=${s2.length} dropped=${allNumbers.length - s2.length}`);
-
-        // ── STAGE 3: log DB wa_state for diagnostics, but do NOT filter here.
-        // The DB wa_state can lag behind the in-memory state during backend startup
-        // (pre-reset window) and during _scheduleReconnect teardown. Filtering on it
-        // drops numbers that are actually connected, causing after_ready=0 while the
-        // UI shows "Connected". Stage 4 (isConnected) is the authoritative check.
-        for (const n of s2) {
-          this.logger.log(`[MKT_POOL_STAGE_3_DIAG] id=${n.id} phone=${n.phone} db_wa_state=${n.wa_state ?? 'null'}`);
+        if (this.whatsAppService.getNumberState(n.id) !== NumberConnectionState.CONNECTED) {
+          this.logger.log(
+            `[MKT_POOL_DROP] id=${n.id} phone=${n.phone} reason=number_state_${diag.numberState} ` +
+            `waState=${diag.waState} pageOpen=${diag.pageOpen} browserConnected=${diag.browserConnected}`,
+          );
+          continue;
         }
-        const s3 = s2; // pass-through; Stage 4 is the authoritative connection filter
-        this.logger.log(`[MKT_POOL_STAGE_3] after_diag=${s3.length} (db_wa_state check removed — Stage 4 isConnected() is authoritative)`);
-
-        // ── STAGE 4: after isConnected() filter — authoritative in-memory check ─
-        const s4: typeof allNumbers = [];
-        for (const n of s3) {
-          const diag = this.whatsAppService.getConnectionDiagnostics(n.id);
-          if (diag.isConnectedResult) {
-            s4.push(n);
-          } else {
-            this.logger.log(
-              `[MKT_POOL_STAGE_4_DROP] id=${n.id} phone=${n.phone} reason=isConnected=false ` +
-              `inClientsMap=${diag.inClientsMap} hasClient=${diag.hasClient} ` +
-              `destroyed=${diag.destroyed} waState=${diag.waState} ` +
-              `pageExists=${diag.pageExists} pageOpen=${diag.pageOpen} ` +
-              `browserConnected=${diag.browserConnected}`,
-            );
-          }
+        if (n.daily_sent >= releaseAllowance) {
+          this.logger.log(
+            `[MKT_POOL_DROP] id=${n.id} phone=${n.phone} reason=release_allowance_exhausted ` +
+            `daily_sent=${n.daily_sent} release_allowance=${releaseAllowance} warmup_level=${n.warmup_level}`,
+          );
+          continue;
         }
-        this.logger.log(`[MKT_POOL_STAGE_4] after_connected=${s4.length} dropped=${s3.length - s4.length}`);
-
-        // ── STAGE 5: after warmup/daily-cap filter ────────────────────────────
-        const s5: typeof allNumbers = [];
-        for (const n of s4) {
-          const lim = getActiveLimits(n.warmup_level);
-          if (n.daily_sent < lim.daily) {
-            s5.push(n);
-          } else {
-            this.logger.log(
-              `[MKT_POOL_STAGE_5_DROP] id=${n.id} phone=${n.phone} reason=daily_cap ` +
-              `daily_sent=${n.daily_sent} effective_cap=${lim.daily} ` +
-              `db_daily_limit=${n.daily_limit} warmup_level=${n.warmup_level} ` +
-              `pilot_mode=${process.env.WHATSAPP_ENGINE_PILOT_MODE}`,
-            );
-          }
+        if (this._isNumberLocked(n.id)) {
+          this.logger.log(`[MKT_POOL_DROP] id=${n.id} phone=${n.phone} reason=number_locked`);
+          continue;
         }
-        this.logger.log(`[MKT_POOL_STAGE_5] after_daily_cap=${s5.length} dropped=${s4.length - s5.length}`);
-
-        const eligibleNumbers = s5;
-
-        // ── STAGE 6: lock filter + selection ─────────────────────────────────
-        for (const item of pending) {
-          let preferred = eligibleNumbers.find(n => n.id === item.number_id) ?? null;
-          if (!preferred) {
-            const sorted = [...eligibleNumbers].sort((a, b) => a.daily_sent - b.daily_sent);
-            preferred = sorted[0] ?? null;
-          }
-          if (preferred) {
-            const locked = this._isNumberLocked(preferred.id);
-            this.logger.log(`[MKT_POOL_STAGE_6] queueId=${item.id} preferred=${preferred.phone} locked=${locked}`);
-            if (!locked) {
-              selectedItem = item;
-              selectedNumber = preferred;
-              this._lockNumber(preferred.id);
-              this.logger.log(`[MKT_NUMBER_LOCK_ACQUIRED] numberId=${preferred.id} phone=${preferred.phone} queueId=${item.id}`);
-              break;
-            }
-          } else {
-            this.logger.log(`[MKT_POOL_STAGE_6] queueId=${item.id} preferred=none reason=no_eligible_numbers`);
-          }
+        const nextAllowed = this._nextAllowedSend(n.id);
+        if (!testBypass && nextAllowed.getTime() > Date.now()) {
+          this.logger.log(`[MKT_POOL_DROP] id=${n.id} phone=${n.phone} reason=per_number_delay until=${nextAllowed.toISOString()}`);
+          continue;
         }
+        eligibleNumbers.push(n);
+      }
+      this.logger.log(`[MKT_POOL_ELIGIBLE] count=${eligibleNumbers.length} phones=${JSON.stringify(eligibleNumbers.map(n => n.phone))}`);
 
-        if (!selectedItem) {
-          this.logger.log('[MKT_SENDER_TICK_SKIP] reason=all_eligible_numbers_locked');
+      for (const number of eligibleNumbers) {
+        const item = await this.queueService.findNextPendingForNumber(number.id, windowBypassed);
+        if (!item) {
+          this.logger.log(`[MKT_NUMBER_QUEUE_EMPTY] numberId=${number.id} phone=${number.phone}`);
+          continue;
         }
-      } else {
-        this.logger.log('[MKT_SENDER_TICK_SKIP] reason=queue_empty');
-        this.logger.log('[SENDER_AUDIT] tick_result: queue_empty — no PENDING items with scheduled_at <= now');
+        assignments.push({ item, number });
+        this._lockNumber(number.id);
+        this.logger.log(`[MKT_NUMBER_LOCK_ACQUIRED] numberId=${number.id} phone=${number.phone} queueId=${item.id}`);
+      }
+
+      if (!assignments.length) {
+        this.logger.log('[MKT_SENDER_TICK_SKIP] reason=no_per_number_pending_items');
+        this.logger.log('[SENDER_AUDIT] tick_result: queue_empty_for_eligible_numbers');
       }
     } catch (err: any) {
       this.logger.error(`[MKT_SCHEDULER_FATAL] tick selection crashed: ${err?.message}\n${err?.stack}`);
@@ -286,21 +248,22 @@ export class SenderService implements OnModuleInit {
       this._tickSelecting = false;
     }
 
-    if (!selectedItem || !selectedNumber) return;
+    if (!assignments.length) return;
 
-    this.logger.log(
-      `[MKT_QUEUE_ITEM_PROCESS] id=${selectedItem.id} phone=${selectedItem.customer_phone} ` +
-      `template_id=${selectedItem.template_id ?? 'none'} scheduled_at=${selectedItem.scheduled_at?.toISOString()}`,
-    );
-
-    try {
-      await this.processNext(selectedItem, selectedNumber);
-    } catch (err: any) {
-      this.logger.error(`[MKT_SCHEDULER_FATAL] tick crashed: ${err?.message}\n${err?.stack}`);
-    } finally {
-      this._unlockNumber(selectedNumber.id);
-      this.logger.log(`[MKT_NUMBER_LOCK_RELEASED] numberId=${selectedNumber.id} phone=${selectedNumber.phone} queueId=${selectedItem.id}`);
-    }
+    await Promise.allSettled(assignments.map(async ({ item, number }) => {
+      this.logger.log(
+        `[MKT_QUEUE_ITEM_PROCESS] id=${item.id} phone=${item.customer_phone} ` +
+        `template_id=${item.template_id ?? 'none'} scheduled_at=${item.scheduled_at?.toISOString()}`,
+      );
+      try {
+        await this.processNext(item, number);
+      } catch (err: any) {
+        this.logger.error(`[MKT_SCHEDULER_FATAL] tick crashed: ${err?.message}\n${err?.stack}`);
+      } finally {
+        this._unlockNumber(number.id);
+        this.logger.log(`[MKT_NUMBER_LOCK_RELEASED] numberId=${number.id} phone=${number.phone} queueId=${item.id}`);
+      }
+    }));
   }
 
   // Outer shell: guarantees [MKT_PROCESS_COMPLETE] fires regardless of outcome.
@@ -331,6 +294,16 @@ export class SenderService implements OnModuleInit {
     let logRow: WhatsappMessageLog | null = null;
 
     try {
+      // Reject cross-tier preselection — queue owner must equal actual sender.
+      if (preselectedNumber && item.number_id && preselectedNumber.id !== item.number_id) {
+        this.logger.warn(
+          `[MKT_SENDER_TIER_VIOLATION] queue_id=${item.id} assigned=${item.number_id} ` +
+          `preselected=${preselectedNumber.id} — deferring`,
+        );
+        await this.queueService.markDeferred(item.id, SkipReason.ASSIGNED_SENDER_UNAVAILABLE);
+        this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=deferred_pending failure_reason="ASSIGNED_SENDER_UNAVAILABLE"`);
+        return;
+      }
       // ── Gate: campaign test_mode — validation campaigns only send to test contacts ─
       // Driven by campaign.test_mode, NOT the env var. This decouples validation mode
       // from autonomous mode: autonomous campaigns have test_mode=false and send to all
@@ -355,7 +328,7 @@ export class SenderService implements OnModuleInit {
             `[MKT_SKIP_DECISION] queue_id=${item.id} phone=${item.customer_phone} ` +
             `rule=CAMPAIGN_TEST_MODE reason="not a test contact" condition_values="campaign_id=${item.campaign_id} testPhones=${JSON.stringify(testPhones)}"`,
           );
-          await this.queueService.markSkipped(item.id, 'Campaign test_mode: not a test contact');
+          await this.queueService.markSkipped(item.id, SkipReason.CUSTOMER_PROTECTED);
           this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=skipped attempts=${item.attempt_count ?? 0} failure_reason="CAMPAIGN_TEST_MODE: not a test contact"`);
           return;
         }
@@ -368,13 +341,11 @@ export class SenderService implements OnModuleInit {
 
       if (!number) {
         const allNumbers = await this.numbersService.findAll();
-        // wa_state DB check removed: isConnected() is the authoritative in-memory check.
-        // DB wa_state can lag during startup pre-reset and _scheduleReconnect teardown.
+        // DB wa_state can lag; NumberConnectionState is the authoritative connection check.
         const eligibleNumbers = allNumbers.filter(n => {
           if (!n.is_active) return false;
-          if (!this.whatsAppService.isConnected(n.id)) return false;
-          const nLimits = getActiveLimits(n.warmup_level);
-          return n.daily_sent < nLimits.daily;
+          if (this.whatsAppService.getNumberState(n.id) !== NumberConnectionState.CONNECTED) return false;
+          return n.daily_sent < getReleaseAllowance(n.warmup_level);
         });
 
         this.logger.log(
@@ -382,28 +353,27 @@ export class SenderService implements OnModuleInit {
           `eligible=${eligibleNumbers.length} numbers=[${eligibleNumbers.map(n => n.phone).join(',')}]`,
         );
 
-        if (!eligibleNumbers.length) {
-          this.logger.warn(
-            `[MKT_SKIP_DECISION] queue_id=${item.id} phone=${item.customer_phone} ` +
-            `rule=NO_ELIGIBLE_SENDER reason="no connected numbers with daily capacity" ` +
-            `condition_values="total_numbers=${allNumbers.length}"`,
-          );
-          await this.queueService.markSkipped(item.id, 'NO_ELIGIBLE_SENDER: no connected numbers with capacity');
-          this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=skipped attempts=${item.attempt_count ?? 0} failure_reason="NO_ELIGIBLE_SENDER"`);
+        if (!item.number_id) {
+          await this.queueService.markDeferred(item.id, SkipReason.ASSIGNED_SENDER_UNAVAILABLE);
+          this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=deferred_pending failure_reason="ASSIGNED_SENDER_UNAVAILABLE"`);
           return;
         }
 
-        // Prefer assigned number if it is in the eligible pool; otherwise pick lowest daily_sent.
         number = eligibleNumbers.find(n => n.id === item.number_id) ?? null;
         if (!number) {
-          eligibleNumbers.sort((a, b) => a.daily_sent - b.daily_sent);
-          number = eligibleNumbers[0];
+          this.logger.warn(
+            `[MKT_SENDER_DEFER] queue_id=${item.id} phone=${item.customer_phone} ` +
+            `assigned_number_id=${item.number_id} reason=ASSIGNED_SENDER_UNAVAILABLE ` +
+            `eligible_count=${eligibleNumbers.length}`,
+          );
+          await this.queueService.markDeferred(item.id, SkipReason.ASSIGNED_SENDER_UNAVAILABLE);
+          this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=deferred_pending failure_reason="ASSIGNED_SENDER_UNAVAILABLE"`);
+          return;
         }
 
         this.logger.log(
           `[MKT_SENDER_SELECTED] queue_id=${item.id} number=${number.phone} ` +
-          `number_id=${number.id} daily_sent=${number.daily_sent} ` +
-          `reason=${number.id === item.number_id ? 'assigned' : 'lowest_usage_failover'}`,
+          `number_id=${number.id} daily_sent=${number.daily_sent} reason=assigned_only`,
         );
       } else {
         this.logger.log(
@@ -419,33 +389,10 @@ export class SenderService implements OnModuleInit {
       // queue outcome (SENT / SKIPPED / FAILED / DEFERRED) carries sender traceability.
       await this.queueService.assignSender(item.id, number.id, number.phone, number.name);
 
-      // Hourly cap check on the selected number
-      const limits = getActiveLimits(number.warmup_level);
-      const oneHourAgo = new Date(Date.now() - 3_600_000);
-      const sentLastHour = await this.logRepo
-        .createQueryBuilder('l')
-        .where('l.number_id = :nid', { nid: number.id })
-        .andWhere('l.sent_at >= :oneHourAgo', { oneHourAgo })
-        .andWhere('l.status != :failed', { failed: QueueStatus.FAILED })
-        .getCount();
-
-      if (sentLastHour >= limits.hourly) {
-        this.logger.log(
-          `[MKT_HOURLY_CAP_DEFER] queue_id=${item.id} phone=${item.customer_phone} ` +
-          `sent_last_hour=${sentLastHour} hourly_limit=${limits.hourly} warmup=${number.warmup_level} ` +
-          `— deferring 1 hour instead of permanently skipping`,
-        );
-        await this.queueService.markDeferred(item.id, `Hourly cap (${limits.hourly}/hr) — retry after 1h`);
-        await this.auditService.log({
-          event: AuditEvent.HOURLY_CAP_HIT,
-          number_id: number.id,
-          customer_phone: item.customer_phone,
-          template_id: item.template_id ?? undefined,
-          reason: `sent_last_hour=${sentLastHour} >= hourly_cap=${limits.hourly} — deferred`,
-        });
-        this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=deferred_pending attempts=${item.attempt_count ?? 0} failure_reason="HOURLY_CAP_DEFERRED: ${sentLastHour}/${limits.hourly}"`);
-        return;
-      }
+      this.logger.log(
+        `[MKT_DAILY_CAP_ONLY] queue_id=${item.id} number_id=${number.id} ` +
+        `warmup=${number.warmup_level} daily_sent=${number.daily_sent} release_allowance=${getReleaseAllowance(number.warmup_level)}`,
+      );
 
       // ── Gate: content fingerprint ────────────────────────────────────────────
       // AI templates generate unique content per send — fingerprint by template_id is meaningless.
@@ -496,7 +443,7 @@ export class SenderService implements OnModuleInit {
             `rule=CONTENT_FINGERPRINT reason="same template sent within ${windowLabel}" ` +
             `condition_values="template_id=${item.template_id} recent_matches=${recentSame} test_mode=${isTestCampaign}"`,
           );
-          await this.queueService.markSkipped(item.id, `Content fingerprint: same template sent recently`);
+          await this.queueService.markSkipped(item.id, SkipReason.COOLDOWN_ACTIVE);
           await this.auditService.log({
             event: AuditEvent.FINGERPRINT_SKIP,
             number_id: item.number_id ?? undefined,
@@ -517,7 +464,7 @@ export class SenderService implements OnModuleInit {
           `rule=NO_BODY reason="no usable message body" ` +
           `condition_values="template_id=${item.template_id ?? 'none'} payload=${JSON.stringify(item.message_payload).slice(0, 80)}"`,
         );
-        await this.queueService.markSkipped(item.id, 'No usable message body');
+        await this.queueService.markSkipped(item.id, SkipReason.MISSING_REQUIRED_DATA);
         this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=skipped attempts=${item.attempt_count ?? 0} failure_reason="NO_BODY"`);
         return;
       }
@@ -563,8 +510,8 @@ export class SenderService implements OnModuleInit {
           await this.numbersService.incrementDailySent(number.id);
           await this.numbersService.updateLastMessageSent(number.id);
         }
-        if (!isTestBypassMode()) {
-          this._nextAllowedSend = new Date(Date.now() + humanDelay());
+        if (number && !isTestBypassMode()) {
+          this._setNextAllowedSend(number.id);
         }
         this.logger.log(`[MKT_FINAL_QUEUE_STATE] queue_id=${item.id} final_status=sent(dry_run) attempts=${item.attempt_count ?? 0} failure_reason="none"`);
         return;
@@ -630,9 +577,10 @@ export class SenderService implements OnModuleInit {
           `condition_values="number_id=${number?.id ?? 'none'} mapped_status=${mappedStatus}"`,
         );
 
+        const skipReason = isTransportSkip ? normalizeSkipReason(errMsg) : null;
         await this.logRepo.update(logRow.id, {
           status: mappedStatus,
-          message_body: `${isTransportSkip ? 'SKIPPED' : 'SEND_FAILED'}: ${errMsg}`,
+          message_body: `${isTransportSkip ? skipReason : 'SEND_FAILED'}: ${errMsg}`,
         });
 
         if (isTransportSkip) {
@@ -715,7 +663,7 @@ export class SenderService implements OnModuleInit {
       }
 
       if (!isTestBypassMode()) {
-        this._nextAllowedSend = new Date(Date.now() + humanDelay());
+        this._setNextAllowedSend(number.id);
       }
 
     } catch (err: any) {

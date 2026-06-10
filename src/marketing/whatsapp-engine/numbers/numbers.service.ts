@@ -1,15 +1,21 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { WhatsappNumber } from '../entities/whatsapp-number.entity';
+import { EngineAuditService, AuditEvent } from '../engine/engine-audit.service';
+import { getIstDayBounds } from '../shared/ist-time';
+import { getReleaseAllowance } from '../shared/number-limits';
 
 @Injectable()
 export class NumbersService {
+  private readonly logger = new Logger(NumbersService.name);
+
   constructor(
     @InjectRepository(WhatsappNumber)
     private repo: Repository<WhatsappNumber>,
     @InjectDataSource()
     private readonly ds: DataSource,
+    private readonly auditService: EngineAuditService,
   ) {}
 
   findAll(): Promise<WhatsappNumber[]> {
@@ -44,9 +50,43 @@ export class NumbersService {
     await this.repo.delete(id);
   }
 
-  // Reset all daily_sent counters to 0 — intended to be called once per day via cron
-  async resetDailyCounts(): Promise<void> {
-    await this.repo.createQueryBuilder().update().set({ daily_sent: 0 }).execute();
+  async ensureDailyCountsReset(): Promise<void> {
+    const { start } = getIstDayBounds();
+    const rows = await this.ds.query<{ cnt: string }[]>(
+      `SELECT COUNT(*)::int AS cnt
+       FROM engine_audit_logs
+       WHERE event = $1 AND created_at >= $2`,
+      [AuditEvent.WARMUP_RESET, start],
+    ).catch(() => [{ cnt: '0' }]);
+    if (parseInt(rows[0]?.cnt ?? '0', 10) > 0) return;
+    this.logger.warn(`[WARMUP_RESET_GUARD] no reset audit found since IST midnight ${start.toISOString()} — resetting now`);
+    await this.resetDailyCounts('guard');
+  }
+
+  // Reset all daily_sent counters to 0. Cron runs at midnight IST; guard covers missed cron/restart.
+  async resetDailyCounts(source = 'manual'): Promise<{ reset: number }> {
+    const rows = await this.repo.find({ order: { created_at: 'ASC' } });
+    for (const n of rows) {
+      const releaseAllowance = getReleaseAllowance(n.warmup_level);
+      await this.repo.update(n.id, { daily_sent: 0, daily_limit: releaseAllowance });
+      this.logger.log(
+        `[WARMUP_RESET] number=${n.phone} number_id=${n.id} previous_count=${n.daily_sent ?? 0} new_count=0 source=${source}`,
+      );
+      await this.auditService.log({
+        event: AuditEvent.WARMUP_RESET,
+        number_id: n.id,
+        reason: 'Daily warmup counter reset at IST day boundary',
+        metadata: {
+          phone: n.phone,
+          previous_count: n.daily_sent ?? 0,
+          new_count: 0,
+          release_allowance: releaseAllowance,
+          warmup_level: n.warmup_level,
+          source,
+        },
+      });
+    }
+    return { reset: rows.length };
   }
 
   async incrementDailySent(id: string): Promise<void> {

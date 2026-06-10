@@ -81,10 +81,13 @@ export class ReplyIntelligenceService {
     // reply_received flag is set correctly and the replied analytics count is non-zero.
     try {
       const phoneStripped = phone.replace(/^\+/, '');
+      const whereBase = numberId
+        ? { number_id: numberId }
+        : {};
       const recentLog = await this.logRepo.findOne({
         where: [
-          { customer_phone: phone },
-          { customer_phone: phoneStripped },
+          { ...whereBase, customer_phone: phone },
+          { ...whereBase, customer_phone: phoneStripped },
         ],
         order: { sent_at: 'DESC' },
       });

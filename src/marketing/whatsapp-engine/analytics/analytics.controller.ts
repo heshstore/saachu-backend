@@ -31,6 +31,11 @@ export class AnalyticsController {
     return this.analyticsService.getConversionFunnel(days ? parseInt(days, 10) : 7);
   }
 
+  @Get('historical')
+  getHistoricalPromotionAnalytics(@Query('days') days?: string) {
+    return this.analyticsService.getHistoricalPromotionAnalytics(days ? parseInt(days, 10) : 90);
+  }
+
   @Get('logs')
   getLogs(
     @Query('status') status?: string,

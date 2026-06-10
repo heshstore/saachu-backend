@@ -8,7 +8,10 @@ import { AudienceService } from '../audience/audience.service';
 import { NumbersService } from '../numbers/numbers.service';
 import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 import { ShopifyCatalogItem } from '../../../shopify-catalog/entities/shopify-catalog-item.entity';
-import { getActiveLimits } from '../shared/number-limits';
+import { getMatureDailyCapacity } from '../shared/number-limits';
+import { getIstDayBounds } from '../shared/ist-time';
+import { NumberConnectionState } from '../shared/number-state';
+import { normalizeSkipReason, SkipReason } from '../shared/skip-reason';
 
 const STORE_URL = 'https://www.heshstore.in';
 
@@ -78,9 +81,26 @@ export class QueueService {
       .getMany();
   }
 
+  findNextPendingForNumber(numberId: string, testModeOnly = false): Promise<WhatsappMessageQueue | null> {
+    const qb = this.repo
+      .createQueryBuilder('q')
+      .where('q.status = :status', { status: QueueStatus.PENDING })
+      .andWhere('q.scheduled_at <= :now', { now: new Date() })
+      .andWhere('q.number_id = :numberId', { numberId })
+      .orderBy('q.priority', 'DESC')
+      .addOrderBy('q.scheduled_at', 'ASC')
+      .limit(1);
+
+    if (testModeOnly) {
+      qb.innerJoin('marketing_campaigns', 'mc', 'mc.id = q.campaign_id')
+        .andWhere('mc.test_mode = :testMode', { testMode: true });
+    }
+
+    return qb.getOne();
+  }
+
   async findActivePhonesSet(): Promise<Set<string>> {
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const { start: todayStart } = getIstDayBounds();
     // Include ALL statuses scoped to today — prevents re-queuing phones that
     // were SENT, SKIPPED, or FAILED earlier today (not just PENDING/PROCESSING).
     const rows = await this.repo
@@ -95,8 +115,7 @@ export class QueueService {
   // Used by _buildQueue() to enforce per-campaign daily_target caps idempotently.
   async countTodayByCampaign(campaignIds: string[]): Promise<Map<string, number>> {
     if (!campaignIds.length) return new Map();
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const { start: todayStart } = getIstDayBounds();
     const rows = await this.repo
       .createQueryBuilder('q')
       .select('q.campaign_id', 'campaignId')
@@ -140,9 +159,10 @@ export class QueueService {
   }
 
   async markSkipped(id: string, reason: string): Promise<void> {
-    this.logger.log(`[MKT_QUEUE_STATUS_UPDATE] id=${id} old=PROCESSING new=SKIPPED reason="${reason.slice(0, 80)}"`);
-    this.logger.warn(`[QUEUE_AUDIT] status_transition: id=${id} PROCESSING→SKIPPED reason="${reason.slice(0, 120)}"`);
-    await this.repo.update(id, { status: QueueStatus.SKIPPED, error_message: reason });
+    const code = normalizeSkipReason(reason);
+    this.logger.log(`[MKT_QUEUE_STATUS_UPDATE] id=${id} old=PROCESSING new=SKIPPED reason=${code} detail="${reason.slice(0, 80)}"`);
+    this.logger.warn(`[QUEUE_AUDIT] status_transition: id=${id} PROCESSING→SKIPPED reason=${code} detail="${reason.slice(0, 120)}"`);
+    await this.repo.update(id, { status: QueueStatus.SKIPPED, error_message: code });
   }
 
   // Persists the actual sender selected by the pool onto the queue row.
@@ -206,7 +226,7 @@ export class QueueService {
   async cancelCampaignQueue(campaignId: string): Promise<void> {
     await this.repo.update(
       { campaign_id: campaignId, status: QueueStatus.PENDING },
-      { status: QueueStatus.SKIPPED, error_message: 'Campaign cancelled' },
+      { status: QueueStatus.SKIPPED, error_message: SkipReason.UNKNOWN_ERROR },
     );
   }
 
@@ -234,8 +254,7 @@ export class QueueService {
       `daily_target=${campaign.daily_target} is_promotion=${campaign.is_promotion} ` +
       `random_delay_min=${campaign.random_delay_min} random_delay_max=${campaign.random_delay_max}`,
     );
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const { start: todayStart } = getIstDayBounds();
 
     // Round-robin assignment — only numbers with a live, verified WA session
     const allNumbers = await this.numbersService.findAll();
@@ -247,8 +266,7 @@ export class QueueService {
       (n) =>
         n.is_active &&
         n.status === WhatsAppNumberStatus.ACTIVE &&
-        n.daily_sent < getActiveLimits(n.warmup_level).daily &&
-        this.whatsAppService.isConnected(n.id),
+        this.whatsAppService.getNumberState(n.id) === NumberConnectionState.CONNECTED,
     );
     this.logger.log(
       `[MKT_QUEUE_GATE] campaign=${campaign.id} numbers_total=${allNumbers.length} ` +
@@ -298,12 +316,39 @@ export class QueueService {
     // pushing every row to tomorrow when campaigns are launched after 10 AM.
     let cursor = new Date(now.getTime());
 
+    const queuedByNumberRows = await this.repo
+      .createQueryBuilder('q')
+      .select('q.number_id', 'number_id')
+      .addSelect('COUNT(*)', 'cnt')
+      .where('q.created_at >= :todayStart', { todayStart })
+      .andWhere('q.number_id IS NOT NULL')
+      .groupBy('q.number_id')
+      .getRawMany<{ number_id: string; cnt: string }>();
+    const queuedTodayByNumber = new Map(
+      queuedByNumberRows.map((r) => [r.number_id, parseInt(r.cnt, 10)] as [string, number]),
+    );
+
+    const matureCap = getMatureDailyCapacity();
+    const allocatedPerNumber: Record<string, number> = {};
+    for (const n of sendableNumbers) allocatedPerNumber[n.id] = 0;
+    let numberCursor = 0;
+
     const items: Partial<WhatsappMessageQueue>[] = [];
     for (const member of audience) {
       if (existingPhones.has(member.phone)) continue;
       if (items.length >= remaining) break;
 
-      const number = sendableNumbers[items.length % sendableNumbers.length];
+      let number: (typeof sendableNumbers)[0] | null = null;
+      for (let i = 0; i < sendableNumbers.length; i++) {
+        const candidate = sendableNumbers[(numberCursor + i) % sendableNumbers.length];
+        const queued = queuedTodayByNumber.get(candidate.id) ?? 0;
+        if (queued + (allocatedPerNumber[candidate.id] ?? 0) < matureCap) {
+          number = candidate;
+          numberCursor = (numberCursor + i + 1) % sendableNumbers.length;
+          break;
+        }
+      }
+      if (!number) break;
 
       const productFields = catalogItem
         ? {
@@ -338,6 +383,7 @@ export class QueueService {
           Math.random() * (campaign.random_delay_max - campaign.random_delay_min)) *
         1000;
       cursor = new Date(cursor.getTime() + delayMs);
+      allocatedPerNumber[number.id]++;
     }
 
     if (!items.length) {

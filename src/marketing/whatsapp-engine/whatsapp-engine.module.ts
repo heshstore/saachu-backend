@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { City } from '../../cities/cities.entity';
 
 import { MarketingWhatsAppService } from './marketing-whatsapp.service';
 
@@ -26,6 +27,7 @@ import { EngineHealthController } from './engine/engine-health.controller';
 import { CampaignsService } from './campaigns/campaigns.service';
 import { TemplatesService } from './templates/templates.service';
 import { AudienceService } from './audience/audience.service';
+import { GeoResolverService } from './audience/geo-resolver.service';
 import { QueueService } from './queue/queue.service';
 import { SenderService } from './sender/sender.service';
 import { AnalyticsService } from './analytics/analytics.service';
@@ -56,6 +58,7 @@ import { PromotionUrlAuditService } from './promotion/promotion-url-audit.servic
 import { EngineSettingsService } from './engine/engine-settings.service';
 import { PilotMonitoringService } from './engine/pilot-monitoring.service';
 import { AiDashboardService } from './engine/ai-dashboard.service';
+import { WarmupProgressionService } from './engine/warmup-progression.service';
 
 @Module({
   imports: [
@@ -70,6 +73,7 @@ import { AiDashboardService } from './engine/ai-dashboard.service';
       ShopifyCatalogItem,
       PromotionProductRotation,
       PilotDailyMetrics,
+      City,
     ]),
   ],
   controllers: [
@@ -87,6 +91,7 @@ import { AiDashboardService } from './engine/ai-dashboard.service';
     CampaignsService,
     TemplatesService,
     AudienceService,
+    GeoResolverService,
     QueueService,
     SenderService,
     AnalyticsService,
@@ -115,6 +120,7 @@ import { AiDashboardService } from './engine/ai-dashboard.service';
     EngineSettingsService,
     PilotMonitoringService,
     AiDashboardService,
+    WarmupProgressionService,
   ],
   exports: [
     CampaignsService,

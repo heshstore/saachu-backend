@@ -10,6 +10,7 @@ import { WhatsappNumber } from './entities/whatsapp-number.entity';
 import { WhatsappMessageLog } from './entities/whatsapp-message-log.entity';
 import { QueueStatus } from './entities/enums';
 import { EngineAutoPauseService } from './engine/engine-auto-pause.service';
+import { NumberConnectionState, resolveNumberConnectionState } from './shared/number-state';
 
 const WA_AUTH_DATA_PATH = '.wwebjs_auth_marketing';
 
@@ -686,24 +687,23 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
 
   /** True if the specific number's WA client is live, browser open, and session ready. */
   isConnected(numberId: string): boolean {
-    const state = this.clients.get(numberId);
-    if (!state || !state.client || state.destroyed) return false;
+    return this.getNumberState(numberId) === NumberConnectionState.CONNECTED;
+  }
 
-    const page = state.client.pupPage;
-    const pageOpen = page != null && !page.isClosed();
-
-    return state.waState === 'ready' && !state.destroyed && pageOpen;
+  getNumberState(numberId: string): NumberConnectionState {
+    const status = this.getNumberWaStatus(numberId);
+    return status.number_state;
   }
 
   /** Temporary diagnostic helper — exposes every sub-condition of isConnected() for pool-stage logging. */
   getConnectionDiagnostics(numberId: string): {
     inClientsMap: boolean; hasClient: boolean; destroyed: boolean;
     waState: string; pageExists: boolean; pageOpen: boolean;
-    browserConnected: boolean; isConnectedResult: boolean;
+    browserConnected: boolean; isConnectedResult: boolean; numberState: NumberConnectionState;
   } {
     const state = this.clients.get(numberId);
     if (!state) {
-      return { inClientsMap: false, hasClient: false, destroyed: false, waState: 'none', pageExists: false, pageOpen: false, browserConnected: false, isConnectedResult: false };
+      return { inClientsMap: false, hasClient: false, destroyed: false, waState: 'none', pageExists: false, pageOpen: false, browserConnected: false, isConnectedResult: false, numberState: NumberConnectionState.DISCONNECTED };
     }
     const page    = state.client?.pupPage;
     const browser = state.client?.pupBrowser;
@@ -717,7 +717,8 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       pageExists,
       pageOpen,
       browserConnected:  !!(browser?.isConnected?.()),
-      isConnectedResult: this.isConnected(numberId),
+      isConnectedResult: this.getNumberState(numberId) === NumberConnectionState.CONNECTED,
+      numberState:       this.getNumberState(numberId),
     };
   }
 
@@ -1187,6 +1188,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     fullyOperational: boolean;
     phoneLinkCode: string | null;
     partial_session: boolean;
+    number_state: NumberConnectionState;
   } {
     const state = this.clients.get(numberId);
 
@@ -1198,7 +1200,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       : false;
 
     if (!state) {
-      return { waState: 'idle', effectiveState: 'idle', connected: false, booting: false, qrActive: false, lastHeartbeat: null, lastReadyAt: null, browserConnected: false, clientExists: false, reconnectCount: 0, qrRefreshCount: 0, sessionStartedAt: null, lastDisconnectedAt: null, firstQrGeneratedAt: null, sessionAvailable: false, liveAndReady: false, bridgeReady: false, sendCapable: false, fullyOperational: false, phoneLinkCode: null, partial_session: false };
+      return { waState: 'idle', effectiveState: 'idle', connected: false, booting: false, qrActive: false, lastHeartbeat: null, lastReadyAt: null, browserConnected: false, clientExists: false, reconnectCount: 0, qrRefreshCount: 0, sessionStartedAt: null, lastDisconnectedAt: null, firstQrGeneratedAt: null, sessionAvailable: false, liveAndReady: false, bridgeReady: false, sendCapable: false, fullyOperational: false, phoneLinkCode: null, partial_session: false, number_state: NumberConnectionState.DISCONNECTED };
     }
 
     // Read cached session availability — populated at state creation, ready event, and auth wipes.
@@ -1229,6 +1231,13 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
     const bridgeReady      = state.bridgeReady;
     const sendCapable      = effectiveState === 'ready' && !state.destroyed && clientExists && browserConnected;
     const fullyOperational = sendCapable && bridgeReady;
+    const numberState = resolveNumberConnectionState({
+      waState: memoryState,
+      effectiveState,
+      connected,
+      browserConnected,
+      clientExists,
+    });
 
     // Only log when the combined status actually changed — prevents identical lines on every
     // health poll. The key encodes every value visible in the log so any real change is captured.
@@ -1273,6 +1282,7 @@ export class MarketingWhatsAppService implements OnModuleInit, OnModuleDestroy {
       fullyOperational,
       phoneLinkCode:   state.phoneLinkCode ?? null,
       partial_session: state.partialSession,
+      number_state:    numberState,
     };
   }
 

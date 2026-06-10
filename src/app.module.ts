@@ -7,7 +7,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
-import { sanitizeDatabaseUrl, buildSslOption, redactDatabaseUrl } from './utils/db-url.util';
+import { buildSslOption, redactDatabaseUrl } from './utils/db-url.util';
+import { getActiveDatabaseUrl } from './config/database-environment';
 
 import { OrdersModule } from './orders/orders.module';
 import { InvoiceModule } from './invoice/invoice.module';
@@ -59,8 +60,7 @@ import { AppShutdownService } from './common/app-shutdown.service';
 import { MarketingModule } from './marketing/marketing.module';
 import { TransactionalEmailModule } from './email-transactional/transactional-email.module';
 
-const _rawDbUrl      = process.env.DATABASE_URL || '';
-const databaseUrl    = sanitizeDatabaseUrl(_rawDbUrl);
+const databaseUrl    = getActiveDatabaseUrl();
 const useDatabaseSsl = buildSslOption(databaseUrl) !== false || process.env.DATABASE_SSL === 'true';
 
 // Startup log — confirms channel_binding is gone before TypeORM connects

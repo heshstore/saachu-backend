@@ -4,13 +4,21 @@ import * as net from 'net';
 import * as dnsPromises from 'dns/promises';
 import { Client } from 'pg';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { LoggingInterceptor } from './common/logging.interceptor';
 import { AllExceptionsFilter } from './common/all-exceptions.filter';
 import { sanitizeDatabaseUrl, buildSslOption, redactDatabaseUrl } from './utils/db-url.util';
+import { resolveDatabaseUrl, assertSafeDatabaseBinding } from './config/database-environment';
 
 const logger = new Logger('Bootstrap');
+
+// Environment isolation — bind once before any DB connection.
+const _resolvedDbUrl = resolveDatabaseUrl();
+assertSafeDatabaseBinding(_resolvedDbUrl);
+process.env.DATABASE_URL = _resolvedDbUrl;
+logger.log(`DB environment: NODE_ENV=${process.env.NODE_ENV} url=${redactDatabaseUrl(_resolvedDbUrl)}`);
 
 /**
  * TCP probe — resolves true if something is already listening on the port.
@@ -759,6 +767,58 @@ async function ensureAudienceRegistrationColumns(): Promise<void> {
   }
 }
 
+async function ensureAudienceGeoQualityColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    const cols = [
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS geo_quality VARCHAR(10) NOT NULL DEFAULT 'PARTIAL'`,
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS geo_source VARCHAR(20)`,
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS geo_resolved_at TIMESTAMPTZ`,
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS geo_corrections JSONB NOT NULL DEFAULT '[]'`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_geo_quality ON marketing_audience(geo_quality)`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_geo_source ON marketing_audience(geo_source) WHERE geo_source IS NOT NULL`,
+    ];
+    for (const sql of cols) {
+      await client.query(sql).catch(() => {});
+    }
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureAudienceMergeEngineColumns(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    const cols = [
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS sources_used JSONB NOT NULL DEFAULT '[]'`,
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS source_count INT NOT NULL DEFAULT 0`,
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS contact_strength VARCHAR(10) NOT NULL DEFAULT 'LOW'`,
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS last_enriched_at TIMESTAMPTZ`,
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS duplicate_status VARCHAR(30)`,
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS duplicate_email_phone VARCHAR(30)`,
+      `ALTER TABLE marketing_audience ADD COLUMN IF NOT EXISTS merge_suggestion JSONB`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_city ON marketing_audience(city) WHERE city IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_state ON marketing_audience(state) WHERE state IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_country ON marketing_audience(country) WHERE country IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_business_type ON marketing_audience(business_type) WHERE business_type IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_contact_strength ON marketing_audience(contact_strength)`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_email_lower ON marketing_audience(LOWER(email)) WHERE email IS NOT NULL AND email != ''`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_last_enriched ON marketing_audience(last_enriched_at) WHERE last_enriched_at IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_duplicate_status ON marketing_audience(duplicate_status) WHERE duplicate_status IS NOT NULL`,
+      `CREATE INDEX IF NOT EXISTS idx_ma_source_count ON marketing_audience(source_count)`,
+    ];
+    for (const sql of cols) {
+      await client.query(sql).catch(() => {});
+    }
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 async function ensureLeadQualityColumns(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
   let client: Client | null = null;
@@ -1162,6 +1222,8 @@ async function bootstrap() {
 
   try {
     await ensureAudienceRegistrationColumns();
+    await ensureAudienceMergeEngineColumns();
+    await ensureAudienceGeoQualityColumns();
     logger.log('✅ Audience registration columns ready (wa_registration_status, last_validation_at)');
   } catch (err: any) {
     logger.error('Audience registration migration failed (non-fatal):', err?.message);
@@ -1189,10 +1251,13 @@ async function bootstrap() {
   }
 
   const isProd = (process.env.NODE_ENV ?? 'development') === 'production';
-  const app = await NestFactory.create(AppModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     rawBody: true,
     logger: isProd ? ['error', 'warn', 'log'] : ['error', 'warn', 'log', 'debug', 'verbose'],
   });
+  // Default Express JSON limit is ~100 KB — bulk promo imports (10k contacts) need more headroom.
+  app.useBodyParser('json', { limit: '15mb' });
+  app.useBodyParser('urlencoded', { extended: true, limit: '15mb' });
   console.log('🚀 PROMOTION ROUTE READY');
 
   // Idempotent close — must be installed before enableShutdownHooks() wires signal handlers.

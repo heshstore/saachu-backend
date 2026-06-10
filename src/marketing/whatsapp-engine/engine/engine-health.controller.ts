@@ -49,6 +49,12 @@ export class EngineHealthController {
     return this.aiDashboard.getDashboard();
   }
 
+  /** On-demand per-contact queue detail for today — not included in dashboard poll */
+  @Get('ai/queue-detail')
+  getQueueDetail() {
+    return this.aiDashboard.getQueueDetail();
+  }
+
   /**
    * Force-trigger one autonomous engine run immediately.
    * Idempotent: creates today's campaigns if missing, then builds the queue.
@@ -70,7 +76,7 @@ export class EngineHealthController {
   /**
    * Run a validation campaign using ONLY is_test_contact=true audience.
    * Creates a VALIDATION-YYYYMMDD-HHMMSS campaign per connected number,
-   * bypasses cooldown/fatigue/dedup, respects daily/hourly caps and send windows.
+   * bypasses cooldown/fatigue/dedup, respects daily caps and send windows.
    * Returns: { promo_id, campaigns, audience_count, queued, numbers }
    */
   @Post('ai/validation-run')
@@ -158,7 +164,7 @@ export class EngineHealthController {
     return { success: true, enabled };
   }
 
-  // Safe re-enable after AUTO_PAUSE — requires investigator to supply a reason (Step 3)
+  // Manual re-enable requires an investigator-supplied reason.
   @Post('re-enable')
   async reEnable(@Body('reason') reason?: string) {
     const currentState = process.env.WHATSAPP_ENGINE_ENABLED;

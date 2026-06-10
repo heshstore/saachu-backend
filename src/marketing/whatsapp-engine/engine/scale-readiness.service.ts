@@ -60,17 +60,17 @@ export class ScaleReadinessService {
 
     const since14 = new Date(Date.now() - STABILITY_DAYS * 86_400_000);
 
-    const [logRows, autoPauseRows, numbers, audienceRows] = await Promise.all([
+    const [logRows, warningRows, numbers, audienceRows] = await Promise.all([
       this._getLogRates(since14),
-      this._getAutoPauseCount(since14),
+      this._getWarningCount(since14),
       this.numberRepo.find(),
       this._getAudienceStats(),
     ]);
 
-    const rates    = this._computeRates(logRows);
-    const pauseCount = parseInt(autoPauseRows[0]?.count ?? '0', 10);
-    const banned   = numbers.some((n) => n.status === WhatsAppNumberStatus.BANNED);
-    const waUp     = this.whatsAppService.isAnyConnected();
+    const rates        = this._computeRates(logRows);
+    const warningCount = parseInt(warningRows[0]?.count ?? '0', 10);
+    const banned       = numbers.some((n) => n.status === WhatsAppNumberStatus.BANNED);
+    const waUp         = this.whatsAppService.isAnyConnected();
 
     const aud = (audienceRows[0] ?? {}) as {
       total?: string; in_cooldown?: string; high_fatigue?: string;
@@ -85,10 +85,10 @@ export class ScaleReadinessService {
 
     const conditions: Record<string, ConditionResult> = {
       stable_14_days: {
-        pass: pauseCount === 0,
-        detail: pauseCount === 0
-          ? `No AUTO_PAUSE events in last ${STABILITY_DAYS} days`
-          : `${pauseCount} AUTO_PAUSE event(s) in last ${STABILITY_DAYS} days — investigate before scaling`,
+        pass: true,
+        detail: warningCount === 0
+          ? `No delivery/read warning events in last ${STABILITY_DAYS} days`
+          : `${warningCount} delivery/read warning event(s) in last ${STABILITY_DAYS} days — warning only, no automatic pause`,
       },
       no_bans: {
         pass: !banned,
@@ -219,10 +219,13 @@ export class ScaleReadinessService {
     };
   }
 
-  private async _getAutoPauseCount(since: Date) {
+  private async _getWarningCount(since: Date) {
     try {
       return this.ds.query<{ count: string }[]>(
-        `SELECT COUNT(*) AS count FROM engine_audit_logs WHERE event = 'AUTO_PAUSE' AND created_at >= $1`,
+        `SELECT COUNT(*) AS count
+         FROM engine_audit_logs
+         WHERE event IN ('LOW_DELIVERY_WARNING', 'LOW_READ_WARNING')
+           AND created_at >= $1`,
         [since],
       );
     } catch { return [{ count: '0' }]; }

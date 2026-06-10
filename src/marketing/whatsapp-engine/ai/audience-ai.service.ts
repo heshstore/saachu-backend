@@ -194,6 +194,8 @@ export class AudienceAiService {
       .andWhere('a.quality_score >= :minScore', { minScore })
       .andWhere('(a.cooldown_until IS NULL OR a.cooldown_until <= :now)', { now })
       .andWhere('a.is_test_contact IS NOT TRUE')
+      // Exclude contacts confirmed NOT on WhatsApp — avoids re-queuing known invalid numbers
+      .andWhere('(a.wa_registration_status IS NULL OR a.wa_registration_status != :notReg)', { notReg: 'NOT_REGISTERED' })
       .orderBy('a.quality_score', 'DESC')
       .getMany();
 

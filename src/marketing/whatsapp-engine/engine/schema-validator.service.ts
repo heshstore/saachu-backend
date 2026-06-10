@@ -16,7 +16,7 @@ const REQUIRED_TABLES = [
 // Columns added after the base migration (phases 5–9) — the drift-prone ones.
 const REQUIRED_COLUMNS: Record<string, string[]> = {
   marketing_templates:    ['performance_weight', 'product_category'],
-  marketing_audience:     ['is_test_contact', 'cooldown_until', 'fatigue_score'],
+  marketing_audience:     ['is_test_contact', 'cooldown_until', 'fatigue_score', 'sources_used', 'source_count', 'contact_strength', 'last_enriched_at'],
   whatsapp_numbers:       ['wa_state', 'warmup_level', 'risk_score', 'daily_sent', 'last_message_sent_at'],
   whatsapp_message_queue: ['attempt_count', 'priority', 'message_payload', 'number_id'],
   whatsapp_message_logs:  ['delivered_at', 'read_at', 'reply_received', 'reply_message', 'number_id'],

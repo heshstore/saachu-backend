@@ -6,6 +6,7 @@ import {
   Delete,
   Param,
   Body,
+  Query,
 } from '@nestjs/common';
 import { AudienceService } from './audience.service';
 import { MarketingAudience } from '../entities/marketing-audience.entity';
@@ -29,41 +30,60 @@ export class AudienceController {
   }
 
   @Post()
-  create(@Body() dto: Partial<MarketingAudience>) {
-    return this.audienceService.create(dto);
+  create(@Body() body: Partial<MarketingAudience> & { confirm_production?: boolean }) {
+    const { confirm_production, ...dto } = body;
+    return this.audienceService.create(dto, {
+      confirmProduction: confirm_production === true,
+    });
   }
 
   @Post('bulk')
-  async bulkUpsert(@Body() body: { rows: Partial<MarketingAudience>[] }) {
-    const result = await this.audienceService.bulkUpsert(body.rows ?? []);
-    // Rule 3: immediately fill remaining daily capacity with newly eligible contacts.
-    // Fire-and-forget — import response returns instantly.
+  async bulkUpsert(@Body() body: {
+    rows: Partial<MarketingAudience>[];
+    confirm_production?: boolean;
+  }) {
+    const result = await this.audienceService.bulkUpsert(
+      body.rows ?? [],
+      { confirmProduction: body.confirm_production === true },
+    );
     this.autonomousEngine.fillRemainingCapacity().catch(() => {});
     return result;
   }
 
-  /** Check which phones already exist — returns existing records for conflict resolution UI. */
   @Post('check-conflicts')
   checkConflicts(@Body() body: { phones: string[] }) {
     return this.audienceService.checkConflicts(body.phones ?? []);
   }
 
   @Patch(':id')
-  update(@Param('id') id: string, @Body() dto: Partial<MarketingAudience>) {
-    return this.audienceService.update(id, dto);
+  update(
+    @Param('id') id: string,
+    @Body() body: Partial<MarketingAudience> & { confirm_production?: boolean },
+  ) {
+    const { confirm_production, ...dto } = body;
+    return this.audienceService.update(id, dto, {
+      confirmProduction: confirm_production === true,
+    });
   }
 
   @Patch(':id/optout')
-  markOptOut(@Param('id') id: string) {
-    return this.audienceService.markOptOut(id);
+  markOptOut(
+    @Param('id') id: string,
+    @Body() body: { confirm_production?: boolean },
+  ) {
+    return this.audienceService.markOptOut(id, {
+      confirmProduction: body?.confirm_production === true,
+    });
   }
 
   @Patch(':id/test-contact')
   markAsTestContact(
     @Param('id') id: string,
-    @Body() body: { is_test: boolean },
+    @Body() body: { is_test: boolean; confirm_production?: boolean },
   ) {
-    return this.audienceService.markAsTestContact(id, body.is_test ?? true);
+    return this.audienceService.markAsTestContact(id, body.is_test ?? true, {
+      confirmProduction: body?.confirm_production === true,
+    });
   }
 
   @Get('filter/test-contacts')
@@ -82,7 +102,12 @@ export class AudienceController {
   }
 
   @Delete(':id')
-  remove(@Param('id') id: string) {
-    return this.audienceService.remove(id);
+  remove(
+    @Param('id') id: string,
+    @Query('confirm_production') confirmProduction?: string,
+  ) {
+    return this.audienceService.remove(id, {
+      confirmProduction: confirmProduction === 'true',
+    });
   }
 }
