@@ -179,7 +179,7 @@ done
 BYTES=\$(wc -c < "\$DEST/db-snapshot.sql" | tr -d ' ')
 [[ "\$BYTES" -gt 1000 ]] || { echo "db-snapshot.sql too small: \$BYTES bytes"; exit 1; }
 bash "${VPS_BACKEND_PATH}/scripts/capture-backup-counts.sh" "\$DEST" "${VPS_BACKEND_PATH}/.env" 2>/dev/null \
-  || psql "\$(grep -m1 '^DATABASE_URL=' ${VPS_BACKEND_PATH}/.env | cut -d= -f2- | tr -d '"')" -t -A -c "
+  || psql "\$(grep -m1 '^DATABASE_URL=' ${VPS_BACKEND_PATH}/.env | cut -d= -f2- | tr -d \"\")" -t -A -c "
     SELECT json_build_object(
       'customer', (SELECT COUNT(*)::int FROM customer),
       'marketing_audience', (SELECT COUNT(*)::int FROM marketing_audience),
@@ -255,6 +255,7 @@ else
 
   VH_FILE="$FRONTEND_ROOT/src/pages/settings/VersionHistory.js"
   PAYLOAD="$(mktemp)"
+  STATUS_NOTES="${DEPLOY_NOTES:-Release ${VERSION}}"
   trap 'rm -f "$PAYLOAD"' EXIT
   cat > "$PAYLOAD" <<JSON
 {
@@ -265,7 +266,7 @@ else
   "frontendBundleHash": "${BUNDLE_HASH}",
   "dbMigrations": [],
   "backupSnapshot": "${SNAPSHOT}",
-  "statusNotes": "${DEPLOY_NOTES:-Release ${VERSION}}"
+  "statusNotes": "${STATUS_NOTES}"
 }
 JSON
   node "$SCRIPT_DIR/update-version-history.js" "$VH_FILE" "$PAYLOAD" \
