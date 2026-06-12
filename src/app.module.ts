@@ -59,6 +59,7 @@ import { WorkforceOpsModule } from './workforce-ops/workforce-ops.module';
 import { AppShutdownService } from './common/app-shutdown.service';
 import { MarketingModule } from './marketing/marketing.module';
 import { TransactionalEmailModule } from './email-transactional/transactional-email.module';
+import { DeploymentModule } from './deployment/deployment.module';
 
 const databaseUrl    = getActiveDatabaseUrl();
 const useDatabaseSsl = buildSslOption(databaseUrl) !== false || process.env.DATABASE_SSL === 'true';
@@ -141,6 +142,7 @@ new Logger('AppModule').log(
     WorkforceOpsModule,
     MarketingModule,
     TransactionalEmailModule,
+    DeploymentModule,
   ],
   providers: [
     AppShutdownService,

@@ -8,20 +8,46 @@ import {
   Body,
   Query,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { AudienceService } from './audience.service';
 import { MarketingAudience } from '../entities/marketing-audience.entity';
 import { AutonomousEngineService } from '../engine/autonomous-engine.service';
+import { SkipRecoveryService } from '../skip-recovery/skip-recovery.service';
 
 @Controller('marketing/whatsapp-engine/audience')
 export class AudienceController {
   constructor(
     private readonly audienceService: AudienceService,
     private readonly autonomousEngine: AutonomousEngineService,
+    private readonly skipRecovery: SkipRecoveryService,
   ) {}
 
   @Get()
   findAll() {
     return this.audienceService.findAll();
+  }
+
+  /** Paginated, filterable, searchable contact list — replaces full findAll for UI. */
+  @Get('search')
+  search(
+    @Query('q')             q?: string,
+    @Query('city')          city?: string,
+    @Query('business_type') business_type?: string,
+    @Query('status')        status?: string,
+    @Query('page')          page?: string,
+    @Query('limit')         limit?: string,
+  ) {
+    return this.audienceService.search({
+      q, city, business_type, status,
+      page:  page  ? parseInt(page,  10) : 1,
+      limit: limit ? parseInt(limit, 10) : 50,
+    });
+  }
+
+  /** Distinct cities and business types for filter dropdowns. */
+  @Get('filter-options')
+  getFilterOptions() {
+    return this.audienceService.getFilterOptions();
   }
 
   @Get(':id')
@@ -47,6 +73,13 @@ export class AudienceController {
       { confirmProduction: body.confirm_production === true },
     );
     this.autonomousEngine.fillRemainingCapacity().catch(() => {});
+    // Fire-and-forget: persist skip records for Skip Recovery Dashboard.
+    // Non-blocking — import response is not delayed by this.
+    if (result.skip_reasons?.length) {
+      this.skipRecovery
+        .persistSkips(result.skip_reasons, body.rows ?? [], randomUUID())
+        .catch(() => {});
+    }
     return result;
   }
 

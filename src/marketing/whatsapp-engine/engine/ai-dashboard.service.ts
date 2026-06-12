@@ -792,25 +792,27 @@ export class AiDashboardService {
       product_skus:     string[] | null;
     }[]>(`
       SELECT
-        eff.number_id,
-        n.phone                                                           AS telecaller_phone,
-        n.name                                                            AS number_name,
-        COUNT(q.id)                                                       AS total,
+        eff.effective_number_id                                                    AS number_id,
+        n.phone                                                                    AS telecaller_phone,
+        n.name                                                                     AS number_name,
+        COUNT(q.id)                                                                AS total,
         COUNT(q.id) FILTER (WHERE q.status IN ('sent','delivered','read','replied')) AS sent,
-        COUNT(q.id) FILTER (WHERE q.status = 'pending' AND q.number_id = eff.number_id) AS pending,
-        COUNT(q.id) FILTER (WHERE q.status = 'failed')                   AS failed,
-        COUNT(q.id) FILTER (WHERE q.status = 'skipped')                  AS skipped,
+        COUNT(q.id) FILTER (WHERE q.status = 'pending')                            AS pending,
+        COUNT(q.id) FILTER (WHERE q.status = 'failed')                             AS failed,
+        COUNT(q.id) FILTER (WHERE q.status = 'skipped')                            AS skipped,
         array_agg(DISTINCT q.message_payload->>'product_sku')
           FILTER (WHERE (q.message_payload->>'product_sku') IS NOT NULL
-            AND (q.message_payload->>'product_sku') != '')                AS product_skus
+            AND (q.message_payload->>'product_sku') != '')                         AS product_skus
       FROM (
-        SELECT q.*, COALESCE(q.actual_sender_number_id, q.number_id) AS number_id
+        SELECT
+          q.id,
+          COALESCE(q.actual_sender_number_id, q.number_id) AS effective_number_id
         FROM whatsapp_message_queue q
         WHERE q.created_at >= $1
       ) eff
-      JOIN whatsapp_numbers n ON n.id = eff.number_id
+      JOIN whatsapp_numbers n  ON n.id = eff.effective_number_id
       JOIN whatsapp_message_queue q ON q.id = eff.id
-      GROUP BY eff.number_id, n.phone, n.name
+      GROUP BY eff.effective_number_id, n.phone, n.name
       HAVING COUNT(q.id) > 0
       ORDER BY total DESC
     `, [todayIso]).catch(() => []);
@@ -826,6 +828,78 @@ export class AiDashboardService {
       skipped:          parseInt(r.skipped ?? '0', 10),
       product_skus:     r.product_skus ?? [],
     }));
+  }
+
+  // ── Queue Inspection (paginated, per-telecaller) ───────────────────────────
+
+  async getQueueInspection(numberId: string, offset = 0, limit = 10) {
+    const { start: today } = getIstDayBounds();
+    const todayIso = today.toISOString();
+
+    const [rows, countRows] = await Promise.all([
+      this.ds.query<{
+        queue_id:          string;
+        customer_phone:    string;
+        status:            string;
+        proposed_send_time: string | null;
+        actual_send_time:  string | null;
+        campaign_id:       string | null;
+        created_at:        string;
+        product_sku:       string | null;
+        generated_message: string | null;
+        ai_metadata:       unknown;
+        quality:           unknown;
+      }[]>(`
+        SELECT
+          q.id                                          AS queue_id,
+          q.customer_phone,
+          q.status,
+          q.scheduled_at                                AS proposed_send_time,
+          q.sent_at                                     AS actual_send_time,
+          q.campaign_id,
+          q.created_at,
+          q.message_payload->>'product_sku'             AS product_sku,
+          q.message_payload->>'generated_message'       AS generated_message,
+          q.message_payload->'ai_metadata'              AS ai_metadata,
+          q.message_payload->'quality'                  AS quality
+        FROM whatsapp_message_queue q
+        WHERE q.created_at >= $1
+          AND COALESCE(q.actual_sender_number_id, q.number_id) = $2
+        ORDER BY q.scheduled_at ASC
+        LIMIT $3 OFFSET $4
+      `, [todayIso, numberId, limit, offset]).catch(() => []),
+
+      this.ds.query<{ total: string }[]>(`
+        SELECT COUNT(*) AS total
+        FROM whatsapp_message_queue q
+        WHERE q.created_at >= $1
+          AND COALESCE(q.actual_sender_number_id, q.number_id) = $2
+      `, [todayIso, numberId]).catch(() => [{ total: '0' }]),
+    ]);
+
+    const total = parseInt(countRows[0]?.total ?? '0', 10);
+
+    return {
+      number_id: numberId,
+      total,
+      offset,
+      limit,
+      rows: rows.map(r => ({
+        queue_id:           r.queue_id,
+        customer_phone_masked: r.customer_phone
+          ? '****' + r.customer_phone.slice(-4)
+          : '—',
+        status:             r.status,
+        proposed_send_time: r.proposed_send_time ?? null,
+        actual_send_time:   r.actual_send_time   ?? null,
+        campaign_id:        r.campaign_id        ?? null,
+        created_at:         r.created_at,
+        product_sku:        r.product_sku        ?? null,
+        generated_message:  r.generated_message  ?? null,
+        ai_metadata:        r.ai_metadata        ?? null,
+        quality:            r.quality            ?? null,
+      })),
+    };
   }
 
   // ── Warnings ───────────────────────────────────────────────────────────────

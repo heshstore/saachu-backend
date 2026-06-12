@@ -37,7 +37,7 @@ if [[ -z "$PG_DUMP" ]]; then
 fi
 
 echo "pg-dump-neon: using $PG_DUMP ($("$PG_DUMP" --version))"
-"$PG_DUMP" "$DATABASE_URL" --no-owner --format=plain > "$OUT"
+"$PG_DUMP" "$DATABASE_URL" --no-owner --clean --if-exists --format=plain > "$OUT"
 
 size="$(wc -c < "$OUT" | tr -d ' ')"
 if [[ "$size" -lt 1000 ]]; then

@@ -11,6 +11,8 @@ export type ImportRow = Partial<MarketingAudience> & {
   _geoSource?: GeoSource;
   _geoCorrections?: GeoCorrection[];
   _geoQuality?: GeoQuality;
+  /** 1-based index in the original input rows array — used for skip diagnostics. */
+  _rowIndex?: number;
 };
 
 const BLANK = new Set(['', 'null', 'undefined', 'n/a', 'na', '-', '—']);

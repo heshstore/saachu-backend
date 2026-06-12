@@ -216,6 +216,15 @@ if want_db; then
     DATABASE_URL="$(grep -m1 '^DATABASE_URL=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')"
     [[ -n "$DATABASE_URL" ]] || fail "DATABASE_URL missing in $ENV_FILE"
 
+    # Fingerprint guard — abort if URL doesn't match production host
+    PROD_HOST="${PRODUCTION_DB_HOST:-ep-noisy-pond-a1nmenkk-pooler.ap-southeast-1.aws.neon.tech}"
+    if ! echo "$DATABASE_URL" | grep -q "$PROD_HOST"; then
+      fail "DATABASE_URL host does not match production fingerprint ($PROD_HOST) — refusing to restore"
+    fi
+    if echo "$DATABASE_URL" | grep -qiE 'localhost|127\.0\.0\.1|test|staging|preview|sandbox'; then
+      fail "Unsafe DATABASE_URL detected (local/test host) — refusing production restore"
+    fi
+
     log "WARNING — restoring database will OVERWRITE production data"
     BEFORE="$(count_tables "$DATABASE_URL")"
     log "Counts before restore: $BEFORE"

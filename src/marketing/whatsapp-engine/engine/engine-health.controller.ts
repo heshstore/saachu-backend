@@ -56,6 +56,27 @@ export class EngineHealthController {
   }
 
   /**
+   * Paginated per-telecaller queue inspection.
+   * Returns first `limit` (default 10) queue rows for a given number_id,
+   * sorted by scheduled_at ASC. Customer phone is masked (last 4 digits only).
+   * Includes full AI generated message and metadata for sent rows.
+   *
+   * GET /marketing/whatsapp-engine/ai/queue-inspection?number_id=...&offset=0&limit=10
+   */
+  @Get('ai/queue-inspection')
+  getQueueInspection(
+    @Query('number_id') numberId: string,
+    @Query('offset')    offset?: string,
+    @Query('limit')     limit?: string,
+  ) {
+    return this.aiDashboard.getQueueInspection(
+      numberId,
+      offset ? parseInt(offset, 10) : 0,
+      limit  ? Math.min(parseInt(limit, 10), 50) : 10,
+    );
+  }
+
+  /**
    * Force-trigger one autonomous engine run immediately.
    * Idempotent: creates today's campaigns if missing, then builds the queue.
    * Use for validation runs and manual testing — does NOT bypass WHATSAPP_ENGINE_ENABLED.

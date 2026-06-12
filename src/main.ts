@@ -748,6 +748,73 @@ async function ensureProductionStageRefinements(): Promise<void> {
   }
 }
 
+async function ensureImportSkippedContactsTable(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS import_skipped_contacts (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        reason_code      VARCHAR(30) NOT NULL,
+        reason           TEXT NOT NULL,
+        row_number       INT,
+        phone            TEXT,
+        email            TEXT,
+        company          TEXT,
+        name             TEXT,
+        city             TEXT,
+        business_type    TEXT,
+        import_batch_id  VARCHAR(36),
+        raw_row          JSONB,
+        recovered        BOOLEAN NOT NULL DEFAULT false,
+        recovered_at     TIMESTAMPTZ,
+        imported_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_isc_reason_code     ON import_skipped_contacts(reason_code)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_isc_phone           ON import_skipped_contacts(phone) WHERE phone IS NOT NULL`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_isc_import_batch    ON import_skipped_contacts(import_batch_id) WHERE import_batch_id IS NOT NULL`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_isc_recovered       ON import_skipped_contacts(recovered)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_isc_imported_at     ON import_skipped_contacts(imported_at DESC)`);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
+async function ensureDeploymentVersionsTable(): Promise<void> {
+  if (!process.env.DATABASE_URL) return;
+  let client: Client | null = null;
+  try {
+    client = await createMigrationClient();
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS deployment_versions (
+        id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        version             VARCHAR(30)  NOT NULL UNIQUE,
+        deployed_at         TIMESTAMPTZ  NOT NULL,
+        backend_commit      VARCHAR(40),
+        frontend_commit     VARCHAR(40),
+        bundle_hash         VARCHAR(64),
+        backup_snapshot     VARCHAR(100),
+        rollback_code       VARCHAR(30),
+        migration_ids       TEXT[]       NOT NULL DEFAULT '{}',
+        deployment_status   VARCHAR(20)  NOT NULL DEFAULT 'RELEASED',
+        created_by          VARCHAR(100),
+        notes               TEXT,
+        integrity_hash      VARCHAR(64),
+        rollback_available  BOOLEAN      NOT NULL DEFAULT false,
+        backup_manifest     JSONB,
+        created_at          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+      )
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dv_version      ON deployment_versions(version)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dv_deployed_at  ON deployment_versions(deployed_at DESC)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_dv_status       ON deployment_versions(deployment_status)`);
+  } finally {
+    await client?.end().catch(() => {});
+  }
+}
+
 async function ensureAudienceRegistrationColumns(): Promise<void> {
   if (!process.env.DATABASE_URL) return;
   let client: Client | null = null;
@@ -1227,6 +1294,20 @@ async function bootstrap() {
     logger.log('✅ Audience registration columns ready (wa_registration_status, last_validation_at)');
   } catch (err: any) {
     logger.error('Audience registration migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureImportSkippedContactsTable();
+    logger.log('✅ Import skipped contacts table ready');
+  } catch (err: any) {
+    logger.error('Import skipped contacts migration failed (non-fatal):', err?.message);
+  }
+
+  try {
+    await ensureDeploymentVersionsTable();
+    logger.log('✅ Deployment versions table ready');
+  } catch (err: any) {
+    logger.error('Deployment versions migration failed (non-fatal):', err?.message);
   }
 
   try {

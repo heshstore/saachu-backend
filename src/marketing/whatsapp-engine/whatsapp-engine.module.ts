@@ -14,6 +14,7 @@ import { WhatsappMessageLog } from './entities/whatsapp-message-log.entity';
 import { WhatsappReply } from './entities/whatsapp-reply.entity';
 import { PromotionProductRotation } from './entities/promotion-product-rotation.entity';
 import { PilotDailyMetrics } from './entities/pilot-daily-metrics.entity';
+import { ImportSkippedContact } from './skip-recovery/import-skipped-contact.entity';
 
 import { CampaignsController } from './campaigns/campaigns.controller';
 import { TemplatesController } from './templates/templates.controller';
@@ -50,6 +51,8 @@ import { ScaleReadinessService } from './engine/scale-readiness.service';
 import { ReplyIntelligenceService } from './inbox/reply-intelligence.service';
 import { ValidateService } from './validate/validate.service';
 import { ValidateController } from './validate/validate.controller';
+import { SkipRecoveryController } from './skip-recovery/skip-recovery.controller';
+import { SkipRecoveryService } from './skip-recovery/skip-recovery.service';
 import { ProcessingWatchdogService } from './engine/processing-watchdog.service';
 import { SchemaValidatorService } from './engine/schema-validator.service';
 import { PromotionProductSelectionService } from './promotion/promotion-product-selection.service';
@@ -73,6 +76,7 @@ import { WarmupProgressionService } from './engine/warmup-progression.service';
       ShopifyCatalogItem,
       PromotionProductRotation,
       PilotDailyMetrics,
+      ImportSkippedContact,
       City,
     ]),
   ],
@@ -86,6 +90,7 @@ import { WarmupProgressionService } from './engine/warmup-progression.service';
     NumbersController,
     EngineHealthController,
     ValidateController,
+    SkipRecoveryController,
   ],
   providers: [
     CampaignsService,
@@ -121,6 +126,7 @@ import { WarmupProgressionService } from './engine/warmup-progression.service';
     PilotMonitoringService,
     AiDashboardService,
     WarmupProgressionService,
+    SkipRecoveryService,
   ],
   exports: [
     CampaignsService,

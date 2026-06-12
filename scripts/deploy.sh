@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Saachu atomic production deployment — fail-fast, no partial deploys.
 #
-# Flow: Build → Backup → Deploy → Health → Tag → VersionHistory → Success
-# Tags and VersionHistory are written ONLY after health passes.
+# Flow: Build → Backup → Deploy → Health → Tag → Register → VersionHistory → Success
+# Tags, DB registration, and VersionHistory are written ONLY after health passes.
 #
 # Usage:
 #   ./scripts/deploy.sh --version v2026.06.12 --notes "Release notes"
@@ -26,6 +26,10 @@ DEPLOY_NOTES=""
 DEPLOYED_AT="$(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M IST')"
 REHEARSE_ID="$(date +%Y%m%d-%H%M%S)"
 
+# Phase 1: health check tuning
+HEALTH_MAX_WAIT=120   # seconds — backend takes ~90s to start
+HEALTH_POLL=10        # seconds between retries
+
 log()  { echo "[deploy] $*"; }
 fail() { echo "[deploy] FATAL: $*" >&2; exit 1; }
 
@@ -35,7 +39,7 @@ Usage:
   deploy.sh --version v2026.06.12 [--notes "description"] [--validate-only]
   deploy-rehearsal.sh   (sets REHEARSAL=1 — no production deploy, no tags, no VH update)
 
-Atomic order: Build → Backup → Deploy → Health → Tag → VersionHistory → Success
+Atomic order: Build → Backup → Deploy → Health → Tag+Push → Register → VersionHistory → Success
 EOF
   exit 1
 }
@@ -193,6 +197,27 @@ EOS
 
 ssh "$VPS_HOST" "$BACKUP_CMD" || fail "VPS backup failed — deployment aborted"
 
+# Phase 4: Re-verify all 5 backup artifacts exist before proceeding
+BACKUP_VALIDATE_CMD=$(cat <<EOS
+set -euo pipefail
+DEST="${VPS_BACKUP_ROOT}/${SNAPSHOT}"
+MISSING=()
+for f in manifest.json db-snapshot.sql backend-dist.tar.gz frontend-build.tar.gz ecosystem.config.js; do
+  [[ -f "\$DEST/\$f" ]] || MISSING+=("\$f")
+done
+if [[ \${#MISSING[@]} -gt 0 ]]; then
+  echo "BACKUP VALIDATION FAILED — missing: \${MISSING[*]}"
+  exit 1
+fi
+BYTES=\$(wc -c < "\$DEST/db-snapshot.sql" | tr -d ' ')
+[[ "\$BYTES" -gt 1000 ]] || { echo "BACKUP VALIDATION FAILED — db-snapshot.sql too small: \$BYTES bytes"; exit 1; }
+echo "BACKUP VALIDATED — all 5 artifacts present, db dump \${BYTES} bytes"
+EOS
+)
+log "Phase 4: Validating all 5 backup artifacts..."
+ssh "$VPS_HOST" "$BACKUP_VALIDATE_CMD" || fail "Backup artifact validation failed — cannot mark deployment successful"
+BACKUP_VALIDATED=true
+
 # ── 5. Deploy (skipped in rehearsal) ────────────────────────────────────────
 if [[ "$REHEARSAL" == "1" ]]; then
   log "Step 5/8 — Deploy SKIPPED (rehearsal mode)"
@@ -212,14 +237,19 @@ else
   rsync -avz --delete "$FRONTEND_ROOT/build/" "${VPS_HOST}:${VPS_FRONTEND_PATH}/" \
     || { mv "${ECO_FILE}.pre-deploy.bak" "$ECO_FILE"; fail "Frontend rsync failed"; }
 
+  # Sync register-deployment.js to VPS — required for deployment registration
+  rsync -az "$SCRIPT_DIR/register-deployment.js" \
+    "${VPS_HOST}:${VPS_BACKEND_PATH}/scripts/" \
+    || fail "Could not sync register-deployment.js to VPS — deployment aborted"
+
   ssh "$VPS_HOST" "source ~/.nvm/nvm.sh 2>/dev/null; cd ${VPS_BACKEND_PATH} && pm2 reload ecosystem.config.js --env production" \
     || { mv "${ECO_FILE}.pre-deploy.bak" "$ECO_FILE"; fail "pm2 reload failed"; }
 
   rm -f "${ECO_FILE}.pre-deploy.bak"
 fi
 
-# ── 6. Health verification ────────────────────────────────────────────────────
-log "Step 6/8 — Health verification"
+# ── 6. Health verification (Phase 1: retry loop, 120s timeout) ───────────────
+log "Step 6/8 — Health verification (max ${HEALTH_MAX_WAIT}s, polling every ${HEALTH_POLL}s)"
 
 if [[ "$REHEARSAL" == "1" ]]; then
   HEALTH="$(ssh "$VPS_HOST" "curl -sf ${HEALTH_URL}" 2>/dev/null)" \
@@ -228,35 +258,128 @@ if [[ "$REHEARSAL" == "1" ]]; then
     || fail "Health response missing backend_version: $HEALTH"
   log "Rehearsal health OK (current production): $HEALTH"
 else
-  sleep 8
-  HEALTH="$(ssh "$VPS_HOST" "curl -sf ${HEALTH_URL}" 2>/dev/null)" \
-    || fail "Health endpoint unreachable"
-  echo "$HEALTH" | grep -q "\"backend_version\":\"${VERSION}\"" \
-    || fail "Health version mismatch — expected ${VERSION}, got: $HEALTH"
-  log "Health OK: $HEALTH"
+  HEALTH=""
+  ELAPSED=0
+  HEALTH_PASSED=false
+  while [[ $ELAPSED -lt $HEALTH_MAX_WAIT ]]; do
+    HEALTH="$(ssh "$VPS_HOST" "curl -sf --max-time 5 ${HEALTH_URL}" 2>/dev/null)" || true
+    if echo "$HEALTH" | grep -q "\"backend_version\":\"${VERSION}\""; then
+      HEALTH_PASSED=true
+      break
+    fi
+    CURRENT_VER="$(echo "$HEALTH" | grep -o '"backend_version":"[^"]*"' | head -1 || echo '(no response)')"
+    log "  Waiting... ${ELAPSED}s elapsed — got ${CURRENT_VER}, want \"backend_version\":\"${VERSION}\""
+    sleep $HEALTH_POLL
+    ELAPSED=$((ELAPSED + HEALTH_POLL))
+  done
+
+  if [[ "$HEALTH_PASSED" != "true" ]]; then
+    fail "Health check failed after ${HEALTH_MAX_WAIT}s — backend did not report ${VERSION}. Last response: ${HEALTH}"
+  fi
+  log "Health OK after ${ELAPSED}s: $HEALTH"
 fi
 
-# ── 7. Git tags (only after health passes; skipped in rehearsal) ──────────────
+# ── 7. Git tags — create, push (hard-fail), verify on remote ─────────────────
 if [[ "$REHEARSAL" == "1" ]]; then
   log "Step 7/8 — Git tags SKIPPED (rehearsal mode)"
+  GIT_TAGGED=false
 else
-  log "Step 7/8 — Create git tags (post-health)"
+  log "Step 7/8 — Create, push, and verify git tags (post-health)"
 
-  git -C "$BACKEND_ROOT" tag -a "$VERSION" -m "Deploy ${VERSION} | ${DEPLOYED_AT} | ${DEPLOY_NOTES:-release}"
-  git -C "$FRONTEND_ROOT" tag -a "$VERSION" -m "Deploy ${VERSION} | ${DEPLOYED_AT}"
-  log "Tags created: ${VERSION}"
+  git -C "$BACKEND_ROOT"  tag -a "$VERSION" -m "Deploy ${VERSION} | ${DEPLOYED_AT} | ${DEPLOY_NOTES:-release}" \
+    || fail "Backend git tag creation failed"
+  git -C "$FRONTEND_ROOT" tag -a "$VERSION" -m "Deploy ${VERSION} | ${DEPLOYED_AT}" \
+    || fail "Frontend git tag creation failed"
+  log "Tags created locally: ${VERSION}"
+
+  # Phase 2: hard-fail push — rollback_available=true requires remote presence
+  git -C "$BACKEND_ROOT"  push origin "$VERSION" \
+    || fail "Backend git tag push failed — rollback_available cannot be confirmed"
+  git -C "$FRONTEND_ROOT" push origin "$VERSION" \
+    || fail "Frontend git tag push failed — rollback_available cannot be confirmed"
+  log "Tags pushed to remote: ${VERSION}"
+
+  # Phase 2: confirm tags landed on remote before setting GIT_TAGGED
+  BACKEND_REMOTE_TAG="$(git -C "$BACKEND_ROOT"  ls-remote --tags origin "refs/tags/${VERSION}" 2>/dev/null || echo '')"
+  FRONTEND_REMOTE_TAG="$(git -C "$FRONTEND_ROOT" ls-remote --tags origin "refs/tags/${VERSION}" 2>/dev/null || echo '')"
+  [[ -n "$BACKEND_REMOTE_TAG"  ]] || fail "Backend tag ${VERSION} not confirmed on remote after push"
+  [[ -n "$FRONTEND_REMOTE_TAG" ]] || fail "Frontend tag ${VERSION} not confirmed on remote after push"
+  log "✓ Remote tags verified: ${VERSION}"
+
+  GIT_TAGGED=true
 fi
 
-# ── 8. VersionHistory update (only after tags; skipped in rehearsal) ──────────
-if [[ "$REHEARSAL" == "1" ]]; then
-  log "Step 8/8 — VersionHistory SKIPPED (rehearsal mode)"
-else
-  log "Step 8/8 — Update VersionHistory.js"
+# ── 8. DB registration lifecycle: PENDING → RELEASED + verify ────────────────
+#    Phase 4: every attempt is tracked; failure after PENDING → marks FAILED.
+# ─────────────────────────────────────────────────────────────────────────────
+trap_deploy_cleanup() {
+  if [[ "${DEPLOYMENT_REGISTERED:-false}" == "true" && "${DEPLOYMENT_SUCCESS:-false}" == "false" ]]; then
+    log "Deployment failed post-registration — marking FAILED in DB..."
+    ssh "$VPS_HOST" \
+      "source ~/.nvm/nvm.sh 2>/dev/null && node \"${VPS_BACKEND_PATH}/scripts/register-deployment.js\" --action update-status --env-file \"${VPS_BACKEND_PATH}/.env\" --version \"${VERSION}\" --status FAILED" \
+      2>/dev/null || log "Warning: could not mark deployment as FAILED in DB"
+  fi
+}
 
+if [[ "$REHEARSAL" == "1" ]]; then
+  log "Step 8/8 — Registration SKIPPED (rehearsal mode)"
+else
+  log "Step 8/8 — Register deployment: PENDING → RELEASED + verify"
+
+  DEPLOYMENT_REGISTERED=false
+  DEPLOYMENT_SUCCESS=false
+  trap trap_deploy_cleanup EXIT
+
+  # Phase 1 + Phase 4: insert PENDING — hard fail; no silent loss
+  PENDING_CMD=$(cat <<EOS
+source ~/.nvm/nvm.sh 2>/dev/null
+node "${VPS_BACKEND_PATH}/scripts/register-deployment.js" \
+  --action register-pending \
+  --env-file "${VPS_BACKEND_PATH}/.env" \
+  --version "${VERSION}" \
+  --deployed-at "${DEPLOYED_AT}" \
+  --backend-commit "${BACKEND_SHA}" \
+  --frontend-commit "${FRONTEND_SHA}" \
+  --bundle-hash "${BUNDLE_HASH}" \
+  --backup-snapshot "${SNAPSHOT}" \
+  --backup-root "${VPS_BACKUP_ROOT}" \
+  --rollback-code "${VERSION}" \
+  --notes "${DEPLOY_NOTES:-Release ${VERSION}}" \
+  --rollback-available "false" \
+  --created-by "deploy.sh"
+EOS
+)
+  ssh "$VPS_HOST" "$PENDING_CMD" \
+    || fail "Deployment registration (PENDING) failed — cannot continue without tracking record"
+  DEPLOYMENT_REGISTERED=true
+  log "✓ PENDING record created: ${VERSION}"
+
+  # Phase 2: rollback_available only when remote tags AND backup both verified
+  ROLLBACK_AVAILABLE="false"
+  if [[ "${GIT_TAGGED:-false}" == "true" && "${BACKUP_VALIDATED:-false}" == "true" ]]; then
+    ROLLBACK_AVAILABLE="true"
+  fi
+
+  # Phase 1 + Phase 3: update PENDING → RELEASED; register-deployment.js verifies response
+  RELEASE_CMD=$(cat <<EOS
+source ~/.nvm/nvm.sh 2>/dev/null
+node "${VPS_BACKEND_PATH}/scripts/register-deployment.js" \
+  --action update-status \
+  --env-file "${VPS_BACKEND_PATH}/.env" \
+  --version "${VERSION}" \
+  --status RELEASED \
+  --rollback-available "${ROLLBACK_AVAILABLE}"
+EOS
+)
+  ssh "$VPS_HOST" "$RELEASE_CMD" \
+    || fail "Deployment status update (PENDING → RELEASED) and verification failed"
+  DEPLOYMENT_SUCCESS=true
+  log "✓ Deployment RELEASED: ${VERSION} | rollback_available: ${ROLLBACK_AVAILABLE}"
+
+  # Update VersionHistory.js static fallback (non-fatal — DB is source of truth)
   VH_FILE="$FRONTEND_ROOT/src/pages/settings/VersionHistory.js"
   PAYLOAD="$(mktemp)"
   STATUS_NOTES="${DEPLOY_NOTES:-Release ${VERSION}}"
-  trap 'rm -f "$PAYLOAD"' EXIT
   cat > "$PAYLOAD" <<JSON
 {
   "version": "${VERSION}",
@@ -270,12 +393,15 @@ else
 }
 JSON
   node "$SCRIPT_DIR/update-version-history.js" "$VH_FILE" "$PAYLOAD" \
-    || fail "VersionHistory update failed"
+    || log "Warning: VersionHistory.js static fallback update failed (non-fatal)"
+  rm -f "$PAYLOAD"
 fi
 
 if [[ "$REHEARSAL" == "1" ]]; then
-  log "REHEARSAL SUCCESS — backup=${SNAPSHOT} build=${BUNDLE_HASH} health=OK (no deploy, no tags, no VH)"
+  log "REHEARSAL SUCCESS — backup=${SNAPSHOT} build=${BUNDLE_HASH} health=OK (no deploy, no tags, no registration)"
 else
   log "SUCCESS — ${VERSION} deployed atomically"
-  log "Rollback snapshot: ${VPS_BACKUP_ROOT}/${SNAPSHOT}"
+  log "  Rollback snapshot: ${VPS_BACKUP_ROOT}/${SNAPSHOT}"
+  log "  Git tag verified:  ${GIT_TAGGED}"
+  log "  Rollback ready:    ${ROLLBACK_AVAILABLE}"
 fi
