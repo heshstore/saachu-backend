@@ -182,9 +182,13 @@ async function actionRegister(args, secret, pending) {
     : [];
 
   const status = pending ? 'PENDING' : 'RELEASED';
+  const _parsedAt = new Date(args.deployedAt);
+  const deployedAt = args.deployedAt && !Number.isNaN(_parsedAt.getTime())
+    ? _parsedAt.toISOString()
+    : new Date().toISOString();
   const dto = {
     version,
-    deployed_at:        args.deployedAt    || new Date().toISOString(),
+    deployed_at:        deployedAt,
     backend_commit:     args.backendCommit  || null,
     frontend_commit:    args.frontendCommit || null,
     bundle_hash:        args.bundleHash     || null,
