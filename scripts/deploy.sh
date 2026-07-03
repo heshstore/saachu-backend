@@ -33,21 +33,28 @@ HEALTH_POLL=10        # seconds between retries
 log()  { echo "[deploy] $*"; }
 fail() { echo "[deploy] FATAL: $*" >&2; exit 1; }
 
+MIGRATIONS=""
+
 usage() {
   cat <<'EOF'
 Usage:
-  deploy.sh --version v2026.06.12 [--notes "description"] [--validate-only]
-  deploy-rehearsal.sh   (sets REHEARSAL=1 — no production deploy, no tags, no VH update)
+  deploy.sh --version v2026.06.12 [--notes "description"] [--migrations "migrate:foo,migrate:bar"] [--validate-only]
+  deploy-rehearsal.sh   (sets REHEARSAL=1 — no production deploy, no tags, no DB registration)
 
-Atomic order: Build → Backup → Deploy → Health → Tag+Push → Register → VersionHistory → Success
+--migrations records which DB migration scripts (run separately, before
+this deploy) accompany this release, so the deployment_versions record
+and any future rollback know what schema state goes with this version.
+
+Atomic order: Build → Backup → Deploy → Health → Tag+Push → Register → Success
 EOF
   exit 1
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version) VERSION="$2"; shift 2 ;;
-    --notes)   DEPLOY_NOTES="$2"; shift 2 ;;
+    --version)    VERSION="$2"; shift 2 ;;
+    --notes)      DEPLOY_NOTES="$2"; shift 2 ;;
+    --migrations) MIGRATIONS="$2"; shift 2 ;;
     --validate-only) VALIDATE_ONLY=1; shift ;;
     --rehearsal) REHEARSAL=1; shift ;;
     -h|--help) usage ;;
@@ -359,6 +366,7 @@ node "${VPS_BACKEND_PATH}/scripts/register-deployment.js" \
   --rollback-code "${VERSION}" \
   --notes "${DEPLOY_NOTES:-Release ${VERSION}}" \
   --rollback-available "false" \
+  --migration-ids "${MIGRATIONS}" \
   --created-by "deploy.sh"
 EOS
 )
@@ -401,4 +409,5 @@ else
   log "  Rollback snapshot: ${VPS_BACKUP_ROOT}/${SNAPSHOT}"
   log "  Git tag verified:  ${GIT_TAGGED}"
   log "  Rollback ready:    ${ROLLBACK_AVAILABLE}"
+  log "  Migrations:        ${MIGRATIONS:-none recorded}"
 fi
