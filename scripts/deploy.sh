@@ -284,7 +284,20 @@ if [[ "$REHEARSAL" == "1" ]]; then
   log "Step 7/8 — Git tags SKIPPED (rehearsal mode)"
   GIT_TAGGED=false
 else
-  log "Step 7/8 — Create, push, and verify git tags (post-health)"
+  log "Step 7/8 — Commit version bump, create, push, and verify git tags (post-health)"
+
+  # ecosystem.config.js was stamped with APP_VERSION/DEPLOYED_AT in Step 5. Commit
+  # it now so the tag below points at a commit that matches what's actually live,
+  # and so the working tree is clean again for the next deploy's pre-flight check.
+  if ! git -C "$BACKEND_ROOT" diff --quiet -- ecosystem.config.js; then
+    git -C "$BACKEND_ROOT" add ecosystem.config.js
+    git -C "$BACKEND_ROOT" commit -m "chore(deploy): bump to ${VERSION}" --quiet \
+      || fail "Failed to commit ecosystem.config.js version bump"
+    git -C "$BACKEND_ROOT" push origin HEAD \
+      || fail "Failed to push version-bump commit"
+    BACKEND_SHA="$(git -C "$BACKEND_ROOT" rev-parse --short HEAD)"
+    log "Committed + pushed version bump: ${BACKEND_SHA}"
+  fi
 
   git -C "$BACKEND_ROOT"  tag -a "$VERSION" -m "Deploy ${VERSION} | ${DEPLOYED_AT} | ${DEPLOY_NOTES:-release}" \
     || fail "Backend git tag creation failed"
