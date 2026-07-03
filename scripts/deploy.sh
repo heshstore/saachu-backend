@@ -389,25 +389,9 @@ EOS
   DEPLOYMENT_SUCCESS=true
   log "✓ Deployment RELEASED: ${VERSION} | rollback_available: ${ROLLBACK_AVAILABLE}"
 
-  # Update VersionHistory.js static fallback (non-fatal — DB is source of truth)
-  VH_FILE="$FRONTEND_ROOT/src/pages/settings/VersionHistory.js"
-  PAYLOAD="$(mktemp)"
-  STATUS_NOTES="${DEPLOY_NOTES:-Release ${VERSION}}"
-  cat > "$PAYLOAD" <<JSON
-{
-  "version": "${VERSION}",
-  "dateTime": "${DEPLOYED_AT}",
-  "backendCommit": "${BACKEND_SHA}",
-  "frontendCommit": "${FRONTEND_SHA}",
-  "frontendBundleHash": "${BUNDLE_HASH}",
-  "dbMigrations": [],
-  "backupSnapshot": "${SNAPSHOT}",
-  "statusNotes": "${STATUS_NOTES}"
-}
-JSON
-  node "$SCRIPT_DIR/update-version-history.js" "$VH_FILE" "$PAYLOAD" \
-    || log "Warning: VersionHistory.js static fallback update failed (non-fatal)"
-  rm -f "$PAYLOAD"
+  # Note: VersionHistory.js no longer holds a static VERSIONS array — the
+  # Settings → Version History page reads from the deployment_versions API
+  # (registered above), which is the sole source of truth.
 fi
 
 if [[ "$REHEARSAL" == "1" ]]; then
