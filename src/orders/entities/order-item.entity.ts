@@ -1,4 +1,11 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinColumn, Index } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  ManyToOne,
+  JoinColumn,
+  Index,
+} from 'typeorm';
 import { Order } from './order.entity';
 
 @Entity('order_item')
@@ -41,6 +48,13 @@ export class OrderItem {
 
   @Column({ type: 'text', nullable: true })
   instruction: string;
+
+  @Column({ nullable: true })
+  billing_category: string;
+
+  /** Snapshot of the item master's photo URL at creation time. */
+  @Column({ type: 'text', nullable: true })
+  image_url: string;
 
   @Index('idx_order_item_order')
   @Column({ name: 'orderId', nullable: true })

@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, EntityManager } from 'typeorm';
 import { Order, OrderStatus } from './entities/order.entity';
 import { ProductionJob } from './entities/production-job.entity';
 import { OrderItem } from './entities/order-item.entity';
@@ -15,29 +15,64 @@ import { Customer } from '../customers/entities/customer.entity';
 import { ProductionService } from './production.service';
 import { OrderExplosionService } from './order-explosion.service';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { ItemsService } from '../items/items.service';
 import {
   enrichRowsWithSalesman,
   enrichRowsWithApprover,
+  enrichRowsWithCustomerEmail,
+  enrichRowsWithEmailCount,
+  enrichRowsWithActionCounts,
   ORDER_SALESMAN_JOINS,
   ORDER_SALESMAN_SELECT,
 } from '../shared/ownership.util';
 
 // ── State machine ─────────────────────────────────────────────────────────────
 const ALLOWED_TRANSITIONS: Record<string, OrderStatus[]> = {
-  [OrderStatus.DRAFT]:              [OrderStatus.GENERATED, OrderStatus.PENDING_APPROVAL, OrderStatus.CANCELLED],
-  [OrderStatus.GENERATED]:          [OrderStatus.PENDING_APPROVAL, OrderStatus.CANCELLED],
-  [OrderStatus.PENDING_APPROVAL]:   [OrderStatus.APPROVED, OrderStatus.REJECTED, OrderStatus.CANCELLED],
-  [OrderStatus.APPROVED]:           [OrderStatus.IN_PRODUCTION, OrderStatus.CANCELLED],
-  [OrderStatus.IN_PRODUCTION]:      [OrderStatus.READY, OrderStatus.CANCELLED],
-  [OrderStatus.READY]:              [OrderStatus.DISPATCHED, OrderStatus.PARTIAL_DISPATCHED, OrderStatus.CANCELLED],
+  [OrderStatus.DRAFT]: [
+    OrderStatus.GENERATED,
+    OrderStatus.PENDING_APPROVAL,
+    OrderStatus.CANCELLED,
+  ],
+  [OrderStatus.GENERATED]: [
+    OrderStatus.PENDING_APPROVAL,
+    OrderStatus.CANCELLED,
+  ],
+  [OrderStatus.PENDING_APPROVAL]: [
+    OrderStatus.APPROVED,
+    OrderStatus.REJECTED,
+    OrderStatus.CANCELLED,
+  ],
+  [OrderStatus.APPROVED]: [OrderStatus.IN_PRODUCTION, OrderStatus.CANCELLED],
+  [OrderStatus.IN_PRODUCTION]: [OrderStatus.READY, OrderStatus.CANCELLED],
+  [OrderStatus.READY]: [
+    OrderStatus.DISPATCHED,
+    OrderStatus.PARTIAL_DISPATCHED,
+    OrderStatus.CANCELLED,
+  ],
   // Backward compat: existing DB rows written as READY_FOR_DISPATCH before rename.
-  [OrderStatus.READY_FOR_DISPATCH]: [OrderStatus.DISPATCHED, OrderStatus.PARTIAL_DISPATCHED, OrderStatus.CANCELLED],
-  [OrderStatus.PARTIAL_DISPATCHED]: [OrderStatus.DISPATCHED, OrderStatus.PARTIAL_DISPATCHED, OrderStatus.CANCELLED],
-  [OrderStatus.DISPATCHED]:         [OrderStatus.PARTIAL_DELIVERED, OrderStatus.COMPLETED, OrderStatus.CANCELLED],
-  [OrderStatus.PARTIAL_DELIVERED]:  [OrderStatus.COMPLETED, OrderStatus.PARTIAL_DELIVERED, OrderStatus.CANCELLED],
-  [OrderStatus.COMPLETED]:          [],
-  [OrderStatus.REJECTED]:           [OrderStatus.PENDING_APPROVAL, OrderStatus.CANCELLED],
-  [OrderStatus.CANCELLED]:          [],
+  [OrderStatus.READY_FOR_DISPATCH]: [
+    OrderStatus.DISPATCHED,
+    OrderStatus.PARTIAL_DISPATCHED,
+    OrderStatus.CANCELLED,
+  ],
+  [OrderStatus.PARTIAL_DISPATCHED]: [
+    OrderStatus.DISPATCHED,
+    OrderStatus.PARTIAL_DISPATCHED,
+    OrderStatus.CANCELLED,
+  ],
+  [OrderStatus.DISPATCHED]: [
+    OrderStatus.PARTIAL_DELIVERED,
+    OrderStatus.COMPLETED,
+    OrderStatus.CANCELLED,
+  ],
+  [OrderStatus.PARTIAL_DELIVERED]: [
+    OrderStatus.COMPLETED,
+    OrderStatus.PARTIAL_DELIVERED,
+    OrderStatus.CANCELLED,
+  ],
+  [OrderStatus.COMPLETED]: [],
+  [OrderStatus.REJECTED]: [OrderStatus.PENDING_APPROVAL, OrderStatus.CANCELLED],
+  [OrderStatus.CANCELLED]: [],
 };
 
 function assertTransition(from: OrderStatus, to: OrderStatus): void {
@@ -64,7 +99,24 @@ export class OrdersService {
     private productionService: ProductionService,
     private explosionService: OrderExplosionService,
     private readonly eventEmitter: EventEmitter2,
+    private readonly itemsService: ItemsService,
   ) {}
+
+  /**
+   * Photos are cosmetic reference images, not point-in-time financial data —
+   * always show the item master's current photo rather than whatever was
+   * snapshotted when the line item was created (which may predate any photo
+   * ever being uploaded to that item).
+   */
+  private async enrichItemsWithLiveImage(items: OrderItem[]): Promise<void> {
+    await Promise.all(
+      items.map(async (it) => {
+        if (!it.sku) return;
+        const master = await this.itemsService.findBySku(it.sku);
+        if (master?.image) it.image_url = master.image;
+      }),
+    );
+  }
 
   // ── Order number generator — ORD0001 format ──────────────────────────────────
   private async generateOrderNo(): Promise<string> {
@@ -90,13 +142,15 @@ export class OrdersService {
     );
     if (!rows.length) return null;
     const c = rows[0];
-    const fullAddress = [c.address, c.city, c.state, c.pincode].filter(Boolean).join(', ');
+    const fullAddress = [c.address, c.city, c.state, c.pincode]
+      .filter(Boolean)
+      .join(', ');
     return {
-      customer_name:    c.companyName || c.contactName || '',
-      customer_phone:   c.mobile1 || '',
-      billing_address:  fullAddress,
+      customer_name: c.companyName || c.contactName || '',
+      customer_phone: c.mobile1 || '',
+      billing_address: fullAddress,
       shipping_address: fullAddress,
-      gst_number:       c.gstNumber || '',
+      gst_number: c.gstNumber || '',
     };
   }
 
@@ -104,10 +158,10 @@ export class OrdersService {
   private normalizePhone(phone: string): string | null {
     if (!phone) return null;
     let p = phone.replace(/\D/g, '');
-    if (p.length === 10)                              p = '91' + p;
-    if (p.length === 11 && p.startsWith('0'))        p = '91' + p.slice(1);
-    if (p.length === 12 && !p.startsWith('91'))      p = '91' + p;
-    if (!p.startsWith('91') || p.length < 12)        return null;
+    if (p.length === 10) p = '91' + p;
+    if (p.length === 11 && p.startsWith('0')) p = '91' + p.slice(1);
+    if (p.length === 12 && !p.startsWith('91')) p = '91' + p;
+    if (!p.startsWith('91') || p.length < 12) return null;
     return '+' + p;
   }
 
@@ -122,19 +176,22 @@ export class OrdersService {
     pincode?: string;
   }): Promise<Customer> {
     const phone = this.normalizePhone(input.phone);
-    if (!phone) throw new BadRequestException('Valid customer phone is required');
+    if (!phone)
+      throw new BadRequestException('Valid customer phone is required');
 
-    const existing = await this.customerRepo.findOne({ where: { mobile1: phone } });
+    const existing = await this.customerRepo.findOne({
+      where: { mobile1: phone },
+    });
     if (existing) return existing;
 
     return this.customerRepo.save(
       this.customerRepo.create({
-        companyName:  input.name    || '',
-        contactName:  input.name    || '',
-        mobile1:      phone,
-        city:         input.city    || '',
-        state:        input.state   || '',
-        pincode:      input.pincode || '',
+        companyName: input.name || '',
+        contactName: input.name || '',
+        mobile1: phone,
+        city: input.city || '',
+        state: input.state || '',
+        pincode: input.pincode || '',
       }),
     );
   }
@@ -142,29 +199,39 @@ export class OrdersService {
   // ── Idempotency ───────────────────────────────────────────────────────────────
   // Hashes only stable business data — no timestamps, no user ids, no random values.
   private generateIdempotencyKey(payload: any): string {
-    return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+    return crypto
+      .createHash('sha256')
+      .update(JSON.stringify(payload))
+      .digest('hex');
   }
 
   // ── Total calculation ─────────────────────────────────────────────────────────
   // Uses only normalized items — never reads rate/amount fields from raw DTO.
-  private calcTotals(items: OrderItem[], data: any): { subtotal: number; total_amount: number } {
-    const subtotal  = items.reduce((s, i) => s + Number(i.amount),     0);
-    const gstTotal  = items.reduce((s, i) => s + Number(i.gst_amount), 0);
+  private calcTotals(
+    items: OrderItem[],
+    data: any,
+  ): { subtotal: number; total_amount: number } {
+    const subtotal = items.reduce((s, i) => s + Number(i.amount), 0);
+    const gstTotal = items.reduce((s, i) => s + Number(i.gst_amount), 0);
 
-    const discountType  = data.discount_type  ?? 'PERCENT';
+    const discountType = data.discount_type ?? 'PERCENT';
     const discountValue = Number(data.discount_value ?? 0);
-    const headerDiscount = discountType === 'FLAT'
-      ? discountValue
-      : (subtotal * discountValue) / 100;
+    const headerDiscount =
+      discountType === 'FLAT'
+        ? discountValue
+        : (subtotal * discountValue) / 100;
 
     const charges =
-      Number(data.packing_charges      ?? data.charges_packing      ?? 0) +
-      Number(data.cartage_charges      ?? data.charges_cartage      ?? 0) +
-      Number(data.forwarding_charges   ?? data.charges_forwarding   ?? 0) +
+      Number(data.packing_charges ?? data.charges_packing ?? 0) +
+      Number(data.cartage_charges ?? data.charges_cartage ?? 0) +
+      Number(data.forwarding_charges ?? data.charges_forwarding ?? 0) +
       Number(data.installation_charges ?? data.charges_installation ?? 0) +
-      Number(data.loading_charges      ?? data.charges_loading      ?? 0);
+      Number(data.loading_charges ?? data.charges_loading ?? 0);
 
-    return { subtotal, total_amount: Math.max(0, subtotal + gstTotal - headerDiscount + charges) };
+    return {
+      subtotal,
+      total_amount: Math.max(0, subtotal + gstTotal - headerDiscount + charges),
+    };
   }
 
   // ── Item normalizer ───────────────────────────────────────────────────────────
@@ -173,38 +240,47 @@ export class OrdersService {
   private normalizeItem(input: any): Partial<OrderItem> {
     const round = (v: number) => Math.round(v * 100) / 100;
 
-    const qty          = Number(input.qty ?? input.quantity) || 1;
-    const baseRate     = Number(input.base_rate) || 0;
+    const qty = Number(input.qty ?? input.quantity) || 1;
+    const baseRate = Number(input.base_rate) || 0;
     const discountType = (input.discount_type || 'NONE').toUpperCase();
     const discountValue = Number(input.discount_value) || 0;
 
     let rate = baseRate;
-    if (discountType === 'PERCENT') rate = baseRate - (baseRate * discountValue) / 100;
-    if (discountType === 'FLAT')    rate = baseRate - discountValue;
+    if (discountType === 'PERCENT')
+      rate = baseRate - (baseRate * discountValue) / 100;
+    if (discountType === 'FLAT') rate = baseRate - discountValue;
     if (rate < 0) rate = 0;
 
     // Belt-and-suspenders: rate reduction is only valid when a discount type is applied.
     if (rate < baseRate && !['PERCENT', 'FLAT'].includes(discountType)) {
-      throw new BadRequestException('Invalid pricing: rate cannot be reduced without a discount type');
+      throw new BadRequestException(
+        'Invalid pricing: rate cannot be reduced without a discount type',
+      );
     }
 
-    const amount    = round(qty * rate);
+    const amount = round(qty * rate);
     const gstPercent = Number(input.gst_percent) || 0;
-    const gstAmount  = round((amount * gstPercent) / 100);
+    const gstAmount = round((amount * gstPercent) / 100);
 
     return {
-      sku:           input.sku        || '',
-      item_name:     input.item_name  || input.itemName || '',
-      hsn_code:      input.hsn_code   || input.hsnCode  || '',
+      sku: input.sku || '',
+      item_name: input.item_name || input.itemName || '',
+      hsn_code: input.hsn_code || input.hsnCode || '',
       qty,
-      base_rate:     baseRate,
-      rate:          round(rate),
+      base_rate: baseRate,
+      rate: round(rate),
       discount_type: discountType,
       discount_value: discountValue,
-      gst_percent:   gstPercent,
+      gst_percent: gstPercent,
       amount,
-      gst_amount:    gstAmount,
-      instruction:   input.instruction || null,
+      gst_amount: gstAmount,
+      instruction: input.instruction || null,
+      billing_category:
+        (input.billing_category as string | null | undefined) ?? null,
+      // No server-side item-master lookup happens here (unlike quotations) —
+      // this is a pass-through snapshot of whatever image URL the client
+      // (order form, or quotation-to-order conversion) already resolved.
+      image_url: input.image_url || null,
     };
   }
 
@@ -223,26 +299,31 @@ export class OrdersService {
       const existing = await this.orderRepo.findOne({
         where: { quotation_id: Number(data.quotation_id) },
       });
-      if (existing) throw new ConflictException('Order already created for this quotation');
+      if (existing)
+        throw new ConflictException('Order already created for this quotation');
     }
 
     // Idempotency gate — hash of stable business data, checked within a rolling window.
     const idempotencyPayload = {
       customer_id: data.customer_id,
-      items: rawItems.map(i => ({
-        sku:           i.sku,
-        qty:           i.qty,
-        base_rate:     i.base_rate,
+      items: rawItems.map((i) => ({
+        sku: i.sku,
+        qty: i.qty,
+        base_rate: i.base_rate,
         discount_type: i.discount_type,
         discount_value: i.discount_value,
-        gst_percent:   i.gst_percent,
+        gst_percent: i.gst_percent,
       })),
       charges: {
-        packing:      Number(data.packing_charges      ?? data.charges_packing      ?? 0),
-        cartage:      Number(data.cartage_charges      ?? data.charges_cartage      ?? 0),
-        forwarding:   Number(data.forwarding_charges   ?? data.charges_forwarding   ?? 0),
-        installation: Number(data.installation_charges ?? data.charges_installation ?? 0),
-        loading:      Number(data.loading_charges      ?? data.charges_loading      ?? 0),
+        packing: Number(data.packing_charges ?? data.charges_packing ?? 0),
+        cartage: Number(data.cartage_charges ?? data.charges_cartage ?? 0),
+        forwarding: Number(
+          data.forwarding_charges ?? data.charges_forwarding ?? 0,
+        ),
+        installation: Number(
+          data.installation_charges ?? data.charges_installation ?? 0,
+        ),
+        loading: Number(data.loading_charges ?? data.charges_loading ?? 0),
       },
     };
     const idempotencyKey = this.generateIdempotencyKey(idempotencyPayload);
@@ -252,36 +333,47 @@ export class OrdersService {
       order: { created_at: 'DESC' },
     });
     if (existing) {
-      const diffMinutes = (Date.now() - new Date(existing.created_at).getTime()) / 60000;
+      const diffMinutes =
+        (Date.now() - new Date(existing.created_at).getTime()) / 60000;
       if (diffMinutes <= IDEMPOTENCY_WINDOW_MINUTES) return existing;
     }
 
-    const items = rawItems.map(i => Object.assign(new OrderItem(), this.normalizeItem(i)));
+    const items = rawItems.map((i) =>
+      Object.assign(new OrderItem(), this.normalizeItem(i)),
+    );
     const { subtotal, total_amount } = this.calcTotals(items, data);
 
     // Customer resolution:
     //   phone provided → find or create customer, snapshot from entity (no extra query)
     //   customer_id provided → snapshot via SQL (quotation conversion path)
-    let resolvedCustomerId: number | undefined = data.customer_id ? Number(data.customer_id) : undefined;
+    let resolvedCustomerId: number | undefined = data.customer_id
+      ? Number(data.customer_id)
+      : undefined;
     let snap: Awaited<ReturnType<typeof this.snapshotCustomer>> = null;
 
     if (data.customer_phone && !resolvedCustomerId) {
       const customer = await this.findOrCreateCustomer({
-        name:    data.customer_name,
-        phone:   data.customer_phone,
-        city:    data.customer_city,
-        state:   data.customer_state,
+        name: data.customer_name,
+        phone: data.customer_phone,
+        city: data.customer_city,
+        state: data.customer_state,
         pincode: data.customer_pincode,
       });
       resolvedCustomerId = customer.id;
-      const addr = [customer.address, customer.city, customer.state, customer.pincode]
-        .filter(Boolean).join(', ');
+      const addr = [
+        customer.address,
+        customer.city,
+        customer.state,
+        customer.pincode,
+      ]
+        .filter(Boolean)
+        .join(', ');
       snap = {
-        customer_name:    customer.companyName || customer.contactName || '',
-        customer_phone:   customer.mobile1 || '',
-        billing_address:  addr,
+        customer_name: customer.companyName || customer.contactName || '',
+        customer_phone: customer.mobile1 || '',
+        billing_address: addr,
         shipping_address: addr,
-        gst_number:       customer.gstNumber || '',
+        gst_number: customer.gstNumber || '',
       };
     } else if (resolvedCustomerId) {
       snap = await this.snapshotCustomer(resolvedCustomerId);
@@ -291,68 +383,87 @@ export class OrdersService {
 
     const order = this.orderRepo.create({
       order_no,
-      quotation_id:        data.quotation_id ? Number(data.quotation_id) : undefined,
-      customer_id:         resolvedCustomerId,
-      lead_id:             data.lead_id      ? Number(data.lead_id)      : undefined,
-      customer_name:       data.customer_name    ?? snap?.customer_name    ?? '',
-      customer_phone:      data.customer_phone   ?? snap?.customer_phone   ?? '',
-      billing_address:     data.billing_address  ?? snap?.billing_address  ?? '',
-      shipping_address:    data.shipping_address ?? snap?.shipping_address ?? '',
-      gst_number:          data.gst_number       ?? snap?.gst_number       ?? '',
+      quotation_id: data.quotation_id ? Number(data.quotation_id) : undefined,
+      customer_id: resolvedCustomerId,
+      lead_id: data.lead_id ? Number(data.lead_id) : undefined,
+      customer_name: data.customer_name ?? snap?.customer_name ?? '',
+      customer_phone: data.customer_phone ?? snap?.customer_phone ?? '',
+      billing_address: data.billing_address ?? snap?.billing_address ?? '',
+      shipping_address: data.shipping_address ?? snap?.shipping_address ?? '',
+      gst_number: data.gst_number ?? snap?.gst_number ?? '',
       subtotal,
-      discount_type:       data.discount_type  ?? 'PERCENT',
-      discount_value:      Number(data.discount_value ?? 0),
-      packing_charges:     Number(data.packing_charges      ?? data.charges_packing      ?? 0),
-      cartage_charges:     Number(data.cartage_charges      ?? data.charges_cartage      ?? 0),
-      forwarding_charges:  Number(data.forwarding_charges   ?? data.charges_forwarding   ?? 0),
-      installation_charges:Number(data.installation_charges ?? data.charges_installation ?? 0),
-      loading_charges:     Number(data.loading_charges      ?? data.charges_loading      ?? 0),
+      discount_type: data.discount_type ?? 'PERCENT',
+      discount_value: Number(data.discount_value ?? 0),
+      packing_charges: Number(
+        data.packing_charges ?? data.charges_packing ?? 0,
+      ),
+      cartage_charges: Number(
+        data.cartage_charges ?? data.charges_cartage ?? 0,
+      ),
+      forwarding_charges: Number(
+        data.forwarding_charges ?? data.charges_forwarding ?? 0,
+      ),
+      installation_charges: Number(
+        data.installation_charges ?? data.charges_installation ?? 0,
+      ),
+      loading_charges: Number(
+        data.loading_charges ?? data.charges_loading ?? 0,
+      ),
       total_amount,
-      status:              (data.status as OrderStatus) || OrderStatus.DRAFT,
-      paid_amount:         0,
-      pending_amount:      total_amount,
-      salesman_id:         data.salesman_id ? Number(data.salesman_id) : undefined,
-      created_by:              user?.id,
-      idempotency_key:         idempotencyKey,
-      idempotency_created_at:  new Date(),
+      status: (data.status as OrderStatus) || OrderStatus.DRAFT,
+      paid_amount: 0,
+      pending_amount: total_amount,
+      salesman_id: data.salesman_id ? Number(data.salesman_id) : undefined,
+      created_by: user?.id,
+      idempotency_key: idempotencyKey,
+      idempotency_created_at: new Date(),
+      booking_at: data.booking_at ?? null,
+      goods_sent_by: data.goods_sent_by ?? null,
+      transport_payment_by: data.transport_payment_by ?? null,
+      delivery_instructions: data.delivery_instructions ?? null,
+      delivery_type: data.delivery_type ?? null,
       items,
     });
 
-    const saved = await this.orderRepo.save(order);
+    const saved = await this.orderRepo.manager.transaction(async (tx) => {
+      const s = await tx.save(order);
 
-    // Sync legacy NOT-NULL columns that the TypeORM entity doesn't map.
-    // The migration sets DEFAULT '' / 0 so the INSERT succeeds; these UPDATEs
-    // populate them with real data for tooling that reads the legacy columns.
-    await this.orderRepo.manager
-      .query(
+      // Sync legacy NOT-NULL columns that the TypeORM entity doesn't map.
+      // The migration sets DEFAULT '' / 0 so the INSERT succeeds; these UPDATEs
+      // populate them with real data for tooling that reads the legacy columns.
+      await tx.query(
         `UPDATE orders SET mobile = $1, order_number = $2 WHERE id = $3`,
-        [saved.customer_phone || '', saved.order_no || '', saved.id],
-      )
-      .catch(() => {});
+        [s.customer_phone || '', s.order_no || '', s.id],
+      );
 
-    // order_item legacy columns: itemName, quantity, msp_price are NOT NULL with
-    // no DEFAULT and not in the TypeORM entity. Populate from modern equivalents.
-    await this.orderRepo.manager
-      .query(
+      // order_item legacy columns: itemName, quantity, msp_price are NOT NULL with
+      // no DEFAULT and not in the TypeORM entity. Populate from modern equivalents.
+      await tx.query(
         `UPDATE order_item
          SET "itemName" = COALESCE(NULLIF(item_name, ''), 'Item'),
              quantity   = qty::integer,
              msp_price  = COALESCE(rate, 0)
          WHERE "orderId" = $1`,
-        [saved.id],
-      )
-      .catch(() => {});
+        [s.id],
+      );
+
+      return s;
+    });
 
     this.eventEmitter.emit('order.created', {
-      id:            saved.id,
-      salesman_id:   saved.salesman_id,
+      id: saved.id,
+      salesman_id: saved.salesman_id,
       customer_name: saved.customer_name,
     });
 
     // Non-blocking — planning data is best-effort and must not block order save
-    this.explosionService.explode(saved.id).catch(err =>
-      this.logger.warn(`[OrderExplosion] create failed for order ${saved.id}: ${err?.message}`),
-    );
+    this.explosionService
+      .explode(saved.id)
+      .catch((err) =>
+        this.logger.warn(
+          `[OrderExplosion] create failed for order ${saved.id}: ${err?.message}`,
+        ),
+      );
 
     return saved;
   }
@@ -364,7 +475,7 @@ export class OrdersService {
     user?: any,
   ): Promise<{ data: Order[]; total: number; page: number; limit: number }> {
     const limit = Math.min(Number(filters.limit) || 50, 200); // hard cap at 200
-    const page  = Math.max(Number(filters.page)  || 1,  1);
+    const page = Math.max(Number(filters.page) || 1, 1);
 
     const qb = this.orderRepo
       .createQueryBuilder('o')
@@ -375,30 +486,48 @@ export class OrdersService {
 
     const fullAccessRoles = ['Admin', 'COO', 'Sales Manager'];
     if (user?.role && !fullAccessRoles.includes(user.role) && user.id) {
-      qb.andWhere('(o.created_by = :userId OR o.salesman_id = :userId)', { userId: user.id });
+      qb.andWhere('(o.created_by = :userId OR o.salesman_id = :userId)', {
+        userId: user.id,
+      });
     }
 
-    if (filters.status)      qb.andWhere('o.status = :status',    { status: filters.status });
-    if (filters.customer_id) qb.andWhere('o.customer_id = :cid',  { cid: filters.customer_id });
-    if (filters.from_date)   qb.andWhere('o.created_at >= :from', { from: filters.from_date });
-    if (filters.to_date)     qb.andWhere('o.created_at <= :to',   { to: filters.to_date });
+    if (filters.status)
+      qb.andWhere('o.status = :status', { status: filters.status });
+    if (filters.customer_id)
+      qb.andWhere('o.customer_id = :cid', { cid: filters.customer_id });
+    if (filters.from_date)
+      qb.andWhere('o.created_at >= :from', { from: filters.from_date });
+    if (filters.to_date)
+      qb.andWhere('o.created_at <= :to', { to: filters.to_date });
+    if (filters.q)
+      qb.andWhere('(o.order_no ILIKE :q OR CAST(o.id AS TEXT) ILIKE :q)', {
+        q: `%${filters.q}%`,
+      });
 
     const [data, total] = await qb.getManyAndCount();
     const ds = this.orderRepo.manager.connection;
     await enrichRowsWithSalesman(ds, data as any[]);
     await enrichRowsWithApprover(ds, data as any[]);
+    await enrichRowsWithCustomerEmail(ds, data as any[]);
+    await enrichRowsWithEmailCount(ds, data as any[], 'order');
+    await enrichRowsWithActionCounts(ds, data as any[], 'order');
 
     // Attach quotation_no for orders sourced from quotations (single batch lookup,
     // avoids N+1 queries). quotation_id is an integer FK — no ORM relation defined.
-    const quotationIds = data.filter(o => o.quotation_id).map(o => o.quotation_id);
+    const quotationIds = data
+      .filter((o) => o.quotation_id)
+      .map((o) => o.quotation_id);
     if (quotationIds.length > 0) {
-      const qRows: { id: number; quotation_no: string }[] = await this.orderRepo.manager.query(
-        `SELECT id, quotation_no FROM quotation WHERE id = ANY($1)`,
-        [quotationIds],
-      );
-      const qnoMap = new Map(qRows.map(r => [Number(r.id), r.quotation_no]));
-      (data as any[]).forEach(o => {
-        o.quotation_no = o.quotation_id ? (qnoMap.get(o.quotation_id) ?? null) : null;
+      const qRows: { id: number; quotation_no: string }[] =
+        await this.orderRepo.manager.query(
+          `SELECT id, quotation_no FROM quotation WHERE id = ANY($1)`,
+          [quotationIds],
+        );
+      const qnoMap = new Map(qRows.map((r) => [Number(r.id), r.quotation_no]));
+      (data as any[]).forEach((o) => {
+        o.quotation_no = o.quotation_id
+          ? (qnoMap.get(o.quotation_id) ?? null)
+          : null;
       });
     }
 
@@ -414,9 +543,21 @@ export class OrdersService {
       [id],
     );
     if (!rows.length) throw new NotFoundException('Order not found');
+    await enrichRowsWithCustomerEmail(this.orderRepo.manager.connection, rows);
+    await enrichRowsWithEmailCount(
+      this.orderRepo.manager.connection,
+      rows,
+      'order',
+    );
+    await enrichRowsWithActionCounts(
+      this.orderRepo.manager.connection,
+      rows,
+      'order',
+    );
     const items = await this.orderRepo.manager.find(OrderItem, {
       where: { order_id: id },
     });
+    await this.enrichItemsWithLiveImage(items);
     return { ...rows[0], items } as Order;
   }
 
@@ -429,18 +570,34 @@ export class OrdersService {
 
   // ── Transition helper ─────────────────────────────────────────────────────────
 
-  private async transition(id: number, to: OrderStatus): Promise<Order> {
-    const order = await this.findOne(id);
+  private async transition(
+    id: number,
+    to: OrderStatus,
+    em?: EntityManager,
+  ): Promise<Order> {
+    const repo = em ? em.getRepository(Order) : this.orderRepo;
+    const order = em
+      ? await repo.findOneOrFail({ where: { id } })
+      : await this.findOne(id);
     assertTransition(order.status, to);
     order.status = to;
-    const saved = await this.orderRepo.save(order);
-    this.eventEmitter.emit('order.updated', { orderId: saved.id, status: saved.status });
+    const saved = await repo.save(order);
+    if (!em) {
+      this.eventEmitter.emit('order.updated', {
+        orderId: saved.id,
+        status: saved.status,
+      });
+    }
     return saved;
   }
 
   // ── Status transitions ────────────────────────────────────────────────────────
 
-  async approveOrder(id: number, remarks: string | undefined, user: any): Promise<Order> {
+  async approveOrder(
+    id: number,
+    remarks: string | undefined,
+    user: any,
+  ): Promise<Order> {
     let savedOrder!: Order;
     let createdJobs: ProductionJob[] = [];
 
@@ -452,8 +609,8 @@ export class OrdersService {
       // combination throws "FOR UPDATE cannot be applied to the nullable side of an
       // outer join".  We load items separately below, without the lock constraint.
       const order = await em.findOne(Order, {
-        where:              { id },
-        lock:               { mode: 'pessimistic_write' },
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
         loadEagerRelations: false,
       });
       if (!order) throw new NotFoundException('Order not found');
@@ -462,14 +619,17 @@ export class OrdersService {
       // Load items in the same transaction — no lock needed on them.
       order.items = await em.find(OrderItem, { where: { order: { id } } });
 
-      order.status      = OrderStatus.APPROVED;
+      order.status = OrderStatus.APPROVED;
       order.approved_by = user?.id ?? null;
       order.approved_at = new Date();
       // advance_amount / process_without_advance / approval_remarks (salesperson notes)
       // are intentionally NOT touched here — they are operational data that must persist.
 
-      savedOrder  = await em.save(order);
-      createdJobs = await this.productionService.createFromOrder(savedOrder, em);
+      savedOrder = await em.save(order);
+      createdJobs = await this.productionService.createFromOrder(
+        savedOrder,
+        em,
+      );
     });
 
     // Auto-assign runs after the transaction commits — jobs must be visible to
@@ -490,23 +650,34 @@ export class OrdersService {
     return this.findOne(savedOrder.id);
   }
 
-  async rejectOrder(id: number, remarks: string | undefined, user: any): Promise<Order> {
+  async rejectOrder(
+    id: number,
+    remarks: string | undefined,
+    user: any,
+  ): Promise<Order> {
     const order = await this.findOne(id);
     assertTransition(order.status, OrderStatus.REJECTED);
-    order.status            = OrderStatus.REJECTED;
-    order.approved_by       = user?.id ?? null;
-    order.approved_at       = new Date();
-    order.rejection_reason  = remarks || null;
+    order.status = OrderStatus.REJECTED;
+    order.approved_by = user?.id ?? null;
+    order.approved_at = new Date();
+    order.rejection_reason = remarks || null;
     // advance_amount / process_without_advance / approval_remarks are NOT touched —
     // they are the salesperson's operational data and must survive rejection.
     const saved = await this.orderRepo.save(order);
-    this.eventEmitter.emit('order.updated', { orderId: saved.id, status: saved.status });
+    this.eventEmitter.emit('order.updated', {
+      orderId: saved.id,
+      status: saved.status,
+    });
     return saved;
   }
 
   async sendForApproval(
     id: number,
-    data?: { advance_amount?: number; process_without_advance?: boolean; remarks?: string },
+    data?: {
+      advance_amount?: number;
+      process_without_advance?: boolean;
+      remarks?: string;
+    },
   ): Promise<Order> {
     const order = await this.findOne(id);
     if (order.status === OrderStatus.PENDING_APPROVAL) return order;
@@ -541,8 +712,15 @@ export class OrdersService {
   }
 
   async cancel(id: number): Promise<Order> {
-    const order = await this.transition(id, OrderStatus.CANCELLED);
-    await this.productionService.cancelJobsForOrder(id);
+    let order!: Order;
+    await this.orderRepo.manager.transaction(async (em) => {
+      order = await this.transition(id, OrderStatus.CANCELLED, em);
+      await this.productionService.cancelJobsForOrder(id, em);
+    });
+    this.eventEmitter.emit('order.updated', {
+      orderId: order.id,
+      status: order.status,
+    });
     return order;
   }
 
@@ -550,11 +728,16 @@ export class OrdersService {
 
   async updateOrder(id: number, data: any): Promise<Order> {
     const order = await this.findOne(id);
-    const EDITABLE = [OrderStatus.DRAFT, OrderStatus.GENERATED, OrderStatus.PENDING_APPROVAL, OrderStatus.REJECTED];
+    const EDITABLE = [
+      OrderStatus.DRAFT,
+      OrderStatus.GENERATED,
+      OrderStatus.PENDING_APPROVAL,
+      OrderStatus.REJECTED,
+    ];
     if (!EDITABLE.includes(order.status)) {
       throw new BadRequestException({
-        message:        `Orders in ${order.status} status cannot be edited`,
-        code:           'ORDER_NOT_EDITABLE',
+        message: `Orders in ${order.status} status cannot be edited`,
+        code: 'ORDER_NOT_EDITABLE',
         current_status: order.status,
       });
     }
@@ -567,20 +750,32 @@ export class OrdersService {
       if (!Array.isArray(data.items) || data.items.length === 0) {
         throw new BadRequestException('Order must contain at least one item');
       }
-      const items = data.items.map(i => Object.assign(new OrderItem(), this.normalizeItem(i)));
-      const { subtotal, total_amount } = this.calcTotals(items, { ...order, ...data });
-      data.items         = items;
-      data.subtotal      = subtotal;
-      data.total_amount  = total_amount;
-      data.pending_amount = Math.max(0, total_amount - Number(order.paid_amount));
+      const items = data.items.map((i) =>
+        Object.assign(new OrderItem(), this.normalizeItem(i)),
+      );
+      const { subtotal, total_amount } = this.calcTotals(items, {
+        ...order,
+        ...data,
+      });
+      data.items = items;
+      data.subtotal = subtotal;
+      data.total_amount = total_amount;
+      data.pending_amount = Math.max(
+        0,
+        total_amount - Number(order.paid_amount),
+      );
     }
 
     await this.orderRepo.save({ ...order, ...data });
 
     // Non-blocking re-explosion — re-calculates planning if items changed
-    this.explosionService.explode(id).catch(err =>
-      this.logger.warn(`[OrderExplosion] update failed for order ${id}: ${err?.message}`),
-    );
+    this.explosionService
+      .explode(id)
+      .catch((err) =>
+        this.logger.warn(
+          `[OrderExplosion] update failed for order ${id}: ${err?.message}`,
+        ),
+      );
 
     return this.findOne(id);
   }
@@ -596,16 +791,20 @@ export class OrdersService {
   async addPayment(id: number, body: any): Promise<Order> {
     const order = await this.findOne(id);
     const amount = Number(body.amount || 0);
-    if (amount <= 0) throw new BadRequestException('Amount must be greater than zero');
+    if (amount <= 0)
+      throw new BadRequestException('Amount must be greater than zero');
 
-    order.paid_amount    = Number(order.paid_amount) + amount;
-    order.pending_amount = Math.max(0, Number(order.total_amount) - Number(order.paid_amount));
+    order.paid_amount = Number(order.paid_amount) + amount;
+    order.pending_amount = Math.max(
+      0,
+      Number(order.total_amount) - Number(order.paid_amount),
+    );
     const saved = await this.orderRepo.save(order);
     this.eventEmitter.emit('payment.received', {
-      order_id:  id,
-      order_no:  order.order_no,
+      order_id: id,
+      order_no: order.order_no,
       amount,
-      user_id:   body.user_id   ?? null,
+      user_id: body.user_id ?? null,
       user_name: body.user_name ?? null,
     });
     return saved;
@@ -630,7 +829,7 @@ export class OrdersService {
       approved_at: (order as any).approved_at,
       created_by_name: (order as any).created_by_name,
       created_by_role: (order as any).created_by_role,
-      items: (order.items || []).map(i => ({
+      items: (order.items || []).map((i) => ({
         item_name: i.item_name,
         sku: i.sku,
         qty: i.qty,

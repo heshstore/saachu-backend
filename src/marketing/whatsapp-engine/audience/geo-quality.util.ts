@@ -1,5 +1,5 @@
 /**
- * Promotional DB geo quality — independent from quality_score / contact_strength.
+ * Promotional Contacts geo quality — independent from quality_score / contact_strength.
  */
 
 export type GeoQuality = 'VALID' | 'PARTIAL' | 'JUNK';
@@ -24,13 +24,13 @@ export function isMeaningfulGeo(value: string | null | undefined): boolean {
 
 export function isValidEmailFormat(raw: string | null | undefined): boolean {
   if (!isMeaningfulGeo(raw)) return false;
-  return EMAIL_RE.test(raw!.trim());
+  return EMAIL_RE.test(raw.trim());
 }
 
 /** Obvious garbage — not merely unresolved. */
 export function isGarbageCity(city: string | null | undefined): boolean {
   if (!isMeaningfulGeo(city)) return false;
-  const t = city!.trim();
+  const t = city.trim();
   if (t.length < 2) return true;
   if (GARBAGE_CITY_RE.test(t)) return true;
   if (/^(.)\1{4,}$/i.test(t.replace(/\s/g, ''))) return true;
@@ -56,12 +56,14 @@ export type GeoQualityInput = {
  * JUNK    — no usable identity or garbage city
  */
 export function classifyGeoQuality(input: GeoQualityInput): GeoQuality {
-  const hasName = isMeaningfulGeo(input.name) || isMeaningfulGeo(input.customer_name);
+  const hasName =
+    isMeaningfulGeo(input.name) || isMeaningfulGeo(input.customer_name);
   const hasCity = isMeaningfulGeo(input.city);
 
   if (hasCity && isGarbageCity(input.city)) return 'JUNK';
   if (!input.phoneValid && !input.emailValid) return 'JUNK';
-  if (input.emailValid && !input.phoneValid && !hasName && !hasCity) return 'JUNK';
+  if (input.emailValid && !input.phoneValid && !hasName && !hasCity)
+    return 'JUNK';
 
   const fullyResolved =
     input.phoneValid &&

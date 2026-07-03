@@ -1,5 +1,13 @@
 import {
-  Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query, Req,
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseIntPipe,
+  Patch,
+  Post,
+  Query,
+  Req,
 } from '@nestjs/common';
 import { RequirePermission } from '../auth/require-permission.decorator';
 import { WorkforceOpsService } from './workforce-ops.service';
@@ -31,7 +39,10 @@ export class WorkforceOpsController {
     @Req() req: { user: { id: number; role?: string } },
     @Body() body: { userId: number },
   ) {
-    return this.svc.checkIn({ id: req.user.id, role: req.user.role }, body.userId);
+    return this.svc.checkIn(
+      { id: req.user.id, role: req.user.role },
+      body.userId,
+    );
   }
 
   @Post('attendance/check-out')
@@ -40,7 +51,10 @@ export class WorkforceOpsController {
     @Req() req: { user: { id: number; role?: string } },
     @Body() body: { userId: number },
   ) {
-    return this.svc.checkOut({ id: req.user.id, role: req.user.role }, body.userId);
+    return this.svc.checkOut(
+      { id: req.user.id, role: req.user.role },
+      body.userId,
+    );
   }
 
   @Get('attendance')
@@ -57,14 +71,17 @@ export class WorkforceOpsController {
 
   @Post('attendance/manual')
   @RequirePermission('staff.edit')
-  upsertAttendance(@Body() body: {
-    userId: number;
-    attendanceDate: string;
-    status: string;
-    checkInTime?: string | null;
-    checkOutTime?: string | null;
-    remarks?: string | null;
-  }) {
+  upsertAttendance(
+    @Body()
+    body: {
+      userId: number;
+      attendanceDate: string;
+      status: string;
+      checkInTime?: string | null;
+      checkOutTime?: string | null;
+      remarks?: string | null;
+    },
+  ) {
     return this.svc.upsertAttendanceAdmin(body as any);
   }
 
@@ -78,13 +95,24 @@ export class WorkforceOpsController {
 
   @Post('shifts')
   @RequirePermission('staff.edit')
-  createShift(@Body() body: { shiftName: string; startTime: string; endTime: string; breakMinutes?: number }) {
+  createShift(
+    @Body()
+    body: {
+      shiftName: string;
+      startTime: string;
+      endTime: string;
+      breakMinutes?: number;
+    },
+  ) {
     return this.svc.createShift(body);
   }
 
   @Patch('shifts/:id')
   @RequirePermission('staff.edit')
-  updateShift(@Param('id', ParseIntPipe) id: number, @Body() body: Record<string, unknown>) {
+  updateShift(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: Record<string, unknown>,
+  ) {
     return this.svc.updateShift(id, body as any);
   }
 
@@ -104,7 +132,10 @@ export class WorkforceOpsController {
 
   @Patch('profiles/:id')
   @RequirePermission('staff.edit')
-  updateProfile(@Param('id', ParseIntPipe) id: number, @Body() body: Record<string, unknown>) {
+  updateProfile(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: Record<string, unknown>,
+  ) {
     return this.svc.updateProfile(id, body as any);
   }
 
@@ -130,25 +161,40 @@ export class WorkforceOpsController {
   @Post('leave-requests')
   createLeave(
     @Req() req: { user: { id: number } },
-    @Body() body: { leaveType: string; fromDate: string; toDate: string; reason?: string },
+    @Body()
+    body: {
+      leaveType: string;
+      fromDate: string;
+      toDate: string;
+      reason?: string;
+    },
   ) {
     return this.svc.createLeave(req.user.id, body as any);
   }
 
   @Post('leave-requests/:id/approve')
   @RequirePermission('staff.edit')
-  approveLeave(@Param('id', ParseIntPipe) id: number, @Req() req: { user: { id: number; role?: string } }) {
+  approveLeave(
+    @Param('id', ParseIntPipe) id: number,
+    @Req() req: { user: { id: number; role?: string } },
+  ) {
     return this.svc.setLeaveStatus(id, 'APPROVED', req.user.id, req.user.role);
   }
 
   @Post('leave-requests/:id/reject')
   @RequirePermission('staff.edit')
-  rejectLeave(@Param('id', ParseIntPipe) id: number, @Req() req: { user: { id: number; role?: string } }) {
+  rejectLeave(
+    @Param('id', ParseIntPipe) id: number,
+    @Req() req: { user: { id: number; role?: string } },
+  ) {
     return this.svc.setLeaveStatus(id, 'REJECTED', req.user.id, req.user.role);
   }
 
   @Post('leave-requests/:id/cancel')
-  cancelLeave(@Param('id', ParseIntPipe) id: number, @Req() req: { user: { id: number } }) {
+  cancelLeave(
+    @Param('id', ParseIntPipe) id: number,
+    @Req() req: { user: { id: number } },
+  ) {
     return this.svc.cancelOwnLeave(id, req.user.id);
   }
 
@@ -168,10 +214,7 @@ export class WorkforceOpsController {
 
   @Get('productivity')
   @RequirePermission('staff.view')
-  productivity(
-    @Query('from') from?: string,
-    @Query('to') to?: string,
-  ) {
+  productivity(@Query('from') from?: string, @Query('to') to?: string) {
     return this.svc.getProductivity({ from, to });
   }
 

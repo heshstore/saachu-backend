@@ -62,7 +62,10 @@ export async function enrichRowsWithSalesman(
   rows: any[],
   idKey = 'salesman_id',
 ): Promise<any[]> {
-  const map = await loadUsersByIds(ds, rows.map((r) => r[idKey] ?? r.salesmanId));
+  const map = await loadUsersByIds(
+    ds,
+    rows.map((r) => r[idKey] ?? r.salesmanId),
+  );
   for (const r of rows) attachSalesmanFields(r, map, idKey);
   return rows;
 }
@@ -172,6 +175,127 @@ export const DISPATCH_ACTOR_JOINS = `
   LEFT JOIN "user" db ON db.id = d.dispatched_by
   LEFT JOIN "user" cb ON cb.id = d.created_by
 `;
+
+/** Batch-load customer email/name by customer id, for auto-filling "send email" flows. */
+export async function loadCustomersByIds(
+  ds: DataSource,
+  ids: (number | null | undefined)[],
+): Promise<Map<number, { email: string | null; companyName: string | null }>> {
+  const unique = [
+    ...new Set(
+      ids
+        .filter((x) => x != null && Number.isFinite(Number(x)))
+        .map((x) => Number(x)),
+    ),
+  ];
+  if (!unique.length) return new Map();
+  const rows: any[] = await ds.query(
+    `SELECT id, email, "companyName" FROM customer WHERE id = ANY($1)`,
+    [unique],
+  );
+  return new Map(
+    rows.map((r) => [
+      Number(r.id),
+      { email: r.email ?? null, companyName: r.companyName ?? null },
+    ]),
+  );
+}
+
+/** Attach customer_email from customer_id — used to prefill "send by email" recipient fields. */
+export async function enrichRowsWithCustomerEmail(
+  ds: DataSource,
+  rows: any[],
+  idKey = 'customer_id',
+): Promise<any[]> {
+  const map = await loadCustomersByIds(
+    ds,
+    rows.map((r) => r[idKey]),
+  );
+  for (const r of rows) {
+    const c = map.get(Number(r[idKey]));
+    r.customer_email = c?.email ?? r.customer_email ?? null;
+  }
+  return rows;
+}
+
+/** Attach email_sent_count — how many times this document has been successfully emailed. */
+export async function enrichRowsWithEmailCount(
+  ds: DataSource,
+  rows: any[],
+  entityType: 'quotation' | 'order' | 'invoice',
+  idKey = 'id',
+): Promise<any[]> {
+  const ids = [
+    ...new Set(
+      rows
+        .map((r) => r[idKey])
+        .filter((x) => x != null && Number.isFinite(Number(x)))
+        .map((x) => Number(x)),
+    ),
+  ];
+  if (!ids.length) return rows;
+  const counts: { entity_id: number; cnt: string }[] = await ds.query(
+    `SELECT entity_id, COUNT(*) AS cnt
+     FROM transactional_email_logs
+     WHERE entity_type = $1 AND status = 'sent' AND entity_id = ANY($2)
+     GROUP BY entity_id`,
+    [entityType, ids],
+  );
+  const map = new Map(counts.map((c) => [Number(c.entity_id), Number(c.cnt)]));
+  for (const r of rows) r.email_sent_count = map.get(Number(r[idKey])) ?? 0;
+  return rows;
+}
+
+const ACTION_COUNT_FIELDS: Record<string, string> = {
+  view: 'view_count',
+  edit: 'edit_count',
+  print: 'print_count',
+  pdf: 'pdf_count',
+  whatsapp: 'whatsapp_count',
+};
+
+/** Attach view_count / edit_count / print_count / pdf_count / whatsapp_count from document_action_log. */
+export async function enrichRowsWithActionCounts(
+  ds: DataSource,
+  rows: any[],
+  entityType: 'quotation' | 'order' | 'invoice',
+  idKey = 'id',
+): Promise<any[]> {
+  for (const field of Object.values(ACTION_COUNT_FIELDS)) {
+    for (const r of rows) r[field] = r[field] ?? 0;
+  }
+  const ids = [
+    ...new Set(
+      rows
+        .map((r) => r[idKey])
+        .filter((x) => x != null && Number.isFinite(Number(x)))
+        .map((x) => Number(x)),
+    ),
+  ];
+  if (!ids.length) return rows;
+  const counts: { entity_id: number; action: string; cnt: string }[] =
+    await ds.query(
+      `SELECT entity_id, action, COUNT(*) AS cnt
+       FROM document_action_log
+       WHERE entity_type = $1 AND entity_id = ANY($2)
+       GROUP BY entity_id, action`,
+      [entityType, ids],
+    );
+  const byRow = new Map<number, Record<string, number>>();
+  for (const c of counts) {
+    const id = Number(c.entity_id);
+    if (!byRow.has(id)) byRow.set(id, {});
+    byRow.get(id)![c.action] = Number(c.cnt);
+  }
+  for (const r of rows) {
+    const hit = byRow.get(Number(r[idKey]));
+    if (!hit) continue;
+    for (const [action, field] of Object.entries(ACTION_COUNT_FIELDS)) {
+      if (hit[action] != null) r[field] = hit[action];
+    }
+  }
+  return rows;
+}
 
 /** When a quotation is converted, surface order approver on the quotation payload. */
 export async function attachLinkedOrderApproval(

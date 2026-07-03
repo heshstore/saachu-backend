@@ -1,5 +1,8 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column, CreateDateColumn,
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
 } from 'typeorm';
 
 export type AuditAction =
@@ -12,7 +15,7 @@ export type AuditAction =
   | 'FOLLOWUP_COMPLETED'
   | 'CONVERTED'
   | 'QUOTATION_CREATED'
-  | 'ESCALATED';  // written by automation cron — user_id = SYSTEM_USER_ID (0)
+  | 'ESCALATED'; // written by automation cron — user_id = SYSTEM_USER_ID (0)
 
 // AUTOMATION AUDITS MUST USE LeadAuditService.log() — DO NOT INSERT INTO lead_audit_logs DIRECTLY.
 @Entity('lead_audit_logs')

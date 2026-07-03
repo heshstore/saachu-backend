@@ -1,20 +1,31 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column,
-  CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn,
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
 } from 'typeorm';
 import { ProductionExecutionJob } from './production-execution-job.entity';
 
 export type StageStatus =
-  | 'PENDING' | 'READY'
-  | 'WORKING' | 'ON_HOLD' | 'STOPPED'
-  | 'COMPLETED' | 'CANCELLED';
+  | 'PENDING'
+  | 'READY'
+  | 'WORKING'
+  | 'ON_HOLD'
+  | 'STOPPED'
+  | 'COMPLETED'
+  | 'CANCELLED';
 
 @Entity('production_job_stages')
 export class ProductionJobStage {
   @PrimaryGeneratedColumn()
   id: number;
 
-  @ManyToOne(() => ProductionExecutionJob, (j) => j.stages, { onDelete: 'CASCADE' })
+  @ManyToOne(() => ProductionExecutionJob, (j) => j.stages, {
+    onDelete: 'CASCADE',
+  })
   @JoinColumn({ name: 'production_job_id' })
   job: ProductionExecutionJob;
 

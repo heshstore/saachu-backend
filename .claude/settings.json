@@ -63,7 +63,12 @@
       "Bash(git -C /Users/saachi/Projects/Saachu-app rev-parse --show-toplevel)",
       "Bash(git -C /Users/saachi/Projects/Saachu-app/backend rev-parse --show-toplevel)",
       "Bash(git -C /Users/saachi/Projects/Saachu-app/frontend rev-parse --show-toplevel)",
-      "Bash(git -C /Users/saachi/Projects/Saachu-app/backend diff --stat HEAD -- src/main.ts src/orders/orders.service.ts src/quotation/quotation.service.ts)"
+      "Bash(git -C /Users/saachi/Projects/Saachu-app/backend diff --stat HEAD -- src/main.ts src/orders/orders.service.ts src/quotation/quotation.service.ts)",
+      "Bash(sed -n '2628,2645p' /Users/saachi/Projects/Saachu-app/backend/src/crm/lead.service.ts)",
+      "Bash(sed -n '2710,2730p' /Users/saachi/Projects/Saachu-app/backend/src/crm/lead.service.ts)",
+      "Bash(sed -n '170,200p' /Users/saachi/Projects/Saachu-app/backend/src/crm/analytics.service.ts)",
+      "Bash(sed -n '1080,1105p' /Users/saachi/Projects/Saachu-app/backend/src/crm/analytics.service.ts)",
+      "Bash(sed -n '1265,1310p' /Users/saachi/Projects/Saachu-app/backend/src/crm/analytics.service.ts)"
     ],
     "additionalDirectories": [
       "/Users/saachi/Projects/Saachu-app/assets",

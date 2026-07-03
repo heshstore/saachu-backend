@@ -28,7 +28,9 @@ export class ProcessingWatchdogService {
   async recoverStuckItems(): Promise<void> {
     if (process.env.WHATSAPP_ENGINE_ENABLED === 'false') return;
     if (this._running) {
-      this.logger.warn('[Watchdog] Previous recovery run still in progress — skipping tick');
+      this.logger.warn(
+        '[Watchdog] Previous recovery run still in progress — skipping tick',
+      );
       return;
     }
     this._running = true;
@@ -56,16 +58,24 @@ export class ProcessingWatchdogService {
 
     for (const campaign of running) {
       const [pending, processing, sent] = await Promise.all([
-        this.queueRepo.count({ where: { campaign_id: campaign.id, status: QueueStatus.PENDING } }),
-        this.queueRepo.count({ where: { campaign_id: campaign.id, status: QueueStatus.PROCESSING } }),
-        this.queueRepo.count({ where: { campaign_id: campaign.id, status: QueueStatus.SENT } }),
+        this.queueRepo.count({
+          where: { campaign_id: campaign.id, status: QueueStatus.PENDING },
+        }),
+        this.queueRepo.count({
+          where: { campaign_id: campaign.id, status: QueueStatus.PROCESSING },
+        }),
+        this.queueRepo.count({
+          where: { campaign_id: campaign.id, status: QueueStatus.SENT },
+        }),
       ]);
 
       if (pending === 0 && processing === 0 && sent >= 1) {
-        await this.campaignRepo.update(campaign.id, { status: CampaignStatus.COMPLETED });
+        await this.campaignRepo.update(campaign.id, {
+          status: CampaignStatus.COMPLETED,
+        });
         this.logger.log(
           `[CAMPAIGN_AUTO_COMPLETED] id=${campaign.id} name="${campaign.campaign_name}" ` +
-          `sent=${sent} — broadcast queue drained, status → COMPLETED`,
+            `sent=${sent} — broadcast queue drained, status → COMPLETED`,
         );
       }
     }
@@ -79,7 +89,9 @@ export class ProcessingWatchdogService {
 
     if (!stuck.length) return;
 
-    this.logger.warn(`[Watchdog] Found ${stuck.length} stuck PROCESSING item(s) — recovering`);
+    this.logger.warn(
+      `[Watchdog] Found ${stuck.length} stuck PROCESSING item(s) — recovering`,
+    );
 
     for (const item of stuck) {
       if (item.attempt_count >= MAX_ATTEMPTS) {
@@ -93,11 +105,15 @@ export class ProcessingWatchdogService {
           number_id: item.number_id ?? undefined,
           reason: `Watchdog: permanently failed after ${MAX_ATTEMPTS} stuck recoveries`,
         });
-        this.logger.warn(`[Watchdog] Permanently failed ${item.id} (${item.customer_phone}) after ${MAX_ATTEMPTS} attempts`);
+        this.logger.warn(
+          `[Watchdog] Permanently failed ${item.id} (${item.customer_phone}) after ${MAX_ATTEMPTS} attempts`,
+        );
       } else {
         await this.queueRepo.increment({ id: item.id }, 'attempt_count', 1);
         await this.queueRepo.update(item.id, { status: QueueStatus.PENDING });
-        this.logger.log(`[Watchdog] Reset ${item.id} to PENDING (attempt ${item.attempt_count + 1})`);
+        this.logger.log(
+          `[Watchdog] Reset ${item.id} to PENDING (attempt ${item.attempt_count + 1})`,
+        );
       }
     }
   }

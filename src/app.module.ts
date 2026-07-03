@@ -38,20 +38,20 @@ import { NotificationsModule } from './notifications/notification.module';
 import { PromotionModule } from './promotion/promotion.module';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { LogsModule } from './logs/logs.module';
-import { DispatchModule }   from './dispatch/dispatch.module';
-import { DashboardModule }  from './dashboard/dashboard.module';
-import { HealthModule }     from './health/health.module';
-import { SlaModule }        from './sla/sla.module';
-import { ActivityModule }   from './activity/activity.module';
-import { KpiModule }        from './kpi/kpi.module';
-import { EventsModule }     from './events/events.module';
+import { DispatchModule } from './dispatch/dispatch.module';
+import { DashboardModule } from './dashboard/dashboard.module';
+import { HealthModule } from './health/health.module';
+import { SlaModule } from './sla/sla.module';
+import { ActivityModule } from './activity/activity.module';
+import { KpiModule } from './kpi/kpi.module';
+import { EventsModule } from './events/events.module';
 import { DepartmentsModule } from './departments/departments.module';
-import { BoqModule }         from './boq/boq.module';
-import { InventoryModule }             from './inventory/inventory.module';
-import { PurchaseRequirementsModule }   from './purchase-requirements/purchase-requirements.module';
-import { ProductionExecutionModule }    from './production-execution/production-execution.module';
-import { VendorsModule }                 from './vendors/vendors.module';
-import { PurchaseOrdersModule }          from './purchase-orders/purchase-orders.module';
+import { BoqModule } from './boq/boq.module';
+import { InventoryModule } from './inventory/inventory.module';
+import { PurchaseRequirementsModule } from './purchase-requirements/purchase-requirements.module';
+import { ProductionExecutionModule } from './production-execution/production-execution.module';
+import { VendorsModule } from './vendors/vendors.module';
+import { PurchaseOrdersModule } from './purchase-orders/purchase-orders.module';
 import { ManufacturingAnalyticsModule } from './manufacturing-analytics/manufacturing-analytics.module';
 import { AfterSalesModule } from './after-sales/after-sales.module';
 import { FinanceOpsModule } from './finance-ops/finance-ops.module';
@@ -60,9 +60,13 @@ import { AppShutdownService } from './common/app-shutdown.service';
 import { MarketingModule } from './marketing/marketing.module';
 import { TransactionalEmailModule } from './email-transactional/transactional-email.module';
 import { DeploymentModule } from './deployment/deployment.module';
+import { PushModule } from './push/push.module';
+import { PerfMonitorModule } from './perf-monitor/perf-monitor.module';
+import { perfMonitorLogger } from './perf-monitor/perf-monitor.logger';
 
-const databaseUrl    = getActiveDatabaseUrl();
-const useDatabaseSsl = buildSslOption(databaseUrl) !== false || process.env.DATABASE_SSL === 'true';
+const databaseUrl = getActiveDatabaseUrl();
+const useDatabaseSsl =
+  buildSslOption(databaseUrl) !== false || process.env.DATABASE_SSL === 'true';
 
 // Startup log — confirms channel_binding is gone before TypeORM connects
 new Logger('AppModule').log(
@@ -79,29 +83,36 @@ new Logger('AppModule').log(
 
     TypeOrmModule.forRoot({
       type: 'postgres',
-      url: databaseUrl,           // sanitized — channel_binding stripped
+      url: databaseUrl, // sanitized — channel_binding stripped
       entities: [Order, OrderItem, Invoice, Commission, User, Product],
       autoLoadEntities: true,
       synchronize: false,
       ssl: useDatabaseSsl ? { rejectUnauthorized: false } : false,
       // Neon serverless pooler can be briefly unreachable during cold-start.
       // Retry up to 20 times with 5s delay (100s total window) before giving up.
-      retryAttempts:   20,
-      retryDelay:      3_000,
-      verboseRetryLog: false,    // suppress per-retry stack traces from NestJS
+      retryAttempts: 20,
+      retryDelay: 3_000,
+      verboseRetryLog: false, // suppress per-retry stack traces from NestJS
+      logging: ['query', 'error'],
+      maxQueryExecutionTime: Number(process.env.SLOW_QUERY_THRESHOLD_MS) || 200,
+      logger: perfMonitorLogger,
       extra: {
-        max:                          Number(process.env.DB_POOL_MAX) || 10,
-        min:                          0,
-        idleTimeoutMillis:            30_000,
-        connectionTimeoutMillis:      15_000,  // fail fast when DNS is unreachable
-        acquireTimeoutMillis:         20_000,  // don't queue forever when pool exhausted
-        keepAlive:                    true,
-        keepAliveInitialDelayMillis:  10_000,
+        max: Number(process.env.DB_POOL_MAX) || 10,
+        min: 0,
+        idleTimeoutMillis: 30_000,
+        connectionTimeoutMillis: 15_000, // fail fast when DNS is unreachable
+        acquireTimeoutMillis: 20_000, // don't queue forever when pool exhausted
+        keepAlive: true,
+        keepAliveInitialDelayMillis: 10_000,
       },
     }),
 
     ScheduleModule.forRoot(),
-    EventEmitterModule.forRoot({ wildcard: false, delimiter: '.', global: true }),
+    EventEmitterModule.forRoot({
+      wildcard: false,
+      delimiter: '.',
+      global: true,
+    }),
     SharedModule,
     AuthModule,
     RbacModule,
@@ -143,6 +154,8 @@ new Logger('AppModule').log(
     MarketingModule,
     TransactionalEmailModule,
     DeploymentModule,
+    PushModule,
+    PerfMonitorModule,
   ],
   providers: [
     AppShutdownService,

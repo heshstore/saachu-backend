@@ -11,7 +11,7 @@ import {
 import { QuotationItem } from './quotation-item.entity';
 
 export enum QuotationStatus {
-  DRAFT     = 'DRAFT',
+  DRAFT = 'DRAFT',
   GENERATED = 'GENERATED', // finalized, shareable
   CANCELLED = 'CANCELLED',
   CONVERTED = 'CONVERTED', // quotation → order
@@ -19,12 +19,12 @@ export enum QuotationStatus {
 
 export enum QuotationDiscountType {
   PERCENT = 'PERCENT',
-  FLAT    = 'FLAT',
+  FLAT = 'FLAT',
 }
 
 @Index('idx_quotation_customer', ['customer_id'])
 @Index('idx_quotation_salesman', ['salesman_id'])
-@Index('idx_quotation_status',   ['status'])
+@Index('idx_quotation_status', ['status'])
 @Entity('quotation')
 export class Quotation {
   @PrimaryGeneratedColumn()
@@ -77,6 +77,15 @@ export class Quotation {
   delivery_by: string;
 
   @Column({ nullable: true })
+  booking_at: string;
+
+  @Column({ nullable: true })
+  goods_sent_by: string;
+
+  @Column({ nullable: true })
+  transport_payment_by: string;
+
+  @Column({ nullable: true })
   delivery_type: string;
 
   @Column({ nullable: true })
@@ -86,7 +95,12 @@ export class Quotation {
   delivery_instructions: string;
 
   // ── Header-level discount ────────────────────────────────────────────────────
-  @Column({ type: 'varchar', length: 10, default: QuotationDiscountType.PERCENT, nullable: true })
+  @Column({
+    type: 'varchar',
+    length: 10,
+    default: QuotationDiscountType.PERCENT,
+    nullable: true,
+  })
   discount_type: QuotationDiscountType;
 
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })

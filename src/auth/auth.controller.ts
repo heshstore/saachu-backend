@@ -1,4 +1,12 @@
-import { Controller, Post, Patch, Get, Body, HttpCode, Req } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Patch,
+  Get,
+  Body,
+  HttpCode,
+  Req,
+} from '@nestjs/common';
 import { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
@@ -41,7 +49,11 @@ export class AuthController {
     @Body() body: { currentPassword: string; newPassword: string },
   ) {
     const user = (req as any).user;
-    await this.authService.changePassword(user.id, body.currentPassword, body.newPassword);
+    await this.authService.changePassword(
+      user.id,
+      body.currentPassword,
+      body.newPassword,
+    );
     return { message: 'Password changed successfully' };
   }
 }

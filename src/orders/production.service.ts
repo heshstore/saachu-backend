@@ -1,9 +1,19 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, EntityManager } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { ProductionJob, ProductionJobStatus, ProductionStage, JobPriority, ACTIVE_STATUSES } from './entities/production-job.entity';
+import {
+  ProductionJob,
+  ProductionJobStatus,
+  ProductionStage,
+  JobPriority,
+  ACTIVE_STATUSES,
+} from './entities/production-job.entity';
 import { ProductionAlert } from './entities/production-alert.entity';
 import { ProductionEfficiency } from './entities/production-efficiency.entity';
 import { Order, OrderStatus } from './entities/order.entity';
@@ -14,9 +24,9 @@ import { DbHealthService } from '../shared/db-health.service';
 
 const STAGE_CAPACITY: Record<string, number> = {
   DESIGNING: 1000,
-  PRINTING:  2000,
-  LASER:     2500,
-  ASSEMBLY:  1500,
+  PRINTING: 2000,
+  LASER: 2500,
+  ASSEMBLY: 1500,
 };
 
 const STAGE_FLOW: ProductionStage[] = [
@@ -29,21 +39,20 @@ const STAGE_FLOW: ProductionStage[] = [
 
 const STAGE_ROLE_MAP: Record<string, string> = {
   DESIGNING: 'DESIGNER',
-  PRINTING:  'PRINTER',
-  LASER:     'LASER_OPERATOR',
-  ASSEMBLY:  'ASSEMBLY_WORKER',
+  PRINTING: 'PRINTER',
+  LASER: 'LASER_OPERATOR',
+  ASSEMBLY: 'ASSEMBLY_WORKER',
 };
 
-
-const ENABLE_DECISION_ENGINE = true;
+const ENABLE_DECISION_ENGINE = process.env.ENABLE_DECISION_ENGINE !== 'false';
 
 const ESCALATION_ADMIN_ID = 1;
-const ESCALATION_HOURS    = 24;
+const ESCALATION_HOURS = 24;
 
 @Injectable()
 export class ProductionService {
   private _decisionRunning = false;
-  private _delayRunning    = false;
+  private _delayRunning = false;
 
   constructor(
     @InjectRepository(ProductionJob)
@@ -72,19 +81,31 @@ export class ProductionService {
    *
    * Always idempotent: returns [] without writing if jobs already exist.
    */
-  async createFromOrder(order: Order, em?: EntityManager): Promise<ProductionJob[]> {
+  async createFromOrder(
+    order: Order,
+    em?: EntityManager,
+  ): Promise<ProductionJob[]> {
     const mgr = em ?? this.repo.manager;
 
     // Idempotency check uses the same manager so it reads within the caller's
     // transaction and sees any jobs written earlier in the same tx.
-    const existing = await mgr.findOne(ProductionJob, { where: { order_id: order.id } });
+    const existing = await mgr.findOne(ProductionJob, {
+      where: { order_id: order.id },
+    });
     if (existing) return [];
 
     // Fetch backlog once for all items — it doesn't change within this synchronous batch.
-    const designingBacklog = await this.getStageBacklog(ProductionStage.DESIGNING);
+    const designingBacklog = await this.getStageBacklog(
+      ProductionStage.DESIGNING,
+    );
 
     const jobs: ProductionJob[] = [];
-    for (const item of order.items || []) {
+    // Trading items bypass production completely. NULL billing_category is treated as PRODUCTION (legacy/backward compat).
+    const productionItems = (order.items || []).filter(
+      (item) =>
+        !item.billing_category || item.billing_category === 'PRODUCTION',
+    );
+    for (const item of productionItems) {
       const qty = Number(item.qty);
       const due_date = await this.calculateDueDate(
         ProductionStage.DESIGNING,
@@ -94,10 +115,10 @@ export class ProductionService {
       );
       jobs.push(
         mgr.create(ProductionJob, {
-          order_id:      order.id,
+          order_id: order.id,
           order_item_id: item.id,
-          sku:           item.sku       || '',
-          item_name:     item.item_name || '',
+          sku: item.sku || '',
+          item_name: item.item_name || '',
           qty,
           current_stage: ProductionStage.DESIGNING,
           due_date,
@@ -192,7 +213,10 @@ export class ProductionService {
     if (!result) return;
     const { newStatus, salesmanId } = result;
     if (newStatus === OrderStatus.READY) {
-      this.eventEmitter.emit('order.ready_for_dispatch', { orderId, salesmanId });
+      this.eventEmitter.emit('order.ready_for_dispatch', {
+        orderId,
+        salesmanId,
+      });
       if (salesmanId) {
         this.crmWa.sendOrderReady(orderId, salesmanId).catch(() => {});
       }
@@ -201,8 +225,9 @@ export class ProductionService {
     }
   }
 
-  async cancelJobsForOrder(orderId: number): Promise<void> {
-    await this.repo
+  async cancelJobsForOrder(orderId: number, em?: EntityManager): Promise<void> {
+    const repo = em ? em.getRepository(ProductionJob) : this.repo;
+    await repo
       .createQueryBuilder()
       .update(ProductionJob)
       .set({ status: ProductionJobStatus.CANCELLED })
@@ -254,15 +279,18 @@ export class ProductionService {
     capacity_per_worker: number;
     workers_required: number;
   }> {
-    const workload           = await this.getStageBacklog(stage);
+    const workload = await this.getStageBacklog(stage);
     const capacity_per_worker = STAGE_CAPACITY[stage] ?? 1000;
-    const workers_required   = workload === 0 ? 0 : Math.ceil(workload / capacity_per_worker);
+    const workers_required =
+      workload === 0 ? 0 : Math.ceil(workload / capacity_per_worker);
     return { stage, workload, capacity_per_worker, workers_required };
   }
 
   async getLabourSummary() {
     return Promise.all(
-      (Object.keys(STAGE_CAPACITY) as ProductionStage[]).map(s => this.getRequiredWorkers(s)),
+      (Object.keys(STAGE_CAPACITY) as ProductionStage[]).map((s) =>
+        this.getRequiredWorkers(s),
+      ),
     );
   }
 
@@ -278,13 +306,16 @@ export class ProductionService {
     risk: string;
   }> {
     const backlog_days = await this.getBacklogDays(stage);
-    const risk = backlog_days > 3 ? 'HIGH' : backlog_days > 1 ? 'MEDIUM' : 'NORMAL';
+    const risk =
+      backlog_days > 3 ? 'HIGH' : backlog_days > 1 ? 'MEDIUM' : 'NORMAL';
     return { stage, backlog_days, risk };
   }
 
   async getPredictionSummary() {
     return Promise.all(
-      (Object.keys(STAGE_CAPACITY) as ProductionStage[]).map(s => this.predictStageRisk(s)),
+      (Object.keys(STAGE_CAPACITY) as ProductionStage[]).map((s) =>
+        this.predictStageRisk(s),
+      ),
     );
   }
 
@@ -314,7 +345,8 @@ export class ProductionService {
     }
 
     const days_remaining = minDaysRemaining === Infinity ? 0 : minDaysRemaining;
-    const risk = days_remaining < 0 ? 'DELAYED' : days_remaining < 2 ? 'AT_RISK' : 'SAFE';
+    const risk =
+      days_remaining < 0 ? 'DELAYED' : days_remaining < 2 ? 'AT_RISK' : 'SAFE';
     return { order_id: orderId, days_remaining, risk };
   }
 
@@ -326,21 +358,26 @@ export class ProductionService {
     });
   }
 
-  private async escalateJobs(jobs: ProductionJob[], reason: string): Promise<void> {
-    const toEscalate = jobs.filter(j => j.priority !== JobPriority.URGENT);
+  private async escalateJobs(
+    jobs: ProductionJob[],
+    reason: string,
+  ): Promise<void> {
+    const toEscalate = jobs.filter((j) => j.priority !== JobPriority.URGENT);
     if (!toEscalate.length) return;
 
     // Bulk UPDATE instead of one save per job.
     await this.repo.manager.query(
       `UPDATE production_jobs SET priority = 'URGENT'
        WHERE id = ANY($1) AND priority != 'URGENT'`,
-      [toEscalate.map(j => j.id)],
+      [toEscalate.map((j) => j.id)],
     );
 
     for (const job of toEscalate) {
       this.audit.log({
-        entity: 'production_job', entity_id: job.id,
-        action: 'AUTO_ESCALATE', actor_type: 'SYSTEM',
+        entity: 'production_job',
+        entity_id: job.id,
+        action: 'AUTO_ESCALATE',
+        actor_type: 'SYSTEM',
         meta: { from: job.priority, to: JobPriority.URGENT, reason },
       });
     }
@@ -352,31 +389,60 @@ export class ProductionService {
     // Clear assignments in bulk, then re-assign in parallel.
     await this.repo.manager.query(
       `UPDATE production_jobs SET assigned_to = NULL WHERE id = ANY($1)`,
-      [jobs.map(j => j.id)],
+      [jobs.map((j) => j.id)],
     );
 
     // Auto-assign runs in parallel — each getBestUser is now a single SQL query.
     for (const job of jobs) {
       job.assigned_to = null;
     }
-    await Promise.all(jobs.map(job => this.autoAssignJob(job)));
+    await Promise.all(jobs.map((job) => this.autoAssignJob(job)));
+  }
+
+  private async _batchStageBacklogs(): Promise<Map<string, number>> {
+    const stages = Object.keys(STAGE_CAPACITY);
+    const rows: { current_stage: string; total: string }[] =
+      await this.repo.manager.query(
+        `SELECT current_stage, COALESCE(SUM(qty), 0)::numeric AS total
+         FROM production_jobs
+         WHERE current_stage = ANY($1) AND status IN ('PENDING', 'IN_PROGRESS')
+         GROUP BY current_stage`,
+        [stages],
+      );
+    const map = new Map<string, number>(stages.map((s) => [s, 0]));
+    for (const row of rows) map.set(row.current_stage, Number(row.total));
+    return map;
   }
 
   async runDecisionEngine(): Promise<void> {
-    for (const stage of Object.keys(STAGE_CAPACITY) as ProductionStage[]) {
-      const prediction = await this.predictStageRisk(stage);
+    const backlogs = await this._batchStageBacklogs();
 
-      if (prediction.risk === 'HIGH') {
+    for (const stage of Object.keys(STAGE_CAPACITY) as ProductionStage[]) {
+      const workload = backlogs.get(stage) ?? 0;
+      const capacity = STAGE_CAPACITY[stage] ?? 1000;
+      const backlog_days = workload / capacity;
+      const risk =
+        backlog_days > 3 ? 'HIGH' : backlog_days > 1 ? 'MEDIUM' : 'NORMAL';
+
+      if (risk === 'HIGH') {
         const jobs = await this.getAtRiskJobs(stage);
         await this.escalateJobs(jobs, 'HIGH_RISK');
         await this.rebalanceJobs(jobs);
-        const managers = await this.userRepo.find({ where: { role: 'Production Manager' }, select: ['id'] });
-        this.crmWa.sendHighRisk(stage, managers.map(m => m.id)).catch(() => {});
+        const managers = await this.userRepo.find({
+          where: { role: 'Production Manager' },
+          select: ['id'],
+        });
+        this.crmWa
+          .sendHighRisk(
+            stage,
+            managers.map((m) => m.id),
+          )
+          .catch(() => {});
         console.log(`HIGH RISK handled for ${stage}`);
         continue;
       }
 
-      if (prediction.risk === 'MEDIUM') {
+      if (risk === 'MEDIUM') {
         const jobs = await this.getAtRiskJobs(stage);
         await this.escalateJobs(jobs.slice(0, 2), 'MEDIUM_RISK');
       }
@@ -422,16 +488,18 @@ export class ProductionService {
     ]);
     return {
       stage,
-      required:  workers_required,
+      required: workers_required,
       available,
-      shortage:  Math.max(workers_required - available, 0),
-      surplus:   Math.max(available - workers_required, 0),
+      shortage: Math.max(workers_required - available, 0),
+      surplus: Math.max(available - workers_required, 0),
     };
   }
 
   async getWorkforceSummary() {
     return Promise.all(
-      (Object.keys(STAGE_CAPACITY) as ProductionStage[]).map(s => this.getStageGap(s)),
+      (Object.keys(STAGE_CAPACITY) as ProductionStage[]).map((s) =>
+        this.getStageGap(s),
+      ),
     );
   }
 
@@ -447,7 +515,11 @@ export class ProductionService {
 
   async getUserLoad(userId: number, stage: ProductionStage): Promise<number> {
     return this.repo.count({
-      where: { assigned_to: userId, current_stage: stage, status: In(ACTIVE_STATUSES) },
+      where: {
+        assigned_to: userId,
+        current_stage: stage,
+        status: In(ACTIVE_STATUSES),
+      },
     });
   }
 
@@ -457,15 +529,23 @@ export class ProductionService {
 
   calculatePerformance(job: ProductionJob): number | null {
     if (!job.started_at || !job.completed_at) return null;
-    const actualHours   = (new Date(job.completed_at).getTime() - new Date(job.started_at).getTime()) / 3_600_000;
+    const actualHours =
+      (new Date(job.completed_at).getTime() -
+        new Date(job.started_at).getTime()) /
+      3_600_000;
     if (actualHours <= 0) return null;
-    const capacity      = STAGE_CAPACITY[job.current_stage] ?? 1000;
+    const capacity = STAGE_CAPACITY[job.current_stage] ?? 1000;
     const expectedHours = (job.qty / capacity) * 24;
     return expectedHours / actualHours;
   }
 
-  async getUserEfficiency(userId: number, stage: ProductionStage): Promise<number> {
-    const record = await this.effRepo.findOne({ where: { user_id: userId, stage } });
+  async getUserEfficiency(
+    userId: number,
+    stage: ProductionStage,
+  ): Promise<number> {
+    const record = await this.effRepo.findOne({
+      where: { user_id: userId, stage },
+    });
     return record?.efficiency ?? 1;
   }
 
@@ -475,16 +555,24 @@ export class ProductionService {
 
     const { assigned_to: userId, current_stage: stage } = job;
 
-    let record = await this.effRepo.findOne({ where: { user_id: userId, stage } });
+    let record = await this.effRepo.findOne({
+      where: { user_id: userId, stage },
+    });
     if (!record) {
       record = this.effRepo.create({ user_id: userId, stage, efficiency: 1 });
     }
 
-    record.efficiency = Math.min(Math.max((record.efficiency * 0.8) + (performance * 0.2), 0.5), 2);
+    record.efficiency = Math.min(
+      Math.max(record.efficiency * 0.8 + performance * 0.2, 0.5),
+      2,
+    );
     await this.effRepo.save(record);
   }
 
-  async getEffectiveLoad(userId: number, stage: ProductionStage): Promise<number> {
+  async getEffectiveLoad(
+    userId: number,
+    stage: ProductionStage,
+  ): Promise<number> {
     const [load, efficiency] = await Promise.all([
       this.getUserLoad(userId, stage),
       this.getUserEfficiency(userId, stage),
@@ -492,7 +580,9 @@ export class ProductionService {
     return load / efficiency;
   }
 
-  async getTopPerformers(stage: ProductionStage): Promise<ProductionEfficiency[]> {
+  async getTopPerformers(
+    stage: ProductionStage,
+  ): Promise<ProductionEfficiency[]> {
     return this.effRepo.find({
       where: { stage },
       order: { efficiency: 'DESC' },
@@ -506,11 +596,15 @@ export class ProductionService {
     workers: number;
   }> {
     const records = await this.effRepo.find({ where: { stage } });
-    const avg = records.reduce((sum, r) => sum + r.efficiency, 0) / (records.length || 1);
+    const avg =
+      records.reduce((sum, r) => sum + r.efficiency, 0) / (records.length || 1);
     return { stage, avg_efficiency: avg, workers: records.length };
   }
 
-  async getBestUser(stage: ProductionStage, priority: JobPriority): Promise<number | null> {
+  async getBestUser(
+    stage: ProductionStage,
+    priority: JobPriority,
+  ): Promise<number | null> {
     const role = STAGE_ROLE_MAP[stage];
     if (!role) return null;
 
@@ -544,19 +638,21 @@ export class ProductionService {
     const userId = await this.getBestUser(job.current_stage, job.priority);
     if (!userId) {
       this.audit.log({
-        entity:     'production_job',
-        entity_id:  job.id,
-        action:     'AUTO_ASSIGN_FAILED',
+        entity: 'production_job',
+        entity_id: job.id,
+        action: 'AUTO_ASSIGN_FAILED',
         actor_type: 'SYSTEM',
-        meta:       { stage: job.current_stage, reason: 'no_eligible_staff' },
+        meta: { stage: job.current_stage, reason: 'no_eligible_staff' },
       });
       return job;
     }
     job.assigned_to = userId;
     await this.repo.save(job);
     this.audit.log({
-      entity: 'production_job', entity_id: job.id,
-      action: 'AUTO_ASSIGN', actor_type: 'SYSTEM',
+      entity: 'production_job',
+      entity_id: job.id,
+      action: 'AUTO_ASSIGN',
+      actor_type: 'SYSTEM',
       meta: { assigned_to: userId, stage: job.current_stage },
     });
     this.crmWa.sendJobAssigned(job).catch(() => {});
@@ -574,9 +670,9 @@ export class ProductionService {
     deliveryDate?: Date,
     precomputedBacklog?: number,
   ): Promise<Date> {
-    const capacity  = STAGE_CAPACITY[stage] ?? 1000;
-    const backlog   = precomputedBacklog ?? await this.getStageBacklog(stage);
-    const days      = this.calculateDays(backlog + qty, capacity);
+    const capacity = STAGE_CAPACITY[stage] ?? 1000;
+    const backlog = precomputedBacklog ?? (await this.getStageBacklog(stage));
+    const days = this.calculateDays(backlog + qty, capacity);
 
     const computed = new Date();
     computed.setDate(computed.getDate() + days);
@@ -597,7 +693,10 @@ export class ProductionService {
     return (Date.now() - new Date(job.due_date).getTime()) / 3_600_000;
   }
 
-  private async alreadyAlerted(jobId: number, userId: number): Promise<boolean> {
+  private async alreadyAlerted(
+    jobId: number,
+    userId: number,
+  ): Promise<boolean> {
     const record = await this.alertRepo.findOne({
       where: { job_id: jobId, notified_to: userId, alert_type: 'DELAY' },
     });
@@ -606,7 +705,11 @@ export class ProductionService {
 
   private async sendAlert(jobId: number, userId: number): Promise<void> {
     if (await this.alreadyAlerted(jobId, userId)) return;
-    await this.alertRepo.save({ job_id: jobId, alert_type: 'DELAY', notified_to: userId });
+    await this.alertRepo.save({
+      job_id: jobId,
+      alert_type: 'DELAY',
+      notified_to: userId,
+    });
     console.log(`ALERT: Job ${jobId} delayed for user ${userId}`);
   }
 
@@ -629,7 +732,10 @@ export class ProductionService {
     // Only load jobs that are actually overdue — previously loaded ALL active jobs.
     // Batch-fetch existing DELAY alerts in a single query so we avoid N alreadyAlerted() calls.
     const overdueJobs: Array<{
-      id: number; assigned_to: number | null; current_stage: string; hours_overdue: number;
+      id: number;
+      assigned_to: number | null;
+      current_stage: string;
+      hours_overdue: number;
     }> = await this.repo.manager.query(
       `SELECT id, assigned_to, current_stage,
               EXTRACT(EPOCH FROM (NOW() - due_date)) / 3600 AS hours_overdue
@@ -641,7 +747,7 @@ export class ProductionService {
 
     if (!overdueJobs.length) return;
 
-    const jobIds = overdueJobs.map(j => j.id);
+    const jobIds = overdueJobs.map((j) => j.id);
 
     // Single query to find which (job_id, notified_to) pairs already have a DELAY alert.
     const existingAlerts: Array<{ job_id: number; notified_to: number }> =
@@ -651,16 +757,33 @@ export class ProductionService {
         [jobIds],
       );
 
-    const alerted = new Set(existingAlerts.map(a => `${a.job_id}:${a.notified_to}`));
-    const newAlerts: Array<{ job_id: number; alert_type: string; notified_to: number }> = [];
+    const alerted = new Set(
+      existingAlerts.map((a) => `${a.job_id}:${a.notified_to}`),
+    );
+    const newAlerts: Array<{
+      job_id: number;
+      alert_type: string;
+      notified_to: number;
+    }> = [];
 
     for (const job of overdueJobs) {
       if (job.assigned_to && !alerted.has(`${job.id}:${job.assigned_to}`)) {
-        newAlerts.push({ job_id: job.id, alert_type: 'DELAY', notified_to: job.assigned_to });
+        newAlerts.push({
+          job_id: job.id,
+          alert_type: 'DELAY',
+          notified_to: job.assigned_to,
+        });
         this.crmWa.sendDelayAlert(job as any).catch(() => {});
       }
-      if (job.hours_overdue >= ESCALATION_HOURS && !alerted.has(`${job.id}:${ESCALATION_ADMIN_ID}`)) {
-        newAlerts.push({ job_id: job.id, alert_type: 'DELAY', notified_to: ESCALATION_ADMIN_ID });
+      if (
+        job.hours_overdue >= ESCALATION_HOURS &&
+        !alerted.has(`${job.id}:${ESCALATION_ADMIN_ID}`)
+      ) {
+        newAlerts.push({
+          job_id: job.id,
+          alert_type: 'DELAY',
+          notified_to: ESCALATION_ADMIN_ID,
+        });
       }
     }
 
@@ -669,7 +792,9 @@ export class ProductionService {
     }
   }
 
-  async getDelayed(limit: number): Promise<(ProductionJob & { is_delayed: boolean })[]> {
+  async getDelayed(
+    limit: number,
+  ): Promise<(ProductionJob & { is_delayed: boolean })[]> {
     const jobs: ProductionJob[] = await this.repo.manager.query(
       `SELECT * FROM production_jobs
        WHERE status IN ('PENDING', 'IN_PROGRESS')
@@ -679,7 +804,7 @@ export class ProductionService {
        LIMIT $1`,
       [limit],
     );
-    return jobs.map(job => ({ ...job, is_delayed: true }));
+    return jobs.map((job) => ({ ...job, is_delayed: true }));
   }
 
   async findQueue(filters: {
@@ -688,50 +813,65 @@ export class ProductionService {
     assigned_to?: number;
     unassigned?: boolean;
     limit?: number;
-  }): Promise<(ProductionJob & { is_delayed: boolean; order_no: string | null })[]> {
+  }): Promise<
+    (ProductionJob & { is_delayed: boolean; order_no: string | null })[]
+  > {
     const qb = this.repo.createQueryBuilder('job');
 
-    if (filters.stage)       qb.andWhere('job.current_stage = :stage',    { stage: filters.stage });
-    if (filters.status)      qb.andWhere('job.status = :status',           { status: filters.status });
-    if (filters.assigned_to) qb.andWhere('job.assigned_to = :assigned_to', { assigned_to: filters.assigned_to });
-    if (filters.unassigned)  qb.andWhere('job.assigned_to IS NULL');
-    if (filters.limit)       qb.take(filters.limit);
+    if (filters.stage)
+      qb.andWhere('job.current_stage = :stage', { stage: filters.stage });
+    if (filters.status)
+      qb.andWhere('job.status = :status', { status: filters.status });
+    if (filters.assigned_to)
+      qb.andWhere('job.assigned_to = :assigned_to', {
+        assigned_to: filters.assigned_to,
+      });
+    if (filters.unassigned) qb.andWhere('job.assigned_to IS NULL');
+    if (filters.limit) qb.take(filters.limit);
 
-    qb.orderBy(`CASE job.priority
+    qb.orderBy(
+      `CASE job.priority
         WHEN 'URGENT' THEN 1
         WHEN 'HIGH'   THEN 2
         WHEN 'NORMAL' THEN 3
         WHEN 'LOW'    THEN 4
-      END`, 'ASC')
-      .addOrderBy('job.created_at', 'ASC');
+      END`,
+      'ASC',
+    ).addOrderBy('job.created_at', 'ASC');
 
     const jobs = await qb.getMany();
 
     // Enrich with order_no — production team works on ORD0001, not numeric IDs.
-    const orderIds = [...new Set(jobs.filter(j => j.order_id).map(j => j.order_id))];
+    const orderIds = [
+      ...new Set(jobs.filter((j) => j.order_id).map((j) => j.order_id)),
+    ];
     const orderNoMap = new Map<number, string>();
     if (orderIds.length > 0) {
-      const rows: { id: number; order_no: string }[] = await this.repo.manager.query(
-        `SELECT id, order_no FROM orders WHERE id = ANY($1)`,
-        [orderIds],
-      );
-      rows.forEach(r => orderNoMap.set(Number(r.id), r.order_no));
+      const rows: { id: number; order_no: string }[] =
+        await this.repo.manager.query(
+          `SELECT id, order_no FROM orders WHERE id = ANY($1)`,
+          [orderIds],
+        );
+      rows.forEach((r) => orderNoMap.set(Number(r.id), r.order_no));
     }
 
-    return jobs.map(job => ({
+    return jobs.map((job) => ({
       ...job,
       is_delayed: this.isDelayed(job),
-      order_no:   job.order_id ? (orderNoMap.get(job.order_id) ?? null) : null,
+      order_no: job.order_id ? (orderNoMap.get(job.order_id) ?? null) : null,
     }));
   }
 
   async startJob(jobId: number): Promise<ProductionJob> {
     const job = await this.repo.findOne({ where: { id: jobId } });
     if (!job) throw new NotFoundException('Job not found');
-    if (job.status === ProductionJobStatus.DONE || job.status === ProductionJobStatus.CANCELLED)
+    if (
+      job.status === ProductionJobStatus.DONE ||
+      job.status === ProductionJobStatus.CANCELLED
+    )
       throw new BadRequestException(`Cannot start a ${job.status} job`);
     if (job.status === ProductionJobStatus.IN_PROGRESS) return job; // idempotent
-    job.status     = ProductionJobStatus.IN_PROGRESS;
+    job.status = ProductionJobStatus.IN_PROGRESS;
     if (!job.started_at) job.started_at = new Date(); // first start only; restarts after hold keep the original timestamp
     return this.repo.save(job);
   }
@@ -748,22 +888,31 @@ export class ProductionService {
     return this.stopJob(jobId); // hold = pause; same state change
   }
 
-  async reportIssue(jobId: number, note: string, userId?: number): Promise<void> {
+  async reportIssue(
+    jobId: number,
+    note: string,
+    userId?: number,
+  ): Promise<void> {
     const job = await this.repo.findOne({ where: { id: jobId } });
     if (!job) throw new NotFoundException('Job not found');
     await this.alertRepo.save({
-      job_id:      jobId,
-      alert_type:  'ISSUE',
+      job_id: jobId,
+      alert_type: 'ISSUE',
       notified_to: ESCALATION_ADMIN_ID,
     });
     this.audit.log({
-      entity: 'production_job', entity_id: jobId,
-      action: 'ISSUE_REPORTED', user_id: userId,
-      meta:   { note, stage: job.current_stage },
+      entity: 'production_job',
+      entity_id: jobId,
+      action: 'ISSUE_REPORTED',
+      user_id: userId,
+      meta: { note, stage: job.current_stage },
     });
   }
 
-  async setPriority(jobId: number, priority: JobPriority): Promise<ProductionJob> {
+  async setPriority(
+    jobId: number,
+    priority: JobPriority,
+  ): Promise<ProductionJob> {
     const job = await this.repo.findOne({ where: { id: jobId } });
     if (!job) throw new NotFoundException('Job not found');
     job.priority = priority;
@@ -836,9 +985,10 @@ export class ProductionService {
 
     const nextStage = STAGE_FLOW[currentIndex + 1];
     job.current_stage = nextStage;
-    job.status = nextStage === ProductionStage.COMPLETED
-      ? ProductionJobStatus.DONE
-      : ProductionJobStatus.IN_PROGRESS;
+    job.status =
+      nextStage === ProductionStage.COMPLETED
+        ? ProductionJobStatus.DONE
+        : ProductionJobStatus.IN_PROGRESS;
 
     if (nextStage === ProductionStage.COMPLETED) {
       job.completed_at = new Date();
@@ -860,18 +1010,22 @@ export class ProductionService {
       return job;
     }
 
-    job.started_at  = new Date();
-    job.due_date    = await this.calculateDueDate(nextStage, job.qty);
+    job.started_at = new Date();
+    job.due_date = await this.calculateDueDate(nextStage, job.qty);
     job.assigned_to = null;
     await this.repo.save(job);
     return this.autoAssignJob(job);
   }
 
   // Admin-only: jump to any stage (e.g. to correct a mis-advance).
-  async moveToStage(jobId: number, stage: ProductionStage): Promise<ProductionJob> {
+  async moveToStage(
+    jobId: number,
+    stage: ProductionStage,
+  ): Promise<ProductionJob> {
     const job = await this.repo.findOne({ where: { id: jobId } });
     if (!job) throw new NotFoundException('Job not found');
-    if (!STAGE_FLOW.includes(stage)) throw new BadRequestException(`Invalid stage: ${stage}`);
+    if (!STAGE_FLOW.includes(stage))
+      throw new BadRequestException(`Invalid stage: ${stage}`);
 
     // Reopening a job on a dispatched/completed order would create an active production
     // job that syncOrderStatus can never resolve (it only handles APPROVED/IN_PRODUCTION/
@@ -882,7 +1036,11 @@ export class ProductionService {
         [job.order_id],
       );
       const orderStatus = orderRows[0]?.status;
-      if (orderStatus === 'DISPATCHED' || orderStatus === 'COMPLETED' || orderStatus === 'CANCELLED') {
+      if (
+        orderStatus === 'DISPATCHED' ||
+        orderStatus === 'COMPLETED' ||
+        orderStatus === 'CANCELLED'
+      ) {
         throw new BadRequestException(
           `Cannot reopen a production job when the order is ${orderStatus}`,
         );
@@ -892,14 +1050,15 @@ export class ProductionService {
     job.current_stage = stage;
 
     if (stage === ProductionStage.COMPLETED) {
-      job.status       = ProductionJobStatus.DONE;
+      job.status = ProductionJobStatus.DONE;
       job.completed_at = job.completed_at ?? new Date();
     } else {
       // Job is being re-opened — clear completion timestamp so elapsed timers
       // restart correctly and the order can revert to IN_PRODUCTION.
-      job.status       = stage === ProductionStage.DESIGNING
-        ? ProductionJobStatus.PENDING
-        : ProductionJobStatus.IN_PROGRESS;
+      job.status =
+        stage === ProductionStage.DESIGNING
+          ? ProductionJobStatus.PENDING
+          : ProductionJobStatus.IN_PROGRESS;
       job.completed_at = null;
     }
 

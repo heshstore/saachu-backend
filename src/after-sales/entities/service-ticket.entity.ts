@@ -1,15 +1,32 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index, OneToMany,
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  Index,
+  OneToMany,
 } from 'typeorm';
 import { ServiceTicketUpdate } from './service-ticket-update.entity';
 
 export type ServiceTicketStatus =
-  | 'OPEN' | 'ASSIGNED' | 'IN_PROGRESS' | 'WAITING_PARTS' | 'RESOLVED' | 'CLOSED' | 'CANCELLED';
+  | 'OPEN'
+  | 'ASSIGNED'
+  | 'IN_PROGRESS'
+  | 'WAITING_PARTS'
+  | 'RESOLVED'
+  | 'CLOSED'
+  | 'CANCELLED';
 
 export type ServiceTicketPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
 export type ServiceTicketType =
-  | 'COMPLAINT' | 'INSTALLATION' | 'REPAIR' | 'AMC_VISIT' | 'DEMO' | 'INSPECTION';
+  | 'COMPLAINT'
+  | 'INSTALLATION'
+  | 'REPAIR'
+  | 'AMC_VISIT'
+  | 'DEMO'
+  | 'INSPECTION';
 
 @Entity('service_tickets')
 export class ServiceTicket {

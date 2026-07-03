@@ -5,21 +5,25 @@ import { Cron } from '@nestjs/schedule';
 import { KpiSnapshot } from './entities/kpi-snapshot.entity';
 import { NotificationService } from '../notifications/notification.service';
 import { DbHealthService } from '../shared/db-health.service';
-import { NotificationType, NotificationPriority, NotificationCategory } from '../notifications/notification.entity';
+import {
+  NotificationType,
+  NotificationPriority,
+  NotificationCategory,
+} from '../notifications/notification.entity';
 
 // ── Alert thresholds ─────────────────────────────────────────────────────────
 
 const THRESHOLDS = {
-  sla_compliance_rate:    { min: 80,  severity: NotificationPriority.CRITICAL },
-  whatsapp_uptime_percent:{ min: 95,  severity: NotificationPriority.HIGH     },
-  avg_response_minutes:   { max: 30,  severity: NotificationPriority.HIGH     },
-  delayed_job_rate:       { max: 20,  severity: NotificationPriority.HIGH     },
+  sla_compliance_rate: { min: 80, severity: NotificationPriority.CRITICAL },
+  whatsapp_uptime_percent: { min: 95, severity: NotificationPriority.HIGH },
+  avg_response_minutes: { max: 30, severity: NotificationPriority.HIGH },
+  delayed_job_rate: { max: 20, severity: NotificationPriority.HIGH },
 };
 
 // ── Period helpers ────────────────────────────────────────────────────────────
 
 function periodBounds(daysBack: number): { from: Date; to: Date } {
-  const to   = new Date();
+  const to = new Date();
   const from = new Date(Date.now() - daysBack * 86_400_000);
   return { from, to };
 }
@@ -39,70 +43,70 @@ function endOfDay(d: Date): Date {
 // ── Interfaces ────────────────────────────────────────────────────────────────
 
 export interface SalesMetrics {
-  leads_total:               number;
-  leads_contacted:           number;
-  avg_response_minutes:      number | null;
-  quotations_sent:           number;
+  leads_total: number;
+  leads_contacted: number;
+  avg_response_minutes: number | null;
+  quotations_sent: number;
   quotation_conversion_rate: number;
-  followup_completion_rate:  number;
-  sla_compliance_rate:       number;
+  followup_completion_rate: number;
+  sla_compliance_rate: number;
   by_user?: UserSalesMetric[];
 }
 
 export interface UserSalesMetric {
-  user_id:      number;
-  user_name:    string;
-  leads:        number;
-  followups:    number;
-  quotations:   number;
-  conversions:  number;
+  user_id: number;
+  user_name: string;
+  leads: number;
+  followups: number;
+  quotations: number;
+  conversions: number;
 }
 
 export interface ProductionMetrics {
-  jobs_completed:          number;
-  avg_completion_hours:    number | null;
-  delayed_job_rate:        number;
-  active_jobs:             number;
-  sla_compliance_rate:     number;
+  jobs_completed: number;
+  avg_completion_hours: number | null;
+  delayed_job_rate: number;
+  active_jobs: number;
+  sla_compliance_rate: number;
 }
 
 export interface AccountsMetrics {
-  total_revenue:        number;
-  total_outstanding:    number;
-  avg_collection_days:  number | null;
-  overdue_rate:         number;
-  today_collection:     number;
+  total_revenue: number;
+  total_outstanding: number;
+  avg_collection_days: number | null;
+  overdue_rate: number;
+  today_collection: number;
 }
 
 export interface DispatchMetrics {
-  total_dispatches:     number;
-  avg_dispatch_hours:   number | null;
-  ontime_rate:          number;
-  delivered:            number;
+  total_dispatches: number;
+  avg_dispatch_hours: number | null;
+  ontime_rate: number;
+  delivered: number;
 }
 
 export interface SystemMetrics {
   whatsapp_uptime_percent: number;
-  sla_breach_rate:         number;
-  escalation_count:        number;
-  automation_actions:      number;
+  sla_breach_rate: number;
+  escalation_count: number;
+  automation_actions: number;
 }
 
 export interface LeaderboardEntry {
-  user_id:   number;
+  user_id: number;
   user_name: string;
-  value:     number;
-  unit?:     string;
-  rank:      number;
+  value: number;
+  unit?: string;
+  rank: number;
 }
 
 export interface KpiSummary {
-  sales:      SalesMetrics;
+  sales: SalesMetrics;
   production: ProductionMetrics;
-  accounts:   AccountsMetrics;
-  dispatch:   DispatchMetrics;
-  system:     SystemMetrics;
-  period:     { from: Date; to: Date; label: string };
+  accounts: AccountsMetrics;
+  dispatch: DispatchMetrics;
+  system: SystemMetrics;
+  period: { from: Date; to: Date; label: string };
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -136,8 +140,21 @@ export class KpiEngineService {
       this.computeSystemMetrics(from, to),
     ]);
     return {
-      sales, production, accounts, dispatch, system,
-      period: { from, to, label: daysBack === 7 ? 'Last 7 days' : daysBack === 30 ? 'Last 30 days' : `Last ${daysBack} days` },
+      sales,
+      production,
+      accounts,
+      dispatch,
+      system,
+      period: {
+        from,
+        to,
+        label:
+          daysBack === 7
+            ? 'Last 7 days'
+            : daysBack === 30
+              ? 'Last 30 days'
+              : `Last ${daysBack} days`,
+      },
     };
   }
 
@@ -148,23 +165,37 @@ export class KpiEngineService {
 
   // ── Sales metrics ─────────────────────────────────────────────────────────────
 
-  async computeSalesMetrics(from: Date, to: Date, userId?: number): Promise<SalesMetrics> {
+  async computeSalesMetrics(
+    from: Date,
+    to: Date,
+    userId?: number,
+  ): Promise<SalesMetrics> {
     const userFilter = userId ? `AND l.assigned_to = ${userId}` : '';
-    const actFilter  = userId ? `AND a.performed_by_user_id = ${userId}` : '';
+    const actFilter = userId ? `AND a.performed_by_user_id = ${userId}` : '';
 
-    const [leadRows, responseRows, quotationRows, followupRows, slaRows, userRows] =
-      await Promise.all([
-        // Lead totals
-        this.q(`
+    const [
+      leadRows,
+      responseRows,
+      quotationRows,
+      followupRows,
+      slaRows,
+      userRows,
+    ] = await Promise.all([
+      // Lead totals
+      this.q(
+        `
           SELECT
             COUNT(*)::int                                          AS leads_total,
             COUNT(*) FILTER (WHERE l.status != 'NEW')::int        AS leads_contacted
           FROM leads l
           WHERE l.created_at BETWEEN $1 AND $2 AND l.is_active = true ${userFilter}
-        `, [from, to]),
+        `,
+        [from, to],
+      ),
 
-        // Avg first response time (minutes): time from lead creation to first STATUS_CHANGED activity
-        this.q(`
+      // Avg first response time (minutes): time from lead creation to first STATUS_CHANGED activity
+      this.q(
+        `
           SELECT AVG(EXTRACT(EPOCH FROM (a.created_at - l.created_at)) / 60)::numeric AS avg_minutes
           FROM leads l
           JOIN (
@@ -175,10 +206,13 @@ export class KpiEngineService {
             GROUP BY entity_id
           ) a ON a.entity_id = l.id
           WHERE l.created_at BETWEEN $1 AND $2 AND l.is_active = true ${userFilter}
-        `, [from, to]),
+        `,
+        [from, to],
+      ),
 
-        // Quotation metrics
-        this.q(`
+      // Quotation metrics
+      this.q(
+        `
           SELECT
             COUNT(*)::int                                                                          AS total,
             COUNT(*) FILTER (WHERE status IN ('GENERATED','CONVERTED'))::int              AS sent,
@@ -187,29 +221,40 @@ export class KpiEngineService {
           FROM quotations
           WHERE created_at BETWEEN $1 AND $2
           ${userId ? `AND created_by = ${userId}` : ''}
-        `, [from, to]),
+        `,
+        [from, to],
+      ),
 
-        // Follow-up completion
-        this.q(`
+      // Follow-up completion
+      this.q(
+        `
           SELECT
             COUNT(*) FILTER (WHERE lf.is_completed = true)::float /
               NULLIF(COUNT(*), 0) * 100 AS completion_rate
           FROM lead_followups lf
           WHERE lf.due_date BETWEEN $1 AND $2
           ${userId ? `AND lf.created_by = ${userId}` : ''}
-        `, [from, to]),
+        `,
+        [from, to],
+      ),
 
-        // SLA compliance (leads resolved without escalation / total CRM SLAs)
-        this.q(`
+      // SLA compliance (leads resolved without escalation / total CRM SLAs)
+      this.q(
+        `
           SELECT
             COUNT(*) FILTER (WHERE status = 'RESOLVED' AND escalation_level = 0)::float /
               NULLIF(COUNT(*), 0) * 100 AS compliance_rate
           FROM sla_events
           WHERE module = 'CRM' AND created_at BETWEEN $1 AND $2
-        `, [from, to]),
+        `,
+        [from, to],
+      ),
 
-        // Per-user breakdown (skipped if single user query)
-        userId ? Promise.resolve([]) : this.q(`
+      // Per-user breakdown (skipped if single user query)
+      userId
+        ? Promise.resolve([])
+        : this.q(
+            `
           SELECT
             u.id                                                        AS user_id,
             u.name                                                      AS user_name,
@@ -226,29 +271,35 @@ export class KpiEngineService {
           HAVING COUNT(DISTINCT l.id) > 0 OR COUNT(DISTINCT q.id) > 0
           ORDER BY leads DESC
           LIMIT 20
-        `, [from, to]),
-      ]);
+        `,
+            [from, to],
+          ),
+    ]);
 
-    const lr = leadRows[0]    ?? {};
+    const lr = leadRows[0] ?? {};
     const rr = responseRows[0] ?? {};
     const qr = quotationRows[0] ?? {};
     const fr = followupRows[0] ?? {};
-    const sr = slaRows[0]     ?? {};
+    const sr = slaRows[0] ?? {};
 
     return {
-      leads_total:               Number(lr.leads_total ?? 0),
-      leads_contacted:           Number(lr.leads_contacted ?? 0),
-      avg_response_minutes:      rr.avg_minutes != null ? Math.round(Number(rr.avg_minutes)) : null,
-      quotations_sent:           Number(qr.sent ?? 0),
-      quotation_conversion_rate: Math.round(Number(qr.conversion_rate ?? 0) * 10) / 10,
-      followup_completion_rate:  Math.round(Number(fr.completion_rate ?? 0) * 10) / 10,
-      sla_compliance_rate:       Math.round(Number(sr.compliance_rate ?? 0) * 10) / 10,
-      by_user: (userRows as any[]).map(r => ({
-        user_id:     Number(r.user_id),
-        user_name:   r.user_name,
-        leads:       Number(r.leads),
-        followups:   Number(r.followups),
-        quotations:  Number(r.quotations),
+      leads_total: Number(lr.leads_total ?? 0),
+      leads_contacted: Number(lr.leads_contacted ?? 0),
+      avg_response_minutes:
+        rr.avg_minutes != null ? Math.round(Number(rr.avg_minutes)) : null,
+      quotations_sent: Number(qr.sent ?? 0),
+      quotation_conversion_rate:
+        Math.round(Number(qr.conversion_rate ?? 0) * 10) / 10,
+      followup_completion_rate:
+        Math.round(Number(fr.completion_rate ?? 0) * 10) / 10,
+      sla_compliance_rate:
+        Math.round(Number(sr.compliance_rate ?? 0) * 10) / 10,
+      by_user: userRows.map((r) => ({
+        user_id: Number(r.user_id),
+        user_name: r.user_name,
+        leads: Number(r.leads),
+        followups: Number(r.followups),
+        quotations: Number(r.quotations),
         conversions: Number(r.conversions),
       })),
     };
@@ -256,9 +307,13 @@ export class KpiEngineService {
 
   // ── Production metrics ────────────────────────────────────────────────────────
 
-  async computeProductionMetrics(from: Date, to: Date): Promise<ProductionMetrics> {
+  async computeProductionMetrics(
+    from: Date,
+    to: Date,
+  ): Promise<ProductionMetrics> {
     const [jobRows, slaRows] = await Promise.all([
-      this.q(`
+      this.q(
+        `
         SELECT
           COUNT(*) FILTER (WHERE status = 'DONE' AND completed_at BETWEEN $1 AND $2)::int         AS completed,
           COUNT(*) FILTER (WHERE status IN ('PENDING','IN_PROGRESS'))::int                         AS active,
@@ -268,29 +323,39 @@ export class KpiEngineService {
             FILTER (WHERE status = 'DONE' AND completed_at BETWEEN $1 AND $2)::numeric             AS avg_hours
         FROM production_jobs
         WHERE created_at BETWEEN $1 AND $2
-      `, [from, to]),
+      `,
+        [from, to],
+      ),
 
-      this.q(`
+      this.q(
+        `
         SELECT
           COUNT(*) FILTER (WHERE status = 'RESOLVED' AND escalation_level = 0)::float /
             NULLIF(COUNT(*), 0) * 100 AS compliance_rate
         FROM sla_events
         WHERE module = 'PRODUCTION' AND created_at BETWEEN $1 AND $2
-      `, [from, to]),
+      `,
+        [from, to],
+      ),
     ]);
 
     const jr = jobRows[0] ?? {};
     const sr = slaRows[0] ?? {};
 
-    const total   = Number(jr.total   ?? 1);
+    const total = Number(jr.total ?? 1);
     const delayed = Number(jr.delayed ?? 0);
 
     return {
-      jobs_completed:       Number(jr.completed ?? 0),
-      avg_completion_hours: jr.avg_hours != null ? Math.round(Number(jr.avg_hours) * 10) / 10 : null,
-      delayed_job_rate:     total > 0 ? Math.round((delayed / total) * 1000) / 10 : 0,
-      active_jobs:          Number(jr.active ?? 0),
-      sla_compliance_rate:  Math.round(Number(sr.compliance_rate ?? 0) * 10) / 10,
+      jobs_completed: Number(jr.completed ?? 0),
+      avg_completion_hours:
+        jr.avg_hours != null
+          ? Math.round(Number(jr.avg_hours) * 10) / 10
+          : null,
+      delayed_job_rate:
+        total > 0 ? Math.round((delayed / total) * 1000) / 10 : 0,
+      active_jobs: Number(jr.active ?? 0),
+      sla_compliance_rate:
+        Math.round(Number(sr.compliance_rate ?? 0) * 10) / 10,
     };
   }
 
@@ -298,7 +363,8 @@ export class KpiEngineService {
 
   async computeAccountsMetrics(from: Date, to: Date): Promise<AccountsMetrics> {
     const [orderRows, collectionRows, todayRows] = await Promise.all([
-      this.q(`
+      this.q(
+        `
         SELECT
           COALESCE(SUM(total_amount),   0)::numeric  AS revenue,
           COALESCE(SUM(pending_amount), 0)::numeric  AS outstanding,
@@ -306,37 +372,46 @@ export class KpiEngineService {
           COUNT(*) FILTER (WHERE status NOT IN ('CANCELLED','REJECTED'))::int                        AS total_count
         FROM orders
         WHERE created_at BETWEEN $1 AND $2
-      `, [from, to]),
+      `,
+        [from, to],
+      ),
 
       // Avg days from order creation to full payment
-      this.q(`
+      this.q(
+        `
         SELECT AVG(EXTRACT(EPOCH FROM (p.created_at - o.created_at)) / 86400)::numeric AS avg_days
         FROM payments p
         JOIN orders o ON o.id = p.order_id
         WHERE p.created_at BETWEEN $1 AND $2
           AND o.pending_amount = 0
-      `, [from, to]),
+      `,
+        [from, to],
+      ),
 
-      this.q(`
+      this.q(
+        `
         SELECT COALESCE(SUM(amount), 0)::numeric AS today
         FROM payments
         WHERE created_at::date = CURRENT_DATE
-      `, []),
+      `,
+        [],
+      ),
     ]);
 
-    const or  = orderRows[0]      ?? {};
-    const cr  = collectionRows[0] ?? {};
-    const tr  = todayRows[0]      ?? {};
+    const or = orderRows[0] ?? {};
+    const cr = collectionRows[0] ?? {};
+    const tr = todayRows[0] ?? {};
 
-    const total   = Number(or.total_count ?? 1);
+    const total = Number(or.total_count ?? 1);
     const overdue = Number(or.overdue_count ?? 0);
 
     return {
-      total_revenue:       Number(or.revenue      ?? 0),
-      total_outstanding:   Number(or.outstanding  ?? 0),
-      avg_collection_days: cr.avg_days != null ? Math.round(Number(cr.avg_days) * 10) / 10 : null,
-      overdue_rate:        total > 0 ? Math.round((overdue / total) * 1000) / 10 : 0,
-      today_collection:    Number(tr.today ?? 0),
+      total_revenue: Number(or.revenue ?? 0),
+      total_outstanding: Number(or.outstanding ?? 0),
+      avg_collection_days:
+        cr.avg_days != null ? Math.round(Number(cr.avg_days) * 10) / 10 : null,
+      overdue_rate: total > 0 ? Math.round((overdue / total) * 1000) / 10 : 0,
+      today_collection: Number(tr.today ?? 0),
     };
   }
 
@@ -344,7 +419,8 @@ export class KpiEngineService {
 
   async computeDispatchMetrics(from: Date, to: Date): Promise<DispatchMetrics> {
     const [rows] = await Promise.all([
-      this.q(`
+      this.q(
+        `
         SELECT
           COUNT(*)::int                                                         AS total,
           COUNT(*) FILTER (WHERE dispatch_status = 'DELIVERED')::int           AS delivered,
@@ -357,16 +433,19 @@ export class KpiEngineService {
         JOIN orders o ON o.id = d.order_id
         LEFT JOIN sla_events s ON s.entity_type = 'dispatch' AND s.entity_id = d.id
         WHERE d.created_at BETWEEN $1 AND $2
-      `, [from, to]),
+      `,
+        [from, to],
+      ),
     ]);
 
     const r = rows[0] ?? {};
 
     return {
-      total_dispatches:   Number(r.total     ?? 0),
-      avg_dispatch_hours: r.avg_hours != null ? Math.round(Number(r.avg_hours) * 10) / 10 : null,
-      ontime_rate:        Math.round(Number(r.ontime_rate ?? 0) * 10) / 10,
-      delivered:          Number(r.delivered ?? 0),
+      total_dispatches: Number(r.total ?? 0),
+      avg_dispatch_hours:
+        r.avg_hours != null ? Math.round(Number(r.avg_hours) * 10) / 10 : null,
+      ontime_rate: Math.round(Number(r.ontime_rate ?? 0) * 10) / 10,
+      delivered: Number(r.delivered ?? 0),
     };
   }
 
@@ -376,17 +455,21 @@ export class KpiEngineService {
     const periodMs = to.getTime() - from.getTime();
 
     const [slaRows, waRows, automationRows] = await Promise.all([
-      this.q(`
+      this.q(
+        `
         SELECT
           COUNT(*)::int                                         AS total,
           COUNT(*) FILTER (WHERE status = 'ESCALATED')::int   AS breached,
           COUNT(*) FILTER (WHERE escalation_level >= 2)::int  AS admin_escalations
         FROM sla_events
         WHERE created_at BETWEEN $1 AND $2
-      `, [from, to]),
+      `,
+        [from, to],
+      ),
 
       // Approximate WhatsApp uptime: subtract downtime windows between DOWN→UP pairs
-      this.q(`
+      this.q(
+        `
         SELECT
           COALESCE(SUM(EXTRACT(EPOCH FROM (up.created_at - down.created_at))), 0)::numeric AS downtime_seconds
         FROM (
@@ -399,38 +482,51 @@ export class KpiEngineService {
           AND up.created_at > down.created_at
           AND (down.next_up IS NULL OR up.created_at < down.next_up)
           AND up.created_at BETWEEN $1 AND $2
-      `, [from, to]),
+      `,
+        [from, to],
+      ),
 
-      this.q(`
+      this.q(
+        `
         SELECT COUNT(*)::int AS count
         FROM activity_logs
         WHERE source = 'AUTOMATION' AND created_at BETWEEN $1 AND $2
-      `, [from, to]),
+      `,
+        [from, to],
+      ),
     ]);
 
-    const sr = slaRows[0]       ?? {};
-    const wr = waRows[0]        ?? {};
+    const sr = slaRows[0] ?? {};
+    const wr = waRows[0] ?? {};
     const ar = automationRows[0] ?? {};
 
     const downtimeSeconds = Number(wr.downtime_seconds ?? 0);
-    const uptimePct       = periodMs > 0
-      ? Math.max(0, Math.min(100, (1 - downtimeSeconds * 1000 / periodMs) * 100))
-      : 100;
+    const uptimePct =
+      periodMs > 0
+        ? Math.max(
+            0,
+            Math.min(100, (1 - (downtimeSeconds * 1000) / periodMs) * 100),
+          )
+        : 100;
 
-    const slaTotal   = Number(sr.total    ?? 1);
+    const slaTotal = Number(sr.total ?? 1);
     const slaBreached = Number(sr.breached ?? 0);
 
     return {
       whatsapp_uptime_percent: Math.round(uptimePct * 10) / 10,
-      sla_breach_rate:         slaTotal > 0 ? Math.round((slaBreached / slaTotal) * 1000) / 10 : 0,
-      escalation_count:        Number(sr.admin_escalations ?? 0),
-      automation_actions:      Number(ar.count ?? 0),
+      sla_breach_rate:
+        slaTotal > 0 ? Math.round((slaBreached / slaTotal) * 1000) / 10 : 0,
+      escalation_count: Number(sr.admin_escalations ?? 0),
+      automation_actions: Number(ar.count ?? 0),
     };
   }
 
   // ── Leaderboard ───────────────────────────────────────────────────────────────
 
-  async getLeaderboard(metric: string, daysBack = 30): Promise<LeaderboardEntry[]> {
+  async getLeaderboard(
+    metric: string,
+    daysBack = 30,
+  ): Promise<LeaderboardEntry[]> {
     const { from, to } = periodBounds(daysBack);
 
     const queries: Record<string, string> = {
@@ -499,28 +595,37 @@ export class KpiEngineService {
     try {
       const rows = await this.q(sql, [from, to]);
       return rows.map((r: any, i) => ({
-        user_id:   Number(r.user_id),
+        user_id: Number(r.user_id),
         user_name: r.user_name,
-        value:     Math.round(Number(r.value ?? 0) * 10) / 10,
-        rank:      i + 1,
+        value: Math.round(Number(r.value ?? 0) * 10) / 10,
+        rank: i + 1,
       }));
     } catch (e: any) {
-      this.logger.warn(`Leaderboard query '${metric}' failed: ${e?.message?.slice(0, 100)}`);
+      this.logger.warn(
+        `Leaderboard query '${metric}' failed: ${e?.message?.slice(0, 100)}`,
+      );
       return [];
     }
   }
 
   // ── Historical snapshots for trend charts ─────────────────────────────────────
 
-  async getHistoricalSnapshots(module: string, metricKey: string, daysBack = 30): Promise<any[]> {
-    return this.q(`
+  async getHistoricalSnapshots(
+    module: string,
+    metricKey: string,
+    daysBack = 30,
+  ): Promise<any[]> {
+    return this.q(
+      `
       SELECT period_start, metric_value, metric_unit, period
       FROM kpi_snapshots
       WHERE module = $1 AND metric_key = $2 AND scope = 'SYSTEM'
         AND period = 'DAILY'
         AND period_start >= NOW() - INTERVAL '1 day' * $3
       ORDER BY period_start ASC
-    `, [module, metricKey, daysBack]);
+    `,
+      [module, metricKey, daysBack],
+    );
   }
 
   // ── Nightly snapshot cron ─────────────────────────────────────────────────────
@@ -532,21 +637,29 @@ export class KpiEngineService {
     this._running = true;
     try {
       const yesterday = new Date(Date.now() - 86_400_000);
-      const from      = startOfDay(yesterday);
-      const to        = endOfDay(yesterday);
+      const from = startOfDay(yesterday);
+      const to = endOfDay(yesterday);
 
       await this.computeAndStoreSnapshots('DAILY', from, to);
 
       // Weekly: every Monday
       if (new Date().getDay() === 1) {
         const wFrom = new Date(Date.now() - 7 * 86_400_000);
-        await this.computeAndStoreSnapshots('WEEKLY', startOfDay(wFrom), endOfDay(yesterday));
+        await this.computeAndStoreSnapshots(
+          'WEEKLY',
+          startOfDay(wFrom),
+          endOfDay(yesterday),
+        );
       }
 
       // Monthly: 1st of the month
       if (new Date().getDate() === 1) {
         const mFrom = new Date(Date.now() - 30 * 86_400_000);
-        await this.computeAndStoreSnapshots('MONTHLY', startOfDay(mFrom), endOfDay(yesterday));
+        await this.computeAndStoreSnapshots(
+          'MONTHLY',
+          startOfDay(mFrom),
+          endOfDay(yesterday),
+        );
       }
 
       this.logger.log('KPI nightly snapshot complete');
@@ -557,7 +670,11 @@ export class KpiEngineService {
     }
   }
 
-  private async computeAndStoreSnapshots(period: 'DAILY' | 'WEEKLY' | 'MONTHLY', from: Date, to: Date): Promise<void> {
+  private async computeAndStoreSnapshots(
+    period: 'DAILY' | 'WEEKLY' | 'MONTHLY',
+    from: Date,
+    to: Date,
+  ): Promise<void> {
     const [sales, production, accounts, dispatch, system] = await Promise.all([
       this.computeSalesMetrics(from, to),
       this.computeProductionMetrics(from, to),
@@ -567,35 +684,143 @@ export class KpiEngineService {
     ]);
 
     const snapshots: Array<{
-      module: string; key: string; value: number; unit: string;
+      module: string;
+      key: string;
+      value: number;
+      unit: string;
       meta?: Record<string, any>;
     }> = [
       // SALES
-      { module: 'SALES', key: 'leads_total',               value: sales.leads_total,               unit: 'count' },
-      { module: 'SALES', key: 'leads_contacted',           value: sales.leads_contacted,            unit: 'count' },
-      { module: 'SALES', key: 'avg_response_minutes',      value: sales.avg_response_minutes ?? 0,  unit: 'minutes' },
-      { module: 'SALES', key: 'quotations_sent',           value: sales.quotations_sent,             unit: 'count' },
-      { module: 'SALES', key: 'quotation_conversion_rate', value: sales.quotation_conversion_rate,   unit: '%' },
-      { module: 'SALES', key: 'followup_completion_rate',  value: sales.followup_completion_rate,    unit: '%' },
-      { module: 'SALES', key: 'sla_compliance_rate',       value: sales.sla_compliance_rate,         unit: '%' },
+      {
+        module: 'SALES',
+        key: 'leads_total',
+        value: sales.leads_total,
+        unit: 'count',
+      },
+      {
+        module: 'SALES',
+        key: 'leads_contacted',
+        value: sales.leads_contacted,
+        unit: 'count',
+      },
+      {
+        module: 'SALES',
+        key: 'avg_response_minutes',
+        value: sales.avg_response_minutes ?? 0,
+        unit: 'minutes',
+      },
+      {
+        module: 'SALES',
+        key: 'quotations_sent',
+        value: sales.quotations_sent,
+        unit: 'count',
+      },
+      {
+        module: 'SALES',
+        key: 'quotation_conversion_rate',
+        value: sales.quotation_conversion_rate,
+        unit: '%',
+      },
+      {
+        module: 'SALES',
+        key: 'followup_completion_rate',
+        value: sales.followup_completion_rate,
+        unit: '%',
+      },
+      {
+        module: 'SALES',
+        key: 'sla_compliance_rate',
+        value: sales.sla_compliance_rate,
+        unit: '%',
+      },
       // PRODUCTION
-      { module: 'PRODUCTION', key: 'jobs_completed',          value: production.jobs_completed,          unit: 'count' },
-      { module: 'PRODUCTION', key: 'avg_completion_hours',    value: production.avg_completion_hours ?? 0, unit: 'hours' },
-      { module: 'PRODUCTION', key: 'delayed_job_rate',        value: production.delayed_job_rate,        unit: '%' },
-      { module: 'PRODUCTION', key: 'sla_compliance_rate',     value: production.sla_compliance_rate,     unit: '%' },
+      {
+        module: 'PRODUCTION',
+        key: 'jobs_completed',
+        value: production.jobs_completed,
+        unit: 'count',
+      },
+      {
+        module: 'PRODUCTION',
+        key: 'avg_completion_hours',
+        value: production.avg_completion_hours ?? 0,
+        unit: 'hours',
+      },
+      {
+        module: 'PRODUCTION',
+        key: 'delayed_job_rate',
+        value: production.delayed_job_rate,
+        unit: '%',
+      },
+      {
+        module: 'PRODUCTION',
+        key: 'sla_compliance_rate',
+        value: production.sla_compliance_rate,
+        unit: '%',
+      },
       // ACCOUNTS
-      { module: 'ACCOUNTS', key: 'total_revenue',        value: accounts.total_revenue,        unit: 'INR' },
-      { module: 'ACCOUNTS', key: 'total_outstanding',    value: accounts.total_outstanding,    unit: 'INR' },
-      { module: 'ACCOUNTS', key: 'avg_collection_days',  value: accounts.avg_collection_days ?? 0, unit: 'days' },
-      { module: 'ACCOUNTS', key: 'overdue_rate',         value: accounts.overdue_rate,         unit: '%' },
+      {
+        module: 'ACCOUNTS',
+        key: 'total_revenue',
+        value: accounts.total_revenue,
+        unit: 'INR',
+      },
+      {
+        module: 'ACCOUNTS',
+        key: 'total_outstanding',
+        value: accounts.total_outstanding,
+        unit: 'INR',
+      },
+      {
+        module: 'ACCOUNTS',
+        key: 'avg_collection_days',
+        value: accounts.avg_collection_days ?? 0,
+        unit: 'days',
+      },
+      {
+        module: 'ACCOUNTS',
+        key: 'overdue_rate',
+        value: accounts.overdue_rate,
+        unit: '%',
+      },
       // DISPATCH
-      { module: 'DISPATCH', key: 'total_dispatches',   value: dispatch.total_dispatches,   unit: 'count' },
-      { module: 'DISPATCH', key: 'avg_dispatch_hours', value: dispatch.avg_dispatch_hours ?? 0, unit: 'hours' },
-      { module: 'DISPATCH', key: 'ontime_rate',        value: dispatch.ontime_rate,         unit: '%' },
+      {
+        module: 'DISPATCH',
+        key: 'total_dispatches',
+        value: dispatch.total_dispatches,
+        unit: 'count',
+      },
+      {
+        module: 'DISPATCH',
+        key: 'avg_dispatch_hours',
+        value: dispatch.avg_dispatch_hours ?? 0,
+        unit: 'hours',
+      },
+      {
+        module: 'DISPATCH',
+        key: 'ontime_rate',
+        value: dispatch.ontime_rate,
+        unit: '%',
+      },
       // SYSTEM
-      { module: 'SYSTEM', key: 'whatsapp_uptime_percent', value: system.whatsapp_uptime_percent, unit: '%' },
-      { module: 'SYSTEM', key: 'sla_breach_rate',         value: system.sla_breach_rate,         unit: '%' },
-      { module: 'SYSTEM', key: 'escalation_count',        value: system.escalation_count,        unit: 'count' },
+      {
+        module: 'SYSTEM',
+        key: 'whatsapp_uptime_percent',
+        value: system.whatsapp_uptime_percent,
+        unit: '%',
+      },
+      {
+        module: 'SYSTEM',
+        key: 'sla_breach_rate',
+        value: system.sla_breach_rate,
+        unit: '%',
+      },
+      {
+        module: 'SYSTEM',
+        key: 'escalation_count',
+        value: system.escalation_count,
+        unit: 'count',
+      },
     ];
 
     for (const s of snapshots) {
@@ -605,18 +830,28 @@ export class KpiEngineService {
           .insert()
           .into(KpiSnapshot)
           .values({
-            scope:        'SYSTEM',
-            scope_id:     null,
-            module:       s.module,
-            metric_key:   s.key,
+            scope: 'SYSTEM',
+            scope_id: null,
+            module: s.module,
+            metric_key: s.key,
             metric_value: s.value,
-            metric_unit:  s.unit,
+            metric_unit: s.unit,
             period,
             period_start: from,
-            period_end:   to,
-            metadata:     s.meta ?? null,
+            period_end: to,
+            metadata: s.meta ?? null,
           })
-          .orUpdate(['metric_value', 'metric_unit', 'metadata'], ['scope', 'scope_id', 'module', 'metric_key', 'period', 'period_start'])
+          .orUpdate(
+            ['metric_value', 'metric_unit', 'metadata'],
+            [
+              'scope',
+              'scope_id',
+              'module',
+              'metric_key',
+              'period',
+              'period_start',
+            ],
+          )
           .execute();
       } catch {} // Skip individual failures — don't break the whole batch
     }
@@ -628,14 +863,46 @@ export class KpiEngineService {
   // ── KPI Alerts ────────────────────────────────────────────────────────────────
 
   private async checkAlerts(metrics: {
-    sales: SalesMetrics; production: ProductionMetrics; system: SystemMetrics;
+    sales: SalesMetrics;
+    production: ProductionMetrics;
+    system: SystemMetrics;
   }): Promise<void> {
-    const checks: Array<{ metric: string; value: number; label: string; module: any }> = [
-      { metric: 'sla_compliance_rate',     value: metrics.sales.sla_compliance_rate,         label: 'Sales SLA compliance',    module: NotificationCategory.CRM },
-      { metric: 'sla_compliance_rate',     value: metrics.production.sla_compliance_rate,    label: 'Production SLA compliance', module: NotificationCategory.PRODUCTION },
-      { metric: 'whatsapp_uptime_percent', value: metrics.system.whatsapp_uptime_percent,    label: 'WhatsApp uptime',          module: NotificationCategory.SYSTEM },
-      { metric: 'avg_response_minutes',    value: metrics.sales.avg_response_minutes ?? 0,   label: 'Lead response time',       module: NotificationCategory.CRM },
-      { metric: 'delayed_job_rate',        value: metrics.production.delayed_job_rate,        label: 'Delayed job rate',         module: NotificationCategory.PRODUCTION },
+    const checks: Array<{
+      metric: string;
+      value: number;
+      label: string;
+      module: any;
+    }> = [
+      {
+        metric: 'sla_compliance_rate',
+        value: metrics.sales.sla_compliance_rate,
+        label: 'Sales SLA compliance',
+        module: NotificationCategory.CRM,
+      },
+      {
+        metric: 'sla_compliance_rate',
+        value: metrics.production.sla_compliance_rate,
+        label: 'Production SLA compliance',
+        module: NotificationCategory.PRODUCTION,
+      },
+      {
+        metric: 'whatsapp_uptime_percent',
+        value: metrics.system.whatsapp_uptime_percent,
+        label: 'WhatsApp uptime',
+        module: NotificationCategory.SYSTEM,
+      },
+      {
+        metric: 'avg_response_minutes',
+        value: metrics.sales.avg_response_minutes ?? 0,
+        label: 'Lead response time',
+        module: NotificationCategory.CRM,
+      },
+      {
+        metric: 'delayed_job_rate',
+        value: metrics.production.delayed_job_rate,
+        label: 'Delayed job rate',
+        module: NotificationCategory.PRODUCTION,
+      },
     ];
 
     for (const check of checks) {
@@ -648,16 +915,18 @@ export class KpiEngineService {
 
       if (!breached) continue;
 
-      await this.notifService.createRoleNotification(['Admin'], {
-        type:            NotificationType.ACTION,
-        priority:        threshold.severity,
-        category:        check.module,
-        title:           `KPI Alert: ${check.label}`,
-        message:         `${check.label} is at ${check.value}${check.metric.includes('rate') || check.metric.includes('percent') ? '%' : check.metric.includes('minutes') ? ' min' : ''}. Review required.`,
-        action_url:      '/kpi',
-        cooldownMinutes: 360, // 6h cooldown — one alert per KPI per reporting cycle
-        is_automated:    true,
-      }).catch(() => {});
+      await this.notifService
+        .createRoleNotification(['Admin'], {
+          type: NotificationType.ACTION,
+          priority: threshold.severity,
+          category: check.module,
+          title: `KPI Alert: ${check.label}`,
+          message: `${check.label} is at ${check.value}${check.metric.includes('rate') || check.metric.includes('percent') ? '%' : check.metric.includes('minutes') ? ' min' : ''}. Review required.`,
+          action_url: '/kpi',
+          cooldownMinutes: 360, // 6h cooldown — one alert per KPI per reporting cycle
+          is_automated: true,
+        })
+        .catch(() => {});
     }
   }
 }

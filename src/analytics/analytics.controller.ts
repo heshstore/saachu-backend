@@ -1,4 +1,12 @@
-import { Body, Controller, Get, HttpCode, Post, Query, Req } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Post,
+  Query,
+  Req,
+} from '@nestjs/common';
 import { AnalyticsService } from './analytics.service';
 import { TrackEventDto } from './dto/track-event.dto';
 import { Public } from '../auth/public.decorator';
@@ -62,7 +70,8 @@ export class AnalyticsController {
   @Get('notifications')
   @RequirePermission('order.view')
   getNotificationsSummary(@Req() req: any) {
-    const userId: number | undefined = req.user?.userId ?? req.user?.sub ?? req.user?.id;
+    const userId: number | undefined =
+      req.user?.userId ?? req.user?.sub ?? req.user?.id;
     return this.analyticsService.getNotificationsSummary(userId);
   }
 

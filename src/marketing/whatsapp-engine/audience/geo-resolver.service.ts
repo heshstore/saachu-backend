@@ -2,7 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ILike, Repository } from 'typeorm';
 import { City } from '../../../cities/cities.entity';
-import { GeoCorrection, isGarbageCity, isMeaningfulGeo } from './geo-quality.util';
+import {
+  GeoCorrection,
+  isGarbageCity,
+  isMeaningfulGeo,
+} from './geo-quality.util';
 
 export type GeoSource = 'local' | 'google_places' | 'google_geocoding' | null;
 
@@ -16,7 +20,7 @@ export type ResolvedGeo = {
 };
 
 /**
- * City-first geographic resolver for Promotional DB imports.
+ * City-first geographic resolver for Promotional Contact imports.
  *
  * Resolution order (when ENABLE_GOOGLE_GEO=true):
  *   1. cities table (exact → fuzzy)
@@ -41,7 +45,7 @@ export class GeoResolverService {
     importedCountry: string | null | undefined,
   ): Promise<ResolvedGeo> {
     const empty: ResolvedGeo = {
-      city: isMeaningfulGeo(city) ? city!.trim() : null,
+      city: isMeaningfulGeo(city) ? city.trim() : null,
       state: null,
       country: null,
       source: null,
@@ -51,10 +55,10 @@ export class GeoResolverService {
 
     if (!isMeaningfulGeo(city)) return empty;
     if (isGarbageCity(city)) {
-      return { ...empty, city: city!.trim(), resolved: false };
+      return { ...empty, city: city.trim(), resolved: false };
     }
 
-    const local = await this._resolveLocal(city!.trim());
+    const local = await this._resolveLocal(city.trim());
     if (local) {
       return this._applyVerified(
         local.name,
@@ -68,7 +72,7 @@ export class GeoResolverService {
 
     if (this.googleEnabled) {
       // Architecture ready — live Google calls gated behind ENABLE_GOOGLE_GEO.
-      const places = await this._resolveGooglePlaces(city!.trim());
+      const places = await this._resolveGooglePlaces(city.trim());
       if (places) {
         return this._applyVerified(
           places.city,
@@ -79,7 +83,7 @@ export class GeoResolverService {
           importedCountry,
         );
       }
-      const geocoded = await this._resolveGoogleGeocoding(city!.trim());
+      const geocoded = await this._resolveGoogleGeocoding(city.trim());
       if (geocoded) {
         return this._applyVerified(
           geocoded.city,
@@ -93,7 +97,7 @@ export class GeoResolverService {
     }
 
     return {
-      city: city!.trim(),
+      city: city.trim(),
       state: null,
       country: null,
       source: null,
@@ -104,7 +108,11 @@ export class GeoResolverService {
 
   /** Batch dedupe — one DB/API lookup per distinct city string per import. */
   async resolveBatch(
-    rows: { city?: string | null; state?: string | null; country?: string | null }[],
+    rows: {
+      city?: string | null;
+      state?: string | null;
+      country?: string | null;
+    }[],
   ): Promise<Map<number, ResolvedGeo>> {
     const cache = new Map<string, ResolvedGeo>();
     const out = new Map<number, ResolvedGeo>();
@@ -119,7 +127,7 @@ export class GeoResolverService {
       if (!cache.has(key)) {
         cache.set(key, await this.resolve(r.city, r.state, r.country));
       }
-      out.set(i, cache.get(key)!);
+      out.set(i, cache.get(key));
     }
     return out;
   }
@@ -138,14 +146,22 @@ export class GeoResolverService {
   }
 
   /** Stub — wire Google Places Text Search when ENABLE_GOOGLE_GEO=true. */
-  private async _resolveGooglePlaces(_city: string): Promise<{ city: string; state: string; country: string } | null> {
-    this.logger.debug('Google Places resolution skipped (ENABLE_GOOGLE_GEO not enabled)');
+  private async _resolveGooglePlaces(
+    _city: string,
+  ): Promise<{ city: string; state: string; country: string } | null> {
+    this.logger.debug(
+      'Google Places resolution skipped (ENABLE_GOOGLE_GEO not enabled)',
+    );
     return null;
   }
 
   /** Stub — wire Geocoding API when ENABLE_GOOGLE_GEO=true. */
-  private async _resolveGoogleGeocoding(_city: string): Promise<{ city: string; state: string; country: string } | null> {
-    this.logger.debug('Google Geocoding resolution skipped (ENABLE_GOOGLE_GEO not enabled)');
+  private async _resolveGoogleGeocoding(
+    _city: string,
+  ): Promise<{ city: string; state: string; country: string } | null> {
+    this.logger.debug(
+      'Google Geocoding resolution skipped (ENABLE_GOOGLE_GEO not enabled)',
+    );
     return null;
   }
 
@@ -159,19 +175,25 @@ export class GeoResolverService {
   ): ResolvedGeo {
     const corrections: GeoCorrection[] = [];
 
-    if (isMeaningfulGeo(importedState) && importedState!.trim().toLowerCase() !== state.trim().toLowerCase()) {
+    if (
+      isMeaningfulGeo(importedState) &&
+      importedState.trim().toLowerCase() !== state.trim().toLowerCase()
+    ) {
       corrections.push({
         field: 'state',
-        imported: importedState!.trim(),
+        imported: importedState.trim(),
         resolved: state,
         source: source ?? 'local',
         action: 'TRUST_VERIFIED',
       });
     }
-    if (isMeaningfulGeo(importedCountry) && importedCountry!.trim().toLowerCase() !== country.trim().toLowerCase()) {
+    if (
+      isMeaningfulGeo(importedCountry) &&
+      importedCountry.trim().toLowerCase() !== country.trim().toLowerCase()
+    ) {
       corrections.push({
         field: 'country',
-        imported: importedCountry!.trim(),
+        imported: importedCountry.trim(),
         resolved: country,
         source: source ?? 'local',
         action: 'TRUST_VERIFIED',

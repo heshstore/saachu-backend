@@ -1,5 +1,14 @@
 import {
-  Controller, Get, Post, Patch, Delete, Param, Body, Query, ParseIntPipe, Req,
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Param,
+  Body,
+  Query,
+  ParseIntPipe,
+  Req,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { RequirePermission } from '../auth/require-permission.decorator';
@@ -99,7 +108,10 @@ export class AfterSalesController {
 
   @Patch('amc/:id')
   @RequirePermission('customer.edit')
-  patchAmc(@Param('id', ParseIntPipe) id: number, @Body() body: Record<string, unknown>) {
+  patchAmc(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() body: Record<string, unknown>,
+  ) {
     return this.svc.patchAmc(id, body as any);
   }
 

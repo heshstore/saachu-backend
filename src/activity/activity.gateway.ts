@@ -12,7 +12,9 @@ import { ActivityLog } from './entities/activity-log.entity';
 // Reuses the same Socket.io server namespace but adds an `activity` room
 // so clients subscribed to global activity receive realtime pushes.
 @WebSocketGateway({ cors: true })
-export class ActivityGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class ActivityGateway
+  implements OnGatewayConnection, OnGatewayDisconnect
+{
   private readonly logger = new Logger(ActivityGateway.name);
 
   @WebSocketServer()

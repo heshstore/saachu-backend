@@ -19,17 +19,24 @@ export class ProductionWhatsappService {
 
   // ── Dedup ─────────────────────────────────────────────────────────────────
 
-  private async alreadySent(jobId: number, alertType: string): Promise<boolean> {
+  private async alreadySent(
+    jobId: number,
+    alertType: string,
+  ): Promise<boolean> {
     const record = await this.alertRepo.findOne({
       where: { job_id: jobId, alert_type: alertType },
     });
     return !!record;
   }
 
-  private async markSent(jobId: number, alertType: string, userId?: number): Promise<void> {
+  private async markSent(
+    jobId: number,
+    alertType: string,
+    userId?: number,
+  ): Promise<void> {
     await this.alertRepo.save({
-      job_id:      jobId,
-      alert_type:  alertType,
+      job_id: jobId,
+      alert_type: alertType,
       notified_to: userId ?? 0,
     });
   }
@@ -39,7 +46,9 @@ export class ProductionWhatsappService {
   private send(userId: number, message: string): void {
     this.whatsapp
       .sendToAssignee(userId, message)
-      .catch(err => this.logger.warn(`WA send failed userId=${userId}: ${err?.message}`));
+      .catch((err) =>
+        this.logger.warn(`WA send failed userId=${userId}: ${err?.message}`),
+      );
   }
 
   // ── Templates ─────────────────────────────────────────────────────────────
@@ -112,7 +121,9 @@ export class ProductionWhatsappService {
       `📋 Daily Task Summary`,
       `Pending: ${summary.pending} job(s)`,
       `In progress: ${summary.inProgress} job(s)`,
-      summary.overdue > 0 ? `⚠️ Overdue: ${summary.overdue} job(s)` : `All on track ✓`,
+      summary.overdue > 0
+        ? `⚠️ Overdue: ${summary.overdue} job(s)`
+        : `All on track ✓`,
       ``,
       `[${CTX}]`,
     ].join('\n');
@@ -122,14 +133,20 @@ export class ProductionWhatsappService {
 
   sendEndOfDayReport(
     userId: number,
-    summary: { completedToday: number; pendingTotal: number; userName?: string },
+    summary: {
+      completedToday: number;
+      pendingTotal: number;
+      userName?: string;
+    },
   ): void {
     const { completedToday, pendingTotal, userName } = summary;
     const message = [
       `🌙 End of Day Report${userName ? ` — ${userName}` : ''}`,
       `Completed today: ${completedToday} job(s)`,
       `Pending tomorrow: ${pendingTotal} job(s)`,
-      completedToday > 0 ? `Great effort today!` : `Let's aim for more tomorrow.`,
+      completedToday > 0
+        ? `Great effort today!`
+        : `Let's aim for more tomorrow.`,
       ``,
       `[${CTX}]`,
     ].join('\n');

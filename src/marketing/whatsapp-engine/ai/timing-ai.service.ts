@@ -1,9 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 
-const WINDOW_START_HOUR = 10;   // 10:00 AM
-const WINDOW_END_HOUR = 18;     // 18:00 (6:00 PM)
+const WINDOW_START_HOUR = 10; // 10:00 AM
+const WINDOW_END_HOUR = 18; // 18:00 (6:00 PM)
 const WINDOW_END_MINUTE = 0;
-const WINDOW_MINUTES = 480;     // 8 hours = 480 min
+const WINDOW_MINUTES = 480; // 8 hours = 480 min
 
 @Injectable()
 export class TimingAiService {
@@ -13,7 +13,9 @@ export class TimingAiService {
       process.env.MARKETING_TEST_BYPASS_SEND_WINDOW === 'true' &&
       process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true'
     ) {
-      this.logger.log(`[MKT_WINDOW_CHECK] getOptimalSendTime bypass → scheduling ${phone} for immediate send`);
+      this.logger.log(
+        `[MKT_WINDOW_CHECK] getOptimalSendTime bypass → scheduling ${phone} for immediate send`,
+      );
       return new Date();
     }
     const now = new Date();
@@ -22,12 +24,22 @@ export class TimingAiService {
     const candidate = new Date(now);
     candidate.setHours(WINDOW_START_HOUR, offsetMinutes % 60, 0, 0);
     // Adjust hours: WINDOW_START_HOUR + floor(offsetMinutes / 60)
-    candidate.setHours(WINDOW_START_HOUR + Math.floor(offsetMinutes / 60), offsetMinutes % 60, 0, 0);
+    candidate.setHours(
+      WINDOW_START_HOUR + Math.floor(offsetMinutes / 60),
+      offsetMinutes % 60,
+      0,
+      0,
+    );
 
     if (candidate <= now) {
       // Schedule for tomorrow at 10am + same random offset
       candidate.setDate(candidate.getDate() + 1);
-      candidate.setHours(WINDOW_START_HOUR + Math.floor(offsetMinutes / 60), offsetMinutes % 60, 0, 0);
+      candidate.setHours(
+        WINDOW_START_HOUR + Math.floor(offsetMinutes / 60),
+        offsetMinutes % 60,
+        0,
+        0,
+      );
     }
 
     return candidate;
@@ -38,7 +50,9 @@ export class TimingAiService {
       process.env.MARKETING_TEST_BYPASS_SEND_WINDOW === 'true' &&
       process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true'
     ) {
-      this.logger.log('[MKT_WINDOW_CHECK] bypass=true → returning true (TEST_ONLY+BYPASS mode)');
+      this.logger.log(
+        '[MKT_WINDOW_CHECK] bypass=true → returning true (TEST_ONLY+BYPASS mode)',
+      );
       return true;
     }
     const now = new Date();
@@ -48,7 +62,9 @@ export class TimingAiService {
     const startMinutes = WINDOW_START_HOUR * 60;
     const endMinutes = WINDOW_END_HOUR * 60 + WINDOW_END_MINUTE;
     const result = totalMinutes >= startMinutes && totalMinutes <= endMinutes;
-    this.logger.log(`[MKT_WINDOW_CHECK] bypass=false time=${hours}:${String(minutes).padStart(2, '0')} window=10:00–18:00 result=${result}`);
+    this.logger.log(
+      `[MKT_WINDOW_CHECK] bypass=false time=${hours}:${String(minutes).padStart(2, '0')} window=10:00–18:00 result=${result}`,
+    );
     return result;
   }
 

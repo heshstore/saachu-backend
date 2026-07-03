@@ -5,41 +5,64 @@ import { Department } from './entities/department.entity';
 
 @Injectable()
 export class DepartmentsService {
+  private _cache: { data: Department[]; ts: number } | null = null;
+  private _allCache: { data: Department[]; ts: number } | null = null;
+
   constructor(
     @InjectRepository(Department)
     private readonly repo: Repository<Department>,
   ) {}
 
-  findAll(includeInactive = false): Promise<Department[]> {
+  async findAll(includeInactive = false): Promise<Department[]> {
     if (includeInactive) {
-      return this.repo.find({ order: { name: 'ASC' } });
+      if (this._allCache && Date.now() - this._allCache.ts < 600_000)
+        return this._allCache.data;
+      const data = await this.repo.find({ order: { name: 'ASC' } });
+      this._allCache = { data, ts: Date.now() };
+      return data;
     }
-    return this.repo.find({ where: { active: true }, order: { name: 'ASC' } });
+    if (this._cache && Date.now() - this._cache.ts < 600_000)
+      return this._cache.data;
+    const data = await this.repo.find({
+      where: { active: true },
+      order: { name: 'ASC' },
+    });
+    this._cache = { data, ts: Date.now() };
+    return data;
   }
 
   async create(data: any): Promise<Department> {
     const dept = this.repo.create({
-      name:             data.name,
-      code:             data.code,
-      dailyCapacity:    data.dailyCapacity    ?? null,
-      capacityUnit:     data.capacityUnit     ?? null,
+      name: data.name,
+      code: data.code,
+      dailyCapacity: data.dailyCapacity ?? null,
+      capacityUnit: data.capacityUnit ?? null,
       manpowerCapacity: data.manpowerCapacity ?? null,
-      active:           data.active !== false,
+      active: data.active !== false,
     });
-    return this.repo.save(dept);
+    const saved = await this.repo.save(dept);
+    this._cache = null;
+    this._allCache = null;
+    return saved;
   }
 
   async update(id: number, data: any): Promise<Department> {
     const dept = await this.repo.findOneBy({ id });
     if (!dept) throw new NotFoundException(`Department ${id} not found`);
 
-    if (data.name             !== undefined) dept.name             = data.name;
-    if (data.code             !== undefined) dept.code             = data.code;
-    if (data.dailyCapacity    !== undefined) dept.dailyCapacity    = data.dailyCapacity    ?? null;
-    if (data.capacityUnit     !== undefined) dept.capacityUnit     = data.capacityUnit     ?? null;
-    if (data.manpowerCapacity !== undefined) dept.manpowerCapacity = data.manpowerCapacity ?? null;
-    if (data.active           !== undefined) dept.active           = Boolean(data.active);
+    if (data.name !== undefined) dept.name = data.name;
+    if (data.code !== undefined) dept.code = data.code;
+    if (data.dailyCapacity !== undefined)
+      dept.dailyCapacity = data.dailyCapacity ?? null;
+    if (data.capacityUnit !== undefined)
+      dept.capacityUnit = data.capacityUnit ?? null;
+    if (data.manpowerCapacity !== undefined)
+      dept.manpowerCapacity = data.manpowerCapacity ?? null;
+    if (data.active !== undefined) dept.active = Boolean(data.active);
 
-    return this.repo.save(dept);
+    const saved = await this.repo.save(dept);
+    this._cache = null;
+    this._allCache = null;
+    return saved;
   }
 }

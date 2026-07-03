@@ -1,5 +1,7 @@
 import {
-  Injectable, NotFoundException, BadRequestException,
+  Injectable,
+  NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, EntityManager } from 'typeorm';
@@ -9,7 +11,10 @@ import { Order, OrderStatus } from '../orders/entities/order.entity';
 import { OrderItem } from '../orders/entities/order-item.entity';
 import { InventoryTransaction } from '../inventory/entities/inventory-transaction.entity';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { DISPATCH_ACTOR_JOINS, DISPATCH_ACTOR_SELECT } from '../shared/ownership.util';
+import {
+  DISPATCH_ACTOR_JOINS,
+  DISPATCH_ACTOR_SELECT,
+} from '../shared/ownership.util';
 
 const EPS = 1e-6;
 
@@ -27,13 +32,18 @@ export class DispatchOrdersService {
 
   private async nextDispatchNumber(m?: EntityManager): Promise<string> {
     const q = m?.query.bind(m) ?? this.dataSource.query.bind(this.dataSource);
-    const rows: any[] = await q(`SELECT nextval('dispatch_order_number_seq')::bigint AS n`);
+    const rows: any[] = await q(
+      `SELECT nextval('dispatch_order_number_seq')::bigint AS n`,
+    );
     const n = String(rows[0].n).padStart(6, '0');
     const y = new Date().getFullYear();
     return `DO-${y}-${n}`;
   }
 
-  private async resolveItemId(sku: string | null, m?: EntityManager): Promise<number | null> {
+  private async resolveItemId(
+    sku: string | null,
+    m?: EntityManager,
+  ): Promise<number | null> {
     if (!sku?.trim()) return null;
     const q = m?.query.bind(m) ?? this.dataSource.query.bind(this.dataSource);
     const rows: any[] = await q(
@@ -59,7 +69,10 @@ export class DispatchOrdersService {
     return Number(rows[0]?.q) || 0;
   }
 
-  private async stockByWarehouse(itemId: number, m?: EntityManager): Promise<{ warehouseId: number; qty: number }[]> {
+  private async stockByWarehouse(
+    itemId: number,
+    m?: EntityManager,
+  ): Promise<{ warehouseId: number; qty: number }[]> {
     const q = m?.query.bind(m) ?? this.dataSource.query.bind(this.dataSource);
     const rows: any[] = await q(
       `SELECT t.warehouse_id AS "warehouseId",
@@ -70,11 +83,17 @@ export class DispatchOrdersService {
        ORDER BY qty DESC, t.warehouse_id ASC`,
       [itemId, EPS],
     );
-    return rows.map((r) => ({ warehouseId: Number(r.warehouseId), qty: Number(r.qty) }));
+    return rows.map((r) => ({
+      warehouseId: Number(r.warehouseId),
+      qty: Number(r.qty),
+    }));
   }
 
   /** Already dispatched (confirmed) per order_item */
-  private async dispatchedTotalsByOrderItem(orderId: number, m?: EntityManager): Promise<Map<number, number>> {
+  private async dispatchedTotalsByOrderItem(
+    orderId: number,
+    m?: EntityManager,
+  ): Promise<Map<number, number>> {
     const q = m?.query.bind(m) ?? this.dataSource.query.bind(this.dataSource);
     const rows: any[] = await q(
       `SELECT doi.order_item_id AS oid, SUM(doi.dispatched_qty)::float AS s
@@ -89,7 +108,10 @@ export class DispatchOrdersService {
     return map;
   }
 
-  private async deliveredTotalsByOrderItem(orderId: number, m?: EntityManager): Promise<Map<number, number>> {
+  private async deliveredTotalsByOrderItem(
+    orderId: number,
+    m?: EntityManager,
+  ): Promise<Map<number, number>> {
     const q = m?.query.bind(m) ?? this.dataSource.query.bind(this.dataSource);
     const rows: any[] = await q(
       `SELECT doi.order_item_id AS oid, SUM(doi.delivered_qty)::float AS s
@@ -104,7 +126,10 @@ export class DispatchOrdersService {
     return map;
   }
 
-  private async syncOrderStatusFromDispatch(orderId: number, m: EntityManager): Promise<void> {
+  private async syncOrderStatusFromDispatch(
+    orderId: number,
+    m: EntityManager,
+  ): Promise<void> {
     const order = await m.findOne(Order, { where: { id: orderId } });
     if (!order) return;
     const allowed = new Set<string>([
@@ -139,7 +164,7 @@ export class DispatchOrdersService {
       if (dq + EPS < oq) allDisp = false;
     }
 
-    let next = order.status as OrderStatus;
+    let next = order.status;
     if (anyDel && allDel) next = OrderStatus.COMPLETED;
     else if (anyDel) next = OrderStatus.PARTIAL_DELIVERED;
     else if (anyDisp && allDisp) next = OrderStatus.DISPATCHED;
@@ -178,7 +203,8 @@ export class DispatchOrdersService {
        WHERE d.id = $1`,
       [id],
     );
-    if (!heads.length) throw new NotFoundException(`Dispatch order ${id} not found`);
+    if (!heads.length)
+      throw new NotFoundException(`Dispatch order ${id} not found`);
     const head = heads[0];
 
     const lines: any[] = await this.dataSource.query(
@@ -199,12 +225,15 @@ export class DispatchOrdersService {
     return { ...head, lines };
   }
 
-  async createDraftFromOrder(orderId: number, userId?: number): Promise<DispatchOrder> {
+  async createDraftFromOrder(
+    orderId: number,
+    userId?: number,
+  ): Promise<DispatchOrder> {
     return this.dataSource.transaction(async (m) => {
       const order = await m.findOne(Order, {
         where: { id: orderId },
         relations: ['items'],
-        lock:    { mode: 'pessimistic_write' },
+        lock: { mode: 'pessimistic_write' },
       });
       if (!order) throw new NotFoundException(`Order ${orderId} not found`);
 
@@ -215,7 +244,7 @@ export class DispatchOrdersService {
         OrderStatus.DISPATCHED,
         OrderStatus.PARTIAL_DELIVERED,
       ]);
-      if (!ok.has(order.status as OrderStatus)) {
+      if (!ok.has(order.status)) {
         throw new BadRequestException(
           `Order must be ready for fulfillment (current: ${order.status})`,
         );
@@ -235,19 +264,23 @@ export class DispatchOrdersService {
             `Cannot create dispatch line: no catalog item for SKU "${oi.sku ?? ''}"`,
           );
         }
-        lines.push(m.create(DispatchOrderItem, {
-          orderItemId:   oid,
-          itemId,
-          orderedQty:    remaining,
-          pendingQty:    remaining,
-          dispatchedQty: 0,
-          packedQty:     0,
-          deliveredQty:  0,
-        }));
+        lines.push(
+          m.create(DispatchOrderItem, {
+            orderItemId: oid,
+            itemId,
+            orderedQty: remaining,
+            pendingQty: remaining,
+            dispatchedQty: 0,
+            packedQty: 0,
+            deliveredQty: 0,
+          }),
+        );
       }
 
       if (!lines.length) {
-        throw new BadRequestException('Nothing left to dispatch for this order');
+        throw new BadRequestException(
+          'Nothing left to dispatch for this order',
+        );
       }
 
       const num = await this.nextDispatchNumber(m);
@@ -255,14 +288,18 @@ export class DispatchOrdersService {
         dispatchNumber: num,
         orderId,
         customerId: order.customer_id ?? null,
-        status:     'DRAFT',
-        createdBy:  userId ?? null,
+        status: 'DRAFT',
+        createdBy: userId ?? null,
       });
       const saved = await m.save(head);
       for (const ln of lines) ln.dispatchOrderId = saved.id;
       await m.save(lines);
-      const r = await m.findOne(DispatchOrder, { where: { id: saved.id }, relations: ['lines'] });
-      if (!r) throw new NotFoundException('Dispatch order not found after create');
+      const r = await m.findOne(DispatchOrder, {
+        where: { id: saved.id },
+        relations: ['lines'],
+      });
+      if (!r)
+        throw new NotFoundException('Dispatch order not found after create');
       return r;
     });
   }
@@ -282,16 +319,29 @@ export class DispatchOrdersService {
   ): Promise<DispatchOrder> {
     const d = await this.dispatchOrderRepo.findOne({ where: { id } });
     if (!d) throw new NotFoundException(`Dispatch order ${id} not found`);
-    if (['DISPATCHED', 'PARTIAL_DISPATCHED', 'DELIVERED', 'PARTIAL_DELIVERED', 'CANCELLED'].includes(d.status)) {
+    if (
+      [
+        'DISPATCHED',
+        'PARTIAL_DISPATCHED',
+        'DELIVERED',
+        'PARTIAL_DELIVERED',
+        'CANCELLED',
+      ].includes(d.status)
+    ) {
       throw new BadRequestException(`Cannot edit header in status ${d.status}`);
     }
     if (body.remarks !== undefined) d.remarks = body.remarks;
-    if (body.transporterName !== undefined) d.transporterName = body.transporterName;
+    if (body.transporterName !== undefined)
+      d.transporterName = body.transporterName;
     if (body.lrNumber !== undefined) d.lrNumber = body.lrNumber;
-    if (body.trackingNumber !== undefined) d.trackingNumber = body.trackingNumber;
-    if (body.status === 'READY' || body.status === 'DRAFT') d.status = body.status;
-    if (body.packingCost !== undefined) d.packingCost = Number(body.packingCost) || 0;
-    if (body.logisticsCost !== undefined) d.logisticsCost = Number(body.logisticsCost) || 0;
+    if (body.trackingNumber !== undefined)
+      d.trackingNumber = body.trackingNumber;
+    if (body.status === 'READY' || body.status === 'DRAFT')
+      d.status = body.status;
+    if (body.packingCost !== undefined)
+      d.packingCost = Number(body.packingCost) || 0;
+    if (body.logisticsCost !== undefined)
+      d.logisticsCost = Number(body.logisticsCost) || 0;
     if (body.miscCost !== undefined) d.miscCost = Number(body.miscCost) || 0;
     return this.dispatchOrderRepo.save(d);
   }
@@ -305,16 +355,29 @@ export class DispatchOrdersService {
     return this.dataSource.transaction(async (m) => {
       const line = await m.findOne(DispatchOrderItem, {
         where: { id: lineId, dispatchOrderId },
-        lock:  { mode: 'pessimistic_write' },
+        lock: { mode: 'pessimistic_write' },
       });
       if (!line) throw new NotFoundException('Dispatch line not found');
 
-      const head = await m.findOne(DispatchOrder, { where: { id: dispatchOrderId } });
-      if (!head || ['CANCELLED', 'DISPATCHED', 'PARTIAL_DISPATCHED', 'DELIVERED', 'PARTIAL_DELIVERED'].includes(head.status)) {
+      const head = await m.findOne(DispatchOrder, {
+        where: { id: dispatchOrderId },
+      });
+      if (
+        !head ||
+        [
+          'CANCELLED',
+          'DISPATCHED',
+          'PARTIAL_DISPATCHED',
+          'DELIVERED',
+          'PARTIAL_DELIVERED',
+        ].includes(head.status)
+      ) {
         throw new BadRequestException('Cannot pack in current dispatch status');
       }
 
-      const oi = await m.findOne(OrderItem, { where: { id: line.orderItemId } });
+      const oi = await m.findOne(OrderItem, {
+        where: { id: line.orderItemId },
+      });
       if (!oi) throw new NotFoundException('Order item missing');
 
       const orderQty = Number(oi.qty) || 0;
@@ -326,16 +389,21 @@ export class DispatchOrdersService {
         [dispatchOrderId, lineId],
       );
       const otherThisDoc = Number(excl[0]?.s) || 0;
-      const priorOther = (totals.get(line.orderItemId) ?? 0) - otherThisDoc - line.dispatchedQty;
+      const priorOther =
+        (totals.get(line.orderItemId) ?? 0) - otherThisDoc - line.dispatchedQty;
       const maxPack = Math.max(0, orderQty - priorOther);
       const pq = Number(body.packedQty);
       if (pq < 0 || pq > maxPack + EPS) {
-        throw new BadRequestException(`packedQty must be between 0 and ${maxPack} for this line`);
+        throw new BadRequestException(
+          `packedQty must be between 0 and ${maxPack} for this line`,
+        );
       }
 
       line.packedQty = pq;
-      if (body.packingRemarks !== undefined) line.packingRemarks = body.packingRemarks ?? null;
-      if (body.cartonCount !== undefined) line.cartonCount = body.cartonCount ?? null;
+      if (body.packingRemarks !== undefined)
+        line.packingRemarks = body.packingRemarks ?? null;
+      if (body.cartonCount !== undefined)
+        line.cartonCount = body.cartonCount ?? null;
       if (userId && pq > EPS && !head.packedBy) {
         head.packedBy = userId;
         head.packedAt = new Date();
@@ -345,31 +413,53 @@ export class DispatchOrdersService {
     });
   }
 
-  async markInTransit(id: number, body?: { transporterName?: string; lrNumber?: string; trackingNumber?: string }): Promise<DispatchOrder> {
+  async markInTransit(
+    id: number,
+    body?: {
+      transporterName?: string;
+      lrNumber?: string;
+      trackingNumber?: string;
+    },
+  ): Promise<DispatchOrder> {
     return this.dataSource.transaction(async (m) => {
-      const d = await m.findOne(DispatchOrder, { where: { id }, lock: { mode: 'pessimistic_write' } });
+      const d = await m.findOne(DispatchOrder, {
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      });
       if (!d) throw new NotFoundException(`Dispatch order ${id} not found`);
       if (!['DISPATCHED', 'PARTIAL_DISPATCHED'].includes(d.status)) {
-        throw new BadRequestException('Dispatch must be confirmed before marking in transit');
+        throw new BadRequestException(
+          'Dispatch must be confirmed before marking in transit',
+        );
       }
       d.inTransitAt = new Date();
-      if (body?.transporterName !== undefined) d.transporterName = body.transporterName;
+      if (body?.transporterName !== undefined)
+        d.transporterName = body.transporterName;
       if (body?.lrNumber !== undefined) d.lrNumber = body.lrNumber;
-      if (body?.trackingNumber !== undefined) d.trackingNumber = body.trackingNumber;
+      if (body?.trackingNumber !== undefined)
+        d.trackingNumber = body.trackingNumber;
       return m.save(d);
     });
   }
 
-  async confirmDispatch(dispatchOrderId: number, userId?: number): Promise<DispatchOrder> {
+  async confirmDispatch(
+    dispatchOrderId: number,
+    userId?: number,
+  ): Promise<DispatchOrder> {
     return this.dataSource.transaction(async (m) => {
       const head = await m.findOne(DispatchOrder, {
         where: { id: dispatchOrderId },
         relations: ['lines'],
-        lock:    { mode: 'pessimistic_write' },
+        lock: { mode: 'pessimistic_write' },
       });
-      if (!head) throw new NotFoundException(`Dispatch order ${dispatchOrderId} not found`);
+      if (!head)
+        throw new NotFoundException(
+          `Dispatch order ${dispatchOrderId} not found`,
+        );
       if (!['DRAFT', 'READY'].includes(head.status)) {
-        throw new BadRequestException(`Cannot confirm dispatch from status ${head.status}`);
+        throw new BadRequestException(
+          `Cannot confirm dispatch from status ${head.status}`,
+        );
       }
 
       const totals = await this.dispatchedTotalsByOrderItem(head.orderId, m);
@@ -380,12 +470,16 @@ export class DispatchOrdersService {
         if (shipQty <= EPS) continue;
         anyLine = true;
 
-        const oi = await m.findOne(OrderItem, { where: { id: line.orderItemId } });
+        const oi = await m.findOne(OrderItem, {
+          where: { id: line.orderItemId },
+        });
         if (!oi) throw new BadRequestException('Order item missing');
         const orderQty = Number(oi.qty) || 0;
-        const prior = (totals.get(line.orderItemId) ?? 0);
+        const prior = totals.get(line.orderItemId) ?? 0;
         if (prior + shipQty > orderQty + EPS) {
-          throw new BadRequestException(`Dispatch exceeds ordered qty for line ${line.orderItemId}`);
+          throw new BadRequestException(
+            `Dispatch exceeds ordered qty for line ${line.orderItemId}`,
+          );
         }
 
         const fg = await this.getFgStock(line.itemId, m);
@@ -401,23 +495,27 @@ export class DispatchOrdersService {
           if (remaining <= EPS) break;
           const take = Math.min(remaining, b.qty);
           if (take <= EPS) continue;
-          await m.save(m.create(InventoryTransaction, {
-            itemId:          line.itemId,
-            warehouseId:     b.warehouseId,
-            transactionType: 'SALES_DISPATCH',
-            direction:       'OUT',
-            qty:             take,
-            unit:            'PCS',
-            rate:            null,
-            referenceType:   'DISPATCH_ORDER',
-            referenceId:     head.id,
-            notes:           `Order item ${line.orderItemId}; dispatch ${head.dispatchNumber}`,
-            createdBy:       userId ?? null,
-          }));
+          await m.save(
+            m.create(InventoryTransaction, {
+              itemId: line.itemId,
+              warehouseId: b.warehouseId,
+              transactionType: 'SALES_DISPATCH',
+              direction: 'OUT',
+              qty: take,
+              unit: 'PCS',
+              rate: null,
+              referenceType: 'DISPATCH_ORDER',
+              referenceId: head.id,
+              notes: `Order item ${line.orderItemId}; dispatch ${head.dispatchNumber}`,
+              createdBy: userId ?? null,
+            }),
+          );
           remaining -= take;
         }
         if (remaining > EPS) {
-          throw new BadRequestException(`Stock allocation failed for item ${line.itemId}`);
+          throw new BadRequestException(
+            `Stock allocation failed for item ${line.itemId}`,
+          );
         }
 
         line.dispatchedQty = shipQty;
@@ -427,7 +525,9 @@ export class DispatchOrdersService {
       }
 
       if (!anyLine) {
-        throw new BadRequestException('Set packed quantities before confirming dispatch');
+        throw new BadRequestException(
+          'Set packed quantities before confirming dispatch',
+        );
       }
 
       head.dispatchDate = new Date();
@@ -466,16 +566,30 @@ export class DispatchOrdersService {
       const head = await m.findOne(DispatchOrder, {
         where: { id: dispatchOrderId },
         relations: ['lines'],
-        lock:    { mode: 'pessimistic_write' },
+        lock: { mode: 'pessimistic_write' },
       });
-      if (!head) throw new NotFoundException(`Dispatch order ${dispatchOrderId} not found`);
+      if (!head)
+        throw new NotFoundException(
+          `Dispatch order ${dispatchOrderId} not found`,
+        );
       if (head.status === 'DELIVERED') return head;
 
-      if (!['DISPATCHED', 'PARTIAL_DISPATCHED', 'PARTIAL_DELIVERED', 'DELIVERED'].includes(head.status)) {
+      if (
+        ![
+          'DISPATCHED',
+          'PARTIAL_DISPATCHED',
+          'PARTIAL_DELIVERED',
+          'DELIVERED',
+        ].includes(head.status)
+      ) {
         if (head.status === 'DRAFT' || head.status === 'READY') {
-          throw new BadRequestException('Confirm dispatch before recording delivery');
+          throw new BadRequestException(
+            'Confirm dispatch before recording delivery',
+          );
         }
-        throw new BadRequestException(`Cannot record delivery in status ${head.status}`);
+        throw new BadRequestException(
+          `Cannot record delivery in status ${head.status}`,
+        );
       }
 
       for (const u of body.lines ?? []) {
@@ -483,7 +597,9 @@ export class DispatchOrdersService {
         if (!line) throw new BadRequestException(`Unknown line ${u.id}`);
         const dq = Number(u.deliveredQty);
         if (dq < 0 || dq > line.dispatchedQty + EPS) {
-          throw new BadRequestException(`deliveredQty invalid for line ${u.id}`);
+          throw new BadRequestException(
+            `deliveredQty invalid for line ${u.id}`,
+          );
         }
         line.deliveredQty = dq;
         await m.save(line);
@@ -506,7 +622,9 @@ export class DispatchOrdersService {
     const d = await this.dispatchOrderRepo.findOne({ where: { id } });
     if (!d) throw new NotFoundException(`Dispatch order ${id} not found`);
     if (!['DRAFT', 'READY'].includes(d.status)) {
-      throw new BadRequestException('Only draft dispatch orders can be cancelled');
+      throw new BadRequestException(
+        'Only draft dispatch orders can be cancelled',
+      );
     }
     d.status = 'CANCELLED';
     return this.dispatchOrderRepo.save(d);

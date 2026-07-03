@@ -33,28 +33,31 @@ export const HEALTH_MIN_SENDS_WINDOW = 20;
  *  not WhatsApp number health signals. Cold promos may take 3-5 days for a read. */
 export const HEALTH_THRESHOLDS = {
   minDeliveryRatePct: 60,
-  maxFailRatePct:     20,
-  maxBlockRatePct:    5,
+  maxFailRatePct: 20,
+  maxBlockRatePct: 5,
 } as const;
 
 /** Per-day health for consecutive-day streak counting (IST days). */
 export const PROMOTION_RULES = {
-  healthyDaysRequired:      3,
-  minSendsPerHealthyDay:    5,
-  dailyDeliveryRateMinPct:  50,
-  dailyFailRateMaxPct:      25,
+  healthyDaysRequired: 3,
+  minSendsPerHealthyDay: 5,
+  dailyDeliveryRateMinPct: 50,
+  dailyFailRateMaxPct: 25,
 } as const;
 
 /** Warning thresholds (7-day window) — audit only, never pause.
  *  Read/reply thresholds removed: cold-promo customers take 3-5 days to engage. */
 export const WARNING_THRESHOLDS = {
-  minSends:           20,
+  minSends: 20,
   lowDeliveryRatePct: 50,
-  highFailRatePct:    25,
+  highFailRatePct: 25,
 } as const;
 
 export function getReleaseAllowance(warmupLevel: number): number {
-  return (RELEASE_ALLOWANCE_BY_LEVEL as Record<number, number>)[warmupLevel] ?? RELEASE_ALLOWANCE_BY_LEVEL[1];
+  return (
+    (RELEASE_ALLOWANCE_BY_LEVEL as Record<number, number>)[warmupLevel] ??
+    RELEASE_ALLOWANCE_BY_LEVEL[1]
+  );
 }
 
 export function getMatureDailyCapacity(): number {

@@ -66,13 +66,13 @@ export class EngineHealthController {
   @Get('ai/queue-inspection')
   getQueueInspection(
     @Query('number_id') numberId: string,
-    @Query('offset')    offset?: string,
-    @Query('limit')     limit?: string,
+    @Query('offset') offset?: string,
+    @Query('limit') limit?: string,
   ) {
     return this.aiDashboard.getQueueInspection(
       numberId,
       offset ? parseInt(offset, 10) : 0,
-      limit  ? Math.min(parseInt(limit, 10), 50) : 10,
+      limit ? Math.min(parseInt(limit, 10), 50) : 10,
     );
   }
 
@@ -84,13 +84,14 @@ export class EngineHealthController {
    */
   @Post('ai/trigger')
   async triggerAutonomousRun() {
-    const numberToCampaign = await this.autonomousEngine._ensureDailyCampaigns();
-    const result           = await this.autonomousEngine._buildQueue(numberToCampaign);
+    const numberToCampaign =
+      await this.autonomousEngine._ensureDailyCampaigns();
+    const result = await this.autonomousEngine._buildQueue(numberToCampaign);
     return {
-      triggered:         true,
+      triggered: true,
       campaigns_created: numberToCampaign.size,
-      queued:            result.queued,
-      numbers:           result.numbers,
+      queued: result.queued,
+      numbers: result.numbers,
     };
   }
 
@@ -190,12 +191,16 @@ export class EngineHealthController {
   async reEnable(@Body('reason') reason?: string) {
     const currentState = process.env.WHATSAPP_ENGINE_ENABLED;
     if (currentState !== 'false') {
-      return { success: false, message: 'Engine is already enabled — no action taken.' };
+      return {
+        success: false,
+        message: 'Engine is already enabled — no action taken.',
+      };
     }
     if (!reason || reason.trim().length < 5) {
       return {
         success: false,
-        message: 'Re-enable refused: provide a "reason" in the request body (min 5 chars) explaining the investigation outcome.',
+        message:
+          'Re-enable refused: provide a "reason" in the request body (min 5 chars) explaining the investigation outcome.',
       };
     }
 

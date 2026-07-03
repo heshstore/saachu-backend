@@ -10,26 +10,26 @@ import {
 import { OrderItem } from './order-item.entity';
 
 export enum OrderStatus {
-  DRAFT               = 'DRAFT',
-  GENERATED           = 'GENERATED',
-  PENDING_APPROVAL    = 'PENDING_APPROVAL',
-  APPROVED            = 'APPROVED',
-  REJECTED            = 'REJECTED',
-  IN_PRODUCTION       = 'IN_PRODUCTION',
-  READY               = 'READY',
+  DRAFT = 'DRAFT',
+  GENERATED = 'GENERATED',
+  PENDING_APPROVAL = 'PENDING_APPROVAL',
+  APPROVED = 'APPROVED',
+  REJECTED = 'REJECTED',
+  IN_PRODUCTION = 'IN_PRODUCTION',
+  READY = 'READY',
   // Keep for backward compatibility with existing DB rows written before the rename
-  READY_FOR_DISPATCH  = 'READY_FOR_DISPATCH',
-  PARTIAL_DISPATCHED  = 'PARTIAL_DISPATCHED',
-  DISPATCHED          = 'DISPATCHED',
-  PARTIAL_DELIVERED   = 'PARTIAL_DELIVERED',
-  COMPLETED           = 'COMPLETED',
-  CANCELLED           = 'CANCELLED',
+  READY_FOR_DISPATCH = 'READY_FOR_DISPATCH',
+  PARTIAL_DISPATCHED = 'PARTIAL_DISPATCHED',
+  DISPATCHED = 'DISPATCHED',
+  PARTIAL_DELIVERED = 'PARTIAL_DELIVERED',
+  COMPLETED = 'COMPLETED',
+  CANCELLED = 'CANCELLED',
 }
 
-@Index('idx_order_customer',    ['customer_id'])
-@Index('idx_order_status',      ['status'])
-@Index('idx_order_status_id',   ['status', 'id'])   // covers: WHERE status=? ORDER BY id DESC LIMIT n
-@Index('idx_order_created_at',  ['created_at'])     // covers: date-range filters in findAll
+@Index('idx_order_customer', ['customer_id'])
+@Index('idx_order_status', ['status'])
+@Index('idx_order_status_id', ['status', 'id']) // covers: WHERE status=? ORDER BY id DESC LIMIT n
+@Index('idx_order_created_at', ['created_at']) // covers: date-range filters in findAll
 @Entity('orders')
 export class Order {
   @PrimaryGeneratedColumn()
@@ -103,7 +103,7 @@ export class Order {
   process_without_advance: boolean;
 
   @Column({ type: 'text', nullable: true })
-  approval_remarks: string;   // salesperson's text notes — NOT overwritten on reject/approve
+  approval_remarks: string; // salesperson's text notes — NOT overwritten on reject/approve
 
   // ── Approval — manager data ────────────────────────────────────────────────
   @Column({ name: 'approved_by_id', nullable: true })
@@ -113,7 +113,7 @@ export class Order {
   approved_at: Date;
 
   @Column({ type: 'text', nullable: true })
-  rejection_reason: string;   // manager's rejection feedback — separate from approval_remarks
+  rejection_reason: string; // manager's rejection feedback — separate from approval_remarks
 
   // ── Payment tracking — kept for PaymentService sync ─────────────────────────
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
@@ -121,6 +121,22 @@ export class Order {
 
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   pending_amount: number;
+
+  // ── Dispatch / Delivery ─────────────────────────────────────────────────────
+  @Column({ nullable: true })
+  booking_at: string;
+
+  @Column({ nullable: true })
+  goods_sent_by: string;
+
+  @Column({ nullable: true })
+  transport_payment_by: string;
+
+  @Column({ type: 'text', nullable: true })
+  delivery_instructions: string;
+
+  @Column({ nullable: true })
+  delivery_type: string;
 
   // ── Misc ────────────────────────────────────────────────────────────────────
   @Column({ nullable: true })
@@ -145,6 +161,9 @@ export class Order {
   @UpdateDateColumn({ nullable: true })
   updated_at: Date;
 
-  @OneToMany(() => OrderItem, (item) => item.order, { cascade: true, eager: true })
+  @OneToMany(() => OrderItem, (item) => item.order, {
+    cascade: true,
+    eager: true,
+  })
   items: OrderItem[];
 }

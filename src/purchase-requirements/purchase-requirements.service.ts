@@ -1,10 +1,15 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
 import { PurchaseRequirement } from './entities/purchase-requirement.entity';
 
-const VALID_STATUSES   = ['PENDING', 'APPROVED', 'ORDERED', 'CANCELLED'];
+const VALID_STATUSES = ['PENDING', 'APPROVED', 'ORDERED', 'CANCELLED'];
 const VALID_PRIORITIES = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'];
 
 @Injectable()
@@ -39,7 +44,9 @@ export class PurchaseRequirementsService {
    * so TRADING/SERVICE items are automatically skipped.
    */
   async generateForOrder(orderId: number): Promise<void> {
-    this.logger.log(`[PurchaseReq] Generating requirements for order ${orderId}…`);
+    this.logger.log(
+      `[PurchaseReq] Generating requirements for order ${orderId}…`,
+    );
 
     // Read the exploded material requirements for this order
     const materialReqs: any[] = await this.dataSource.query(
@@ -62,7 +69,9 @@ export class PurchaseRequirementsService {
         `DELETE FROM purchase_requirements WHERE source_type = 'ORDER' AND source_id = $1`,
         [orderId],
       );
-      this.logger.debug(`[PurchaseReq] Order ${orderId}: no material requirements — cleared stale rows`);
+      this.logger.debug(
+        `[PurchaseReq] Order ${orderId}: no material requirements — cleared stale rows`,
+      );
       return;
     }
 
@@ -80,14 +89,14 @@ export class PurchaseRequirementsService {
     let skipped = 0;
 
     for (const req of materialReqs) {
-      const requiredQty  = Number(req.totalRequired);
+      const requiredQty = Number(req.totalRequired);
       const availableQty = stockMap.get(req.itemId) ?? 0;
-      const shortageQty  = requiredQty - availableQty;
+      const shortageQty = requiredQty - availableQty;
 
       if (shortageQty <= 0) {
         this.logger.debug(
           `[PurchaseReq] Order ${orderId}: item ${req.itemId} (${req.itemName}) — stock sufficient ` +
-          `(required ${requiredQty}, available ${availableQty}) — no requirement created`,
+            `(required ${requiredQty}, available ${availableQty}) — no requirement created`,
         );
         skipped++;
         continue;
@@ -96,18 +105,25 @@ export class PurchaseRequirementsService {
       const unit = req.stockUnit || req.unit || 'PCS';
 
       // Determine priority based on shortage severity
-      const shortage_pct = availableQty > 0 ? (shortageQty / requiredQty) * 100 : 100;
+      const shortage_pct =
+        availableQty > 0 ? (shortageQty / requiredQty) * 100 : 100;
       const priority =
-        shortage_pct >= 100 ? 'HIGH' :
-        shortage_pct >= 50  ? 'MEDIUM' :
-        'LOW';
+        shortage_pct >= 100 ? 'HIGH' : shortage_pct >= 50 ? 'MEDIUM' : 'LOW';
 
       await this.dataSource.query(
         `INSERT INTO purchase_requirements
            (item_id, warehouse_id, source_type, source_id, required_qty, available_qty,
             shortage_qty, unit, status, priority, notes, created_by, created_at, updated_at)
          VALUES ($1, NULL, 'ORDER', $2, $3, $4, $5, $6, 'PENDING', $7, NULL, NULL, now(), now())`,
-        [req.itemId, orderId, requiredQty, availableQty, shortageQty, unit, priority],
+        [
+          req.itemId,
+          orderId,
+          requiredQty,
+          availableQty,
+          shortageQty,
+          unit,
+          priority,
+        ],
       );
       created++;
     }
@@ -143,19 +159,33 @@ export class PurchaseRequirementsService {
 
   // ── Query API ─────────────────────────────────────────────────────────────────
 
-  async findAll(filters: {
-    status?:    string;
-    priority?:  string;
-    itemId?:    number;
-    sourceId?:  number;
-  } = {}): Promise<any[]> {
+  async findAll(
+    filters: {
+      status?: string;
+      priority?: string;
+      itemId?: number;
+      sourceId?: number;
+    } = {},
+  ): Promise<any[]> {
     const conditions: string[] = [];
-    const params: any[]         = [];
+    const params: any[] = [];
 
-    if (filters.status)   { params.push(filters.status);   conditions.push(`pr.status   = $${params.length}`); }
-    if (filters.priority) { params.push(filters.priority); conditions.push(`pr.priority = $${params.length}`); }
-    if (filters.itemId)   { params.push(filters.itemId);   conditions.push(`pr.item_id  = $${params.length}`); }
-    if (filters.sourceId) { params.push(filters.sourceId); conditions.push(`pr.source_id = $${params.length}`); }
+    if (filters.status) {
+      params.push(filters.status);
+      conditions.push(`pr.status   = $${params.length}`);
+    }
+    if (filters.priority) {
+      params.push(filters.priority);
+      conditions.push(`pr.priority = $${params.length}`);
+    }
+    if (filters.itemId) {
+      params.push(filters.itemId);
+      conditions.push(`pr.item_id  = $${params.length}`);
+    }
+    if (filters.sourceId) {
+      params.push(filters.sourceId);
+      conditions.push(`pr.source_id = $${params.length}`);
+    }
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
@@ -204,26 +234,35 @@ export class PurchaseRequirementsService {
        WHERE pr.id = $1`,
       [id],
     );
-    if (!rows.length) throw new NotFoundException(`Purchase requirement ${id} not found`);
+    if (!rows.length)
+      throw new NotFoundException(`Purchase requirement ${id} not found`);
     return rows[0];
   }
 
-  async update(id: number, data: {
-    status?:   string;
-    priority?: string;
-    notes?:    string;
-  }): Promise<any> {
+  async update(
+    id: number,
+    data: {
+      status?: string;
+      priority?: string;
+      notes?: string;
+    },
+  ): Promise<any> {
     const req = await this.repo.findOneBy({ id });
-    if (!req) throw new NotFoundException(`Purchase requirement ${id} not found`);
+    if (!req)
+      throw new NotFoundException(`Purchase requirement ${id} not found`);
 
-    if (data.status   !== undefined) {
+    if (data.status !== undefined) {
       if (!VALID_STATUSES.includes(data.status))
-        throw new BadRequestException(`Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}`);
+        throw new BadRequestException(
+          `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}`,
+        );
       req.status = data.status;
     }
     if (data.priority !== undefined) {
       if (!VALID_PRIORITIES.includes(data.priority))
-        throw new BadRequestException(`Invalid priority. Must be one of: ${VALID_PRIORITIES.join(', ')}`);
+        throw new BadRequestException(
+          `Invalid priority. Must be one of: ${VALID_PRIORITIES.join(', ')}`,
+        );
       req.priority = data.priority;
     }
     if (data.notes !== undefined) req.notes = data.notes ?? null;
@@ -236,7 +275,9 @@ export class PurchaseRequirementsService {
 
   async regenerateForOrder(orderId: number): Promise<{ message: string }> {
     await this.generateForOrder(orderId);
-    return { message: `Purchase requirements regenerated for order ${orderId}` };
+    return {
+      message: `Purchase requirements regenerated for order ${orderId}`,
+    };
   }
 
   // ── Summary stats ─────────────────────────────────────────────────────────────

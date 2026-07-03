@@ -2,7 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
-import { ProductionJob, ProductionJobStatus } from './entities/production-job.entity';
+import {
+  ProductionJob,
+  ProductionJobStatus,
+} from './entities/production-job.entity';
 import { ProductionAlert } from './entities/production-alert.entity';
 import { ProductionService } from './production.service';
 import { AuditService } from '../logs/audit.service';
@@ -10,7 +13,7 @@ import { User } from '../users/entities/user.entity';
 
 interface CommandEvent {
   phone: string;
-  body:  string; // already uppercased
+  body: string; // already uppercased
 }
 
 @Injectable()
@@ -44,9 +47,9 @@ export class ProductionCommandService {
       return;
     }
 
-    const parts   = body.split(' ');
+    const parts = body.split(' ');
     const command = parts[0];
-    const jobId   = Number(parts[1]);
+    const jobId = Number(parts[1]);
     if (!jobId || isNaN(jobId)) return;
 
     const job = await this.jobRepo.findOne({ where: { id: jobId } });
@@ -56,9 +59,12 @@ export class ProductionCommandService {
     }
 
     switch (command) {
-      case 'DONE':  return this.markDone(user, job);
-      case 'ISSUE': return this.markIssue(user, job);
-      case 'HOLD':  return this.markHold(user, job);
+      case 'DONE':
+        return this.markDone(user, job);
+      case 'ISSUE':
+        return this.markIssue(user, job);
+      case 'HOLD':
+        return this.markHold(user, job);
     }
   }
 
@@ -76,31 +82,33 @@ export class ProductionCommandService {
 
   private async markDone(user: User, job: ProductionJob): Promise<void> {
     if (job.assigned_to !== user.id) {
-      this.logger.warn(`DONE rejected: job ${job.id} not assigned to user ${user.id}`);
+      this.logger.warn(
+        `DONE rejected: job ${job.id} not assigned to user ${user.id}`,
+      );
       return;
     }
     await this.productionService.moveToNextStage(job.id);
     this.audit.log({
-      entity:    'production_job',
+      entity: 'production_job',
       entity_id: job.id,
-      action:    'WHATSAPP_DONE',
-      user_id:   user.id,
-      meta:      { from: job.current_stage },
+      action: 'WHATSAPP_DONE',
+      user_id: user.id,
+      meta: { from: job.current_stage },
     });
   }
 
   private async markIssue(user: User, job: ProductionJob): Promise<void> {
     await this.alertRepo.save({
-      job_id:      job.id,
-      alert_type:  'ISSUE',
-      notified_to: 1,             // escalate to admin — replace with role lookup if needed
+      job_id: job.id,
+      alert_type: 'ISSUE',
+      notified_to: 1, // escalate to admin — replace with role lookup if needed
     });
     this.audit.log({
-      entity:    'production_job',
+      entity: 'production_job',
       entity_id: job.id,
-      action:    'WHATSAPP_ISSUE',
-      user_id:   user.id,
-      meta:      { stage: job.current_stage, reported_by: user.id },
+      action: 'WHATSAPP_ISSUE',
+      user_id: user.id,
+      meta: { stage: job.current_stage, reported_by: user.id },
     });
   }
 
@@ -108,11 +116,11 @@ export class ProductionCommandService {
     job.status = ProductionJobStatus.PENDING;
     await this.jobRepo.save(job);
     this.audit.log({
-      entity:    'production_job',
+      entity: 'production_job',
       entity_id: job.id,
-      action:    'WHATSAPP_HOLD',
-      user_id:   user.id,
-      meta:      { stage: job.current_stage },
+      action: 'WHATSAPP_HOLD',
+      user_id: user.id,
+      meta: { stage: job.current_stage },
     });
   }
 }

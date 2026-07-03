@@ -1,4 +1,8 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Customer } from './entities/customer.entity';
@@ -26,10 +30,15 @@ export class CustomersService {
    * Skips phones already owned by this customer.
    * Throws if a phone belongs to a different customer.
    */
-  private async registerPhones(customerId: number, phones: (string | undefined | null)[]): Promise<void> {
+  private async registerPhones(
+    customerId: number,
+    phones: (string | undefined | null)[],
+  ): Promise<void> {
     for (const phone of phones) {
       if (!phone || phone === 'unknown') continue;
-      const existing = await this.customerPhoneRepo.findOne({ where: { phone } });
+      const existing = await this.customerPhoneRepo.findOne({
+        where: { phone },
+      });
       if (existing && existing.customer_id !== customerId) {
         throw new BadRequestException(
           `Phone ${phone} is already registered to another customer (id=${existing.customer_id})`,
@@ -56,11 +65,13 @@ export class CustomersService {
     newPhone: string | null | undefined,
   ): Promise<void> {
     if (newPhone === undefined) return; // field not in update payload
-    if (oldPhone === newPhone) return;  // no change
+    if (oldPhone === newPhone) return; // no change
 
     // Conflict check before opening the transaction to produce a clear error message.
     if (newPhone) {
-      const conflict = await this.customerPhoneRepo.findOne({ where: { phone: newPhone } });
+      const conflict = await this.customerPhoneRepo.findOne({
+        where: { phone: newPhone },
+      });
       if (conflict && conflict.customer_id !== customerId) {
         throw new BadRequestException(
           `Phone ${newPhone} is already registered to another customer (id=${conflict.customer_id})`,
@@ -105,7 +116,9 @@ export class CustomersService {
     const mobile1Raw = (data.mobile1 || '').trim();
     const mobile1 = mobile1Raw ? normalizePhone(mobile1Raw) : undefined;
     if (mobile1Raw && (!mobile1 || mobile1 === 'unknown')) {
-      throw new BadRequestException('Invalid mobile number — must be a valid 10-digit Indian number');
+      throw new BadRequestException(
+        'Invalid mobile number — must be a valid 10-digit Indian number',
+      );
     }
 
     const mobile2Raw = (data.mobile2 || '').trim();
@@ -143,7 +156,9 @@ export class CustomersService {
 
     // GST dedup (only when provided)
     if (gstNumber) {
-      const existingGst = await this.customerRepo.findOne({ where: { gstNumber } });
+      const existingGst = await this.customerRepo.findOne({
+        where: { gstNumber },
+      });
       if (existingGst) throw new BadRequestException('GST already exists');
     }
 
@@ -151,7 +166,8 @@ export class CustomersService {
     try {
       saved = await this.customerRepo.save(data);
     } catch (error) {
-      if (error.code === '23505') throw new BadRequestException('Duplicate entry not allowed');
+      if (error.code === '23505')
+        throw new BadRequestException('Duplicate entry not allowed');
       throw error;
     }
 
@@ -170,50 +186,49 @@ export class CustomersService {
 
     const em = this.customerRepo.manager;
 
-    const [
-      [origSalesman],
-      [latestOrder],
-      [latestTicket],
-      leadRows,
-    ] = await Promise.all([
-      em.query(
-        `SELECT l.assigned_to, u.name AS salesman_name, u.mobile AS salesman_phone, u.role AS salesman_role
+    const [[origSalesman], [latestOrder], [latestTicket], leadRows] =
+      await Promise.all([
+        em.query(
+          `SELECT l.assigned_to, u.name AS salesman_name, u.mobile AS salesman_phone, u.role AS salesman_role
          FROM leads l
          LEFT JOIN "user" u ON u.id = l.assigned_to
          WHERE l.customer_id = $1
          ORDER BY l.updated_at DESC NULLS LAST, l.id DESC
          LIMIT 1`,
-        [id],
-      ),
-      em.query(
-        `SELECT o.id, o.order_no, o.salesman_id, sm.name AS order_salesman_name
+          [id],
+        ),
+        em.query(
+          `SELECT o.id, o.order_no, o.salesman_id, sm.name AS order_salesman_name
          FROM orders o
          LEFT JOIN "user" sm ON sm.id = o.salesman_id
          WHERE o.customer_id = $1
          ORDER BY o.id DESC LIMIT 1`,
-        [id],
-      ),
-      em.query(
-        `SELECT t.id, t.ticket_number, t.assigned_to, tech.name AS service_owner_name
+          [id],
+        ),
+        em.query(
+          `SELECT t.id, t.ticket_number, t.assigned_to, tech.name AS service_owner_name
          FROM service_tickets t
          LEFT JOIN "user" tech ON tech.id = t.assigned_to
          WHERE t.customer_id = $1
          ORDER BY t.id DESC LIMIT 1`,
-        [id],
-      ),
-      em.query(
-        `SELECT id, lead_ref, status, stage, source, created_at
+          [id],
+        ),
+        em.query(
+          `SELECT id, lead_ref, status, stage, source, created_at
          FROM leads
          WHERE customer_id = $1 AND is_active = true
          ORDER BY created_at DESC LIMIT 20`,
-        [id],
-      ),
-    ]);
+          [id],
+        ),
+      ]);
 
     const totalLeads = leadRows.length;
-    const convertedLeads = leadRows.filter((l: any) => l.status === 'CONVERTED').length;
+    const convertedLeads = leadRows.filter(
+      (l: any) => l.status === 'CONVERTED',
+    ).length;
     const lostLeads = leadRows.filter((l: any) => l.status === 'LOST').length;
-    const conversionRate = totalLeads > 0 ? Math.round((convertedLeads / totalLeads) * 100) : 0;
+    const conversionRate =
+      totalLeads > 0 ? Math.round((convertedLeads / totalLeads) * 100) : 0;
 
     return {
       ...customer,
@@ -268,7 +283,13 @@ export class CustomersService {
 
   async getTimeline(id: number, limit = 50): Promise<any[]> {
     const em = this.customerRepo.manager;
-    const [leadsRows, quotationsRows, ordersRows, ticketsRows, receivablesRows] = await Promise.all([
+    const [
+      leadsRows,
+      quotationsRows,
+      ordersRows,
+      ticketsRows,
+      receivablesRows,
+    ] = await Promise.all([
       em.query(
         `SELECT id, 'lead' AS type, status, stage AS sub_status, source,
                 created_at AS event_date, NULL AS amount, NULL AS ref_no
@@ -306,8 +327,17 @@ export class CustomersService {
       ),
     ]);
 
-    const all = [...leadsRows, ...quotationsRows, ...ordersRows, ...ticketsRows, ...receivablesRows];
-    all.sort((a, b) => new Date(b.event_date).getTime() - new Date(a.event_date).getTime());
+    const all = [
+      ...leadsRows,
+      ...quotationsRows,
+      ...ordersRows,
+      ...ticketsRows,
+      ...receivablesRows,
+    ];
+    all.sort(
+      (a, b) =>
+        new Date(b.event_date).getTime() - new Date(a.event_date).getTime(),
+    );
     return all.slice(0, limit);
   }
 }

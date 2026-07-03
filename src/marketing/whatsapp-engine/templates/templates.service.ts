@@ -28,7 +28,10 @@ export class TemplatesService {
     return this.repo.save(this.repo.create(dto));
   }
 
-  async update(id: string, dto: Partial<MarketingTemplate>): Promise<MarketingTemplate> {
+  async update(
+    id: string,
+    dto: Partial<MarketingTemplate>,
+  ): Promise<MarketingTemplate> {
     await this.findOne(id);
     await this.repo.update(id, dto);
     return this.findOne(id);
@@ -41,7 +44,10 @@ export class TemplatesService {
 
   // Replace {{placeholder}} tokens; unknown tokens are left as-is
   interpolate(body: string, vars: Record<string, string>): string {
-    return body.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? `{{${key}}}`);
+    return body.replace(
+      /\{\{(\w+)\}\}/g,
+      (_, key: string) => vars[key] ?? `{{${key}}}`,
+    );
   }
 
   // Recompute performance_weight for each template based on reply rate from last 30 days.
@@ -65,9 +71,13 @@ export class TemplatesService {
       if (sent < 5) continue; // not enough data yet
       const replyRate = parseInt(row.replied, 10) / sent;
       const weight = Math.min(3.0, Math.max(0.1, 0.5 + replyRate * 5.0));
-      await this.repo.update(row.template_id, { performance_weight: Math.round(weight * 100) / 100 });
+      await this.repo.update(row.template_id, {
+        performance_weight: Math.round(weight * 100) / 100,
+      });
     }
 
-    this.logger.log(`[Templates] Updated performance weights for ${stats.length} template(s)`);
+    this.logger.log(
+      `[Templates] Updated performance weights for ${stats.length} template(s)`,
+    );
   }
 }

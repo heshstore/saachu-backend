@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { CrmWhatsAppModule } from '../crm-whatsapp/crm-whatsapp.module';
 import { TransactionalEmailModule } from '../email-transactional/transactional-email.module';
+import { ItemsModule } from '../items/items.module';
 
 import { OrdersService } from './orders.service';
 import { OrdersController } from './orders.controller';
@@ -28,15 +29,41 @@ import { ProductionCommandService } from './production-command.service';
 @Module({
   imports: [
     TypeOrmModule.forFeature([
-      Order, OrderItem, Payment, ProductionJob, ProductionAlert, ProductionEfficiency,
-      OrderMaterialRequirement, DepartmentWorkload,
-      Customer, User,
+      Order,
+      OrderItem,
+      Payment,
+      ProductionJob,
+      ProductionAlert,
+      ProductionEfficiency,
+      OrderMaterialRequirement,
+      DepartmentWorkload,
+      Customer,
+      User,
     ]),
     CrmWhatsAppModule,
     TransactionalEmailModule,
+    ItemsModule,
   ],
-  controllers: [OrdersController, ProductionController, PaymentsController, AccountsController],
-  providers: [OrdersService, PaymentService, ProductionService, ProductionWhatsappService, ProductionCommandService, OrderExplosionService],
-  exports: [OrdersService, PaymentService, ProductionService, ProductionWhatsappService, OrderExplosionService],
+  controllers: [
+    OrdersController,
+    ProductionController,
+    PaymentsController,
+    AccountsController,
+  ],
+  providers: [
+    OrdersService,
+    PaymentService,
+    ProductionService,
+    ProductionWhatsappService,
+    ProductionCommandService,
+    OrderExplosionService,
+  ],
+  exports: [
+    OrdersService,
+    PaymentService,
+    ProductionService,
+    ProductionWhatsappService,
+    OrderExplosionService,
+  ],
 })
 export class OrdersModule {}

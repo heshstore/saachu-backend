@@ -7,39 +7,45 @@ import {
 } from 'typeorm';
 
 export enum NotificationType {
-  ACTION     = 'ACTION',
-  REMINDER   = 'REMINDER',
-  INFO       = 'INFO',
+  ACTION = 'ACTION',
+  REMINDER = 'REMINDER',
+  INFO = 'INFO',
   MOTIVATION = 'MOTIVATION',
 }
 
 export enum NotificationPriority {
   CRITICAL = 'CRITICAL',
-  HIGH     = 'HIGH',
-  MEDIUM   = 'MEDIUM',
-  LOW      = 'LOW',
+  HIGH = 'HIGH',
+  MEDIUM = 'MEDIUM',
+  LOW = 'LOW',
 }
 
 export enum NotificationCategory {
-  CRM        = 'CRM',
+  CRM = 'CRM',
   PRODUCTION = 'PRODUCTION',
-  ACCOUNTS   = 'ACCOUNTS',
-  DISPATCH   = 'DISPATCH',
-  SYSTEM     = 'SYSTEM',
+  ACCOUNTS = 'ACCOUNTS',
+  DISPATCH = 'DISPATCH',
+  SYSTEM = 'SYSTEM',
 }
 
 export const PRIORITY_RANK: Record<NotificationPriority, number> = {
   [NotificationPriority.CRITICAL]: 4,
-  [NotificationPriority.HIGH]:     3,
-  [NotificationPriority.MEDIUM]:   2,
-  [NotificationPriority.LOW]:      1,
+  [NotificationPriority.HIGH]: 3,
+  [NotificationPriority.MEDIUM]: 2,
+  [NotificationPriority.LOW]: 1,
 };
 
 @Entity('notifications')
-@Index('idx_notif_user_read',   ['user_id', 'is_read'])
+@Index('idx_notif_user_read', ['user_id', 'is_read'])
 @Index('idx_notif_user_active', ['user_id', 'is_active'])
-@Index('idx_notif_created',     ['created_at'])
-@Index('idx_notif_dedup', ['user_id', 'is_active', 'entity_type', 'entity_id', 'type'])
+@Index('idx_notif_created', ['created_at'])
+@Index('idx_notif_dedup', [
+  'user_id',
+  'is_active',
+  'entity_type',
+  'entity_id',
+  'type',
+])
 export class Notification {
   @PrimaryGeneratedColumn('uuid')
   id: string;

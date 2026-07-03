@@ -16,7 +16,9 @@ export class ValidateController {
   }
 
   @Post('seed-test-contacts')
-  seedTestContacts(@Body() body: { contacts: { phone: string; name?: string }[] }) {
+  seedTestContacts(
+    @Body() body: { contacts: { phone: string; name?: string }[] },
+  ) {
     return this.validateService.seedTestContacts(body.contacts ?? []);
   }
 }

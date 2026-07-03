@@ -1,4 +1,15 @@
-import { Controller, Get, Post, Body, Param, Query, Put, Delete, Patch, ParseIntPipe } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Query,
+  Put,
+  Delete,
+  Patch,
+  ParseIntPipe,
+} from '@nestjs/common';
 import { CustomersService } from './customers.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -7,7 +18,6 @@ import { Customer } from './entities/customer.entity';
 
 @Controller('customers')
 export class CustomersController {
-  
   // ✅ SINGLE CONSTRUCTOR (MERGED)
   constructor(
     private readonly customersService: CustomersService,
@@ -28,6 +38,7 @@ export class CustomersController {
         { gstNumber: ILike(`%${q}%`) },
         { tag: ILike(`%${q}%`) },
       ],
+      take: 20,
     });
   }
 
@@ -77,12 +88,19 @@ export class CustomersController {
   @RequirePermission('customer.edit')
   updateCreditLimit(
     @Param('id') id: string,
-    @Body() body: { credit_days?: number; credit_limit_amount?: number; isWholesaler?: boolean },
+    @Body()
+    body: {
+      credit_days?: number;
+      credit_limit_amount?: number;
+      isWholesaler?: boolean;
+    },
   ) {
     const update: any = {};
     if (body.credit_days !== undefined) update.credit_days = body.credit_days;
-    if (body.credit_limit_amount !== undefined) update.creditLimit = body.credit_limit_amount;
-    if (body.isWholesaler !== undefined) update.isWholesaler = body.isWholesaler;
+    if (body.credit_limit_amount !== undefined)
+      update.creditLimit = body.credit_limit_amount;
+    if (body.isWholesaler !== undefined)
+      update.isWholesaler = body.isWholesaler;
     return this.customersService.update(Number(id), update);
   }
 }

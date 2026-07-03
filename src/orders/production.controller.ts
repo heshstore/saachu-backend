@@ -1,6 +1,21 @@
-import { Controller, Get, Post, Param, Patch, Query, Body, ParseIntPipe, Req, ForbiddenException } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Patch,
+  Query,
+  Body,
+  ParseIntPipe,
+  Req,
+  ForbiddenException,
+} from '@nestjs/common';
 import { ProductionService } from './production.service';
-import { ProductionStage, ProductionJobStatus, JobPriority } from './entities/production-job.entity';
+import {
+  ProductionStage,
+  ProductionJobStatus,
+  JobPriority,
+} from './entities/production-job.entity';
 import { RequirePermission } from '../auth/require-permission.decorator';
 import { ProductionPermission as PP } from './production-permission.enum';
 import { AuditService } from '../logs/audit.service';
@@ -75,16 +90,16 @@ export class ProductionController {
   @Get('queue')
   @RequirePermission(PP.VIEW)
   getQueue(
-    @Query('stage')       stage?: ProductionStage,
-    @Query('status')      status?: ProductionJobStatus,
+    @Query('stage') stage?: ProductionStage,
+    @Query('status') status?: ProductionJobStatus,
     @Query('assigned_to') assigned_to?: string,
-    @Query('unassigned')  unassigned?: string,
+    @Query('unassigned') unassigned?: string,
   ) {
     return this.service.findQueue({
       stage,
       status,
       assigned_to: assigned_to ? Number(assigned_to) : undefined,
-      unassigned:  unassigned === 'true',
+      unassigned: unassigned === 'true',
     });
   }
 
@@ -121,8 +136,10 @@ export class ProductionController {
   ) {
     const job = await this.service.assignJob(id, userId);
     this.audit.log({
-      entity: 'production_job', entity_id: id,
-      action: 'ASSIGN', user_id: req.user?.id,
+      entity: 'production_job',
+      entity_id: id,
+      action: 'ASSIGN',
+      user_id: req.user?.id,
       meta: { to: userId },
     });
     return job;
@@ -136,10 +153,12 @@ export class ProductionController {
     @Req() req: any,
   ) {
     const before = await this.service.getJobById(id);
-    const job    = await this.service.setPriority(id, priority);
+    const job = await this.service.setPriority(id, priority);
     this.audit.log({
-      entity: 'production_job', entity_id: id,
-      action: 'PRIORITY_UPDATE', user_id: req.user?.id,
+      entity: 'production_job',
+      entity_id: id,
+      action: 'PRIORITY_UPDATE',
+      user_id: req.user?.id,
       meta: { from: before?.priority, to: priority },
     });
     return job;
@@ -147,37 +166,43 @@ export class ProductionController {
 
   @Patch(':id/start')
   @RequirePermission(PP.UPDATE_STAGE)
-  async startJob(
-    @Param('id', ParseIntPipe) id: number,
-    @Req() req: any,
-  ) {
+  async startJob(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     await this.assertOwnerOrManager(id, req.user);
     const job = await this.service.startJob(id);
-    this.audit.log({ entity: 'production_job', entity_id: id, action: 'STARTED', user_id: req.user?.id });
+    this.audit.log({
+      entity: 'production_job',
+      entity_id: id,
+      action: 'STARTED',
+      user_id: req.user?.id,
+    });
     return job;
   }
 
   @Patch(':id/stop')
   @RequirePermission(PP.UPDATE_STAGE)
-  async stopJob(
-    @Param('id', ParseIntPipe) id: number,
-    @Req() req: any,
-  ) {
+  async stopJob(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     await this.assertOwnerOrManager(id, req.user);
     const job = await this.service.stopJob(id);
-    this.audit.log({ entity: 'production_job', entity_id: id, action: 'STOPPED', user_id: req.user?.id });
+    this.audit.log({
+      entity: 'production_job',
+      entity_id: id,
+      action: 'STOPPED',
+      user_id: req.user?.id,
+    });
     return job;
   }
 
   @Patch(':id/hold')
   @RequirePermission(PP.UPDATE_STAGE)
-  async holdJob(
-    @Param('id', ParseIntPipe) id: number,
-    @Req() req: any,
-  ) {
+  async holdJob(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
     await this.assertOwnerOrManager(id, req.user);
     const job = await this.service.holdJob(id);
-    this.audit.log({ entity: 'production_job', entity_id: id, action: 'HELD', user_id: req.user?.id });
+    this.audit.log({
+      entity: 'production_job',
+      entity_id: id,
+      action: 'HELD',
+      user_id: req.user?.id,
+    });
     return job;
   }
 
@@ -200,10 +225,12 @@ export class ProductionController {
   ) {
     await this.assertOwnerOrManager(id, req.user);
     const before = await this.service.getJobById(id);
-    const job    = await this.service.moveToNextStage(id);
+    const job = await this.service.moveToNextStage(id);
     this.audit.log({
-      entity: 'production_job', entity_id: id,
-      action: 'STAGE_CHANGE', user_id: req.user?.id,
+      entity: 'production_job',
+      entity_id: id,
+      action: 'STAGE_CHANGE',
+      user_id: req.user?.id,
       meta: { from: before?.current_stage, to: job.current_stage },
     });
     return job;
@@ -218,10 +245,12 @@ export class ProductionController {
   ) {
     await this.assertOwnerOrManager(id, req.user);
     const before = await this.service.getJobById(id);
-    const job    = await this.service.moveToStage(id, stage);
+    const job = await this.service.moveToStage(id, stage);
     this.audit.log({
-      entity: 'production_job', entity_id: id,
-      action: 'STAGE_CHANGE', user_id: req.user?.id,
+      entity: 'production_job',
+      entity_id: id,
+      action: 'STAGE_CHANGE',
+      user_id: req.user?.id,
       meta: { from: before?.current_stage, to: stage, override: true },
     });
     return job;

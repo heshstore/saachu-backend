@@ -1,11 +1,18 @@
 import {
-  Controller, Get, Post, Patch, Body, Req, Param, Query,
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Body,
+  Req,
+  Param,
+  Query,
 } from '@nestjs/common';
-import { DispatchService }      from './dispatch.service';
+import { DispatchService } from './dispatch.service';
 import { DispatchOrdersService } from './dispatch-orders.service';
-import { CreateDispatchDto }    from './dto/create-dispatch.dto';
-import { MarkDeliveredDto }     from './dto/mark-delivered.dto';
-import { RequirePermission }    from '../auth/require-permission.decorator';
+import { CreateDispatchDto } from './dto/create-dispatch.dto';
+import { MarkDeliveredDto } from './dto/mark-delivered.dto';
+import { RequirePermission } from '../auth/require-permission.decorator';
 import { DispatchPermission as DP } from './dispatch-permission.enum';
 
 @Controller('dispatch')
@@ -36,7 +43,10 @@ export class DispatchController {
   @Post('mark-delivered')
   @RequirePermission(DP.DELIVER)
   async markDelivered(@Body() dto: MarkDeliveredDto, @Req() req: any) {
-    const { dispatch, orderUpdated } = await this.service.markDelivered(dto, req.user?.id);
+    const { dispatch, orderUpdated } = await this.service.markDelivered(
+      dto,
+      req.user?.id,
+    );
     const response: Record<string, any> = { ...dispatch };
     if (!orderUpdated) {
       response.warning =
@@ -50,7 +60,9 @@ export class DispatchController {
   @Get('orders')
   @RequirePermission(DP.VIEW)
   listDispatchOrders(@Query('orderId') orderId?: string) {
-    return this.dispatchOrders.findDispatchOrders(orderId ? +orderId : undefined);
+    return this.dispatchOrders.findDispatchOrders(
+      orderId ? +orderId : undefined,
+    );
   }
 
   @Get('orders/:id/pick-list')
@@ -68,14 +80,18 @@ export class DispatchController {
   @Post('orders')
   @RequirePermission(DP.CREATE)
   createDispatchOrder(@Body() body: { orderId: number }, @Req() req: any) {
-    return this.dispatchOrders.createDraftFromOrder(+body.orderId, req.user?.id);
+    return this.dispatchOrders.createDraftFromOrder(
+      +body.orderId,
+      req.user?.id,
+    );
   }
 
   @Patch('orders/:id')
   @RequirePermission(DP.CREATE)
   patchDispatchOrder(
     @Param('id') id: string,
-    @Body() body: {
+    @Body()
+    body: {
       remarks?: string;
       transporterName?: string;
       lrNumber?: string;
@@ -94,7 +110,8 @@ export class DispatchController {
   packLine(
     @Param('id') id: string,
     @Param('lineId') lineId: string,
-    @Body() body: { packedQty: number; packingRemarks?: string; cartonCount?: number },
+    @Body()
+    body: { packedQty: number; packingRemarks?: string; cartonCount?: number },
     @Req() req: any,
   ) {
     return this.dispatchOrders.packLine(+id, +lineId, body, req.user?.id);
@@ -110,7 +127,12 @@ export class DispatchController {
   @RequirePermission(DP.CREATE)
   inTransit(
     @Param('id') id: string,
-    @Body() body: { transporterName?: string; lrNumber?: string; trackingNumber?: string },
+    @Body()
+    body: {
+      transporterName?: string;
+      lrNumber?: string;
+      trackingNumber?: string;
+    },
   ) {
     return this.dispatchOrders.markInTransit(+id, body);
   }

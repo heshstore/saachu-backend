@@ -1,5 +1,9 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column, UpdateDateColumn, Index,
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  UpdateDateColumn,
+  Index,
 } from 'typeorm';
 
 export type ReceivableStatus = 'PENDING' | 'PARTIAL' | 'PAID' | 'OVERDUE';
@@ -17,13 +21,31 @@ export class CustomerReceivable {
   @Column({ name: 'order_id', unique: true })
   orderId: number;
 
-  @Column({ name: 'total_order_value', type: 'decimal', precision: 14, scale: 2, default: 0 })
+  @Column({
+    name: 'total_order_value',
+    type: 'decimal',
+    precision: 14,
+    scale: 2,
+    default: 0,
+  })
   totalOrderValue: string;
 
-  @Column({ name: 'received_amount', type: 'decimal', precision: 14, scale: 2, default: 0 })
+  @Column({
+    name: 'received_amount',
+    type: 'decimal',
+    precision: 14,
+    scale: 2,
+    default: 0,
+  })
   receivedAmount: string;
 
-  @Column({ name: 'outstanding_amount', type: 'decimal', precision: 14, scale: 2, default: 0 })
+  @Column({
+    name: 'outstanding_amount',
+    type: 'decimal',
+    precision: 14,
+    scale: 2,
+    default: 0,
+  })
   outstandingAmount: string;
 
   @Column({ name: 'due_date', type: 'date', nullable: true })

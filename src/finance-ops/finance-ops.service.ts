@@ -1,5 +1,8 @@
 import {
-  Injectable, BadRequestException, NotFoundException, Logger,
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+  Logger,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -53,7 +56,11 @@ export class FinanceOpsService {
   }
 
   /** OVERDUE overrides PARTIAL when due date passed and still outstanding. */
-  deriveStatus(outstanding: number, received: number, dueRaw: unknown): 'PENDING' | 'PARTIAL' | 'PAID' | 'OVERDUE' {
+  deriveStatus(
+    outstanding: number,
+    received: number,
+    dueRaw: unknown,
+  ): 'PENDING' | 'PARTIAL' | 'PAID' | 'OVERDUE' {
     if (outstanding <= 0.005) return 'PAID';
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -76,13 +83,22 @@ export class FinanceOpsService {
     );
     if (!order) return;
 
-    if (!order.customer_id || INELIGIBLE_ORDER_STATUSES.includes(order.status)) {
-      await this.ds.query(`DELETE FROM customer_receivables WHERE order_id = $1`, [orderId]);
+    if (
+      !order.customer_id ||
+      INELIGIBLE_ORDER_STATUSES.includes(order.status)
+    ) {
+      await this.ds.query(
+        `DELETE FROM customer_receivables WHERE order_id = $1`,
+        [orderId],
+      );
       return;
     }
 
     if (order.status === OrderStatus.CANCELLED) {
-      await this.ds.query(`DELETE FROM customer_receivables WHERE order_id = $1`, [orderId]);
+      await this.ds.query(
+        `DELETE FROM customer_receivables WHERE order_id = $1`,
+        [orderId],
+      );
       return;
     }
 
@@ -107,7 +123,15 @@ export class FinanceOpsService {
          due_date = EXCLUDED.due_date,
          status = EXCLUDED.status,
          updated_at = now()`,
-      [order.customer_id, orderId, total, received, outstanding, order.due_date ?? null, status],
+      [
+        order.customer_id,
+        orderId,
+        total,
+        received,
+        outstanding,
+        order.due_date ?? null,
+        status,
+      ],
     );
   }
 
@@ -120,7 +144,10 @@ export class FinanceOpsService {
     if (!po) return;
 
     if (po.status === 'CANCELLED') {
-      await this.ds.query(`DELETE FROM vendor_payables WHERE purchase_order_id = $1`, [purchaseOrderId]);
+      await this.ds.query(
+        `DELETE FROM vendor_payables WHERE purchase_order_id = $1`,
+        [purchaseOrderId],
+      );
       return;
     }
 
@@ -150,7 +177,15 @@ export class FinanceOpsService {
          due_date = EXCLUDED.due_date,
          status = EXCLUDED.status,
          updated_at = now()`,
-      [po.vendor_id, purchaseOrderId, total, paid, outstanding, dueDate, status],
+      [
+        po.vendor_id,
+        purchaseOrderId,
+        total,
+        paid,
+        outstanding,
+        dueDate,
+        status,
+      ],
     );
   }
 
@@ -170,7 +205,9 @@ export class FinanceOpsService {
       [pay.order_id],
     );
     const customerId = ord?.customer_id ?? null;
-    const modeUpper = this.mapLegacyPaymentModeToFinance(String(pay.payment_mode || 'cash'));
+    const modeUpper = this.mapLegacyPaymentModeToFinance(
+      String(pay.payment_mode || 'cash'),
+    );
 
     await this.ds.query(
       `INSERT INTO payment_entries
@@ -197,21 +234,35 @@ export class FinanceOpsService {
   }
 
   /** Map UI / operational modes to PaymentService (cash | upi | bank). */
-  mapFinanceModeToLegacy(mode: FinancePaymentMode): { legacy: PaymentMode; finance: FinancePaymentMode } {
+  mapFinanceModeToLegacy(mode: FinancePaymentMode): {
+    legacy: PaymentMode;
+    finance: FinancePaymentMode;
+  } {
     const u = String(mode || '').toUpperCase() as FinancePaymentMode;
     if (u === 'UPI') return { legacy: 'upi', finance: 'UPI' };
     if (u === 'CASH') return { legacy: 'cash', finance: 'CASH' };
-    return { legacy: 'bank', finance: u === 'CHEQUE' || u === 'OTHER' ? u : 'BANK' };
+    return {
+      legacy: 'bank',
+      finance: u === 'CHEQUE' || u === 'OTHER' ? u : 'BANK',
+    };
   }
 
-  async addCustomerReceipt(body: {
-    orderId: number;
-    amount: number;
-    paymentMode: FinancePaymentMode;
-    paymentReference?: string;
-    remarks?: string;
-    idempotencyKey?: string;
-  }, userId?: number) {
+  async addCustomerReceipt(
+    body: {
+      orderId: number;
+      amount: number;
+      paymentMode: FinancePaymentMode;
+      paymentReference?: string;
+      remarks?: string;
+      idempotencyKey?: string;
+      // Optional internal split allocation — never appears in customer-facing ledger
+      productionAmount?: number;
+      productionBank?: string;
+      tradingAmount?: number;
+      tradingBank?: string;
+    },
+    userId?: number,
+  ) {
     const { legacy, finance } = this.mapFinanceModeToLegacy(body.paymentMode);
     let ref = body.paymentReference?.trim() || '';
     if (['upi', 'bank'].includes(legacy) && !ref) {
@@ -224,7 +275,11 @@ export class FinanceOpsService {
       idempotency_key: body.idempotencyKey,
       notes: body.remarks,
     };
-    const summary = await this.paymentService.addPayment(body.orderId, dto, userId);
+    const summary = await this.paymentService.addPayment(
+      body.orderId,
+      dto,
+      userId,
+    );
     const payments = await this.paymentService.getPayments(body.orderId);
     const last = payments[payments.length - 1];
     if (last?.id) {
@@ -236,24 +291,48 @@ export class FinanceOpsService {
       );
     }
     await this.syncCustomerReceivable(body.orderId);
+
+    // Store split allocation on the payment_entries row when provided.
+    // Runs after sync — does not affect receivable calculation.
+    if (body.productionAmount !== undefined && last?.id) {
+      await this.ds.query(
+        `UPDATE payment_entries
+         SET production_amount = $1, production_bank = $2,
+             trading_amount = $3,    trading_bank = $4
+         WHERE linked_payment_id = $5`,
+        [
+          body.productionAmount ?? null,
+          body.productionBank ?? null,
+          body.tradingAmount ?? null,
+          body.tradingBank ?? null,
+          last.id,
+        ],
+      );
+    }
+
     return summary;
   }
 
-  async addVendorPayment(body: {
-    purchaseOrderId: number;
-    amount: number;
-    paymentMode: FinancePaymentMode;
-    paymentDate?: string;
-    remarks?: string;
-  }, userId?: number) {
-    if (body.amount <= 0) throw new BadRequestException('Amount must be positive');
+  async addVendorPayment(
+    body: {
+      purchaseOrderId: number;
+      amount: number;
+      paymentMode: FinancePaymentMode;
+      paymentDate?: string;
+      remarks?: string;
+    },
+    userId?: number,
+  ) {
+    if (body.amount <= 0)
+      throw new BadRequestException('Amount must be positive');
 
     const [po] = await this.ds.query(
       `SELECT id, vendor_id, status, total_amount FROM purchase_orders WHERE id = $1`,
       [body.purchaseOrderId],
     );
     if (!po) throw new NotFoundException('Purchase order not found');
-    if (po.status === 'CANCELLED') throw new BadRequestException('PO is cancelled');
+    if (po.status === 'CANCELLED')
+      throw new BadRequestException('PO is cancelled');
 
     const [{ sum }] = await this.ds.query(
       `SELECT COALESCE(SUM(amount), 0)::numeric AS sum
@@ -272,7 +351,9 @@ export class FinanceOpsService {
       );
     }
 
-    const mode = String(body.paymentMode || 'BANK').toUpperCase() as FinancePaymentMode;
+    const mode = String(
+      body.paymentMode || 'BANK',
+    ).toUpperCase() as FinancePaymentMode;
     const dateStr = body.paymentDate || new Date().toISOString().slice(0, 10);
 
     await this.ds.query(
@@ -291,10 +372,15 @@ export class FinanceOpsService {
     );
 
     await this.syncVendorPayable(body.purchaseOrderId);
-    return this.ds.query(`SELECT * FROM vendor_payables WHERE purchase_order_id = $1`, [body.purchaseOrderId]);
+    return this.ds.query(
+      `SELECT * FROM vendor_payables WHERE purchase_order_id = $1`,
+      [body.purchaseOrderId],
+    );
   }
 
-  async listReceivables(filters: { status?: string; customerId?: number } = {}) {
+  async listReceivables(
+    filters: { status?: string; customerId?: number } = {},
+  ) {
     const params: unknown[] = [];
     const cond: string[] = [
       `o.status NOT IN ('CANCELLED','REJECTED','DRAFT','GENERATED','PENDING_APPROVAL')`,
@@ -343,13 +429,15 @@ export class FinanceOpsService {
     );
   }
 
-  async listPaymentEntries(filters: {
-    paymentType?: FinancePaymentType;
-    customerId?: number;
-    vendorId?: number;
-    from?: string;
-    to?: string;
-  } = {}) {
+  async listPaymentEntries(
+    filters: {
+      paymentType?: FinancePaymentType;
+      customerId?: number;
+      vendorId?: number;
+      from?: string;
+      to?: string;
+    } = {},
+  ) {
     const params: unknown[] = [];
     const cond: string[] = ['1=1'];
     if (filters.paymentType) {
@@ -460,7 +548,12 @@ export class FinanceOpsService {
        WHERE vp.vendor_id = $1 AND vp.status = 'OVERDUE'`,
       [vendorId],
     );
-    return { purchaseOrders: pos, payables, payments, overdueAmount: this.num(overdue) };
+    return {
+      purchaseOrders: pos,
+      payables,
+      payments,
+      overdueAmount: this.num(overdue),
+    };
   }
 
   async getWarnings(): Promise<FinanceWarning[]> {
@@ -505,7 +598,11 @@ export class FinanceOpsService {
         code: 'CREDIT_LIMIT_EXCEEDED',
         severity: 'warn',
         message: `Customer "${row.name}" outstanding (₹${this.num(row.exposure).toFixed(0)}) exceeds credit limit (₹${this.num(row.credit_limit).toFixed(0)}).`,
-        meta: { customerId: row.id, exposure: this.num(row.exposure), limit: this.num(row.credit_limit) },
+        meta: {
+          customerId: row.id,
+          exposure: this.num(row.exposure),
+          limit: this.num(row.credit_limit),
+        },
       });
     }
 
@@ -597,7 +694,9 @@ export class FinanceOpsService {
     for (const row of orders) {
       await this.syncCustomerReceivable(row.id);
     }
-    const pos = await this.ds.query(`SELECT id FROM purchase_orders ORDER BY id DESC LIMIT 2000`);
+    const pos = await this.ds.query(
+      `SELECT id FROM purchase_orders ORDER BY id DESC LIMIT 2000`,
+    );
     for (const row of pos) {
       await this.syncVendorPayable(row.id);
     }

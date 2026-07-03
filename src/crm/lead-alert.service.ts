@@ -33,7 +33,10 @@ export class LeadAlertService {
   }
 
   async resolveAllForLead(leadId: number): Promise<void> {
-    await this.alertRepo.update({ lead_id: leadId, resolved: false }, { resolved: true });
+    await this.alertRepo.update(
+      { lead_id: leadId, resolved: false },
+      { resolved: true },
+    );
   }
 
   // ── Cron: runs every 15 minutes ──────────────────────────────────────────────
@@ -52,7 +55,10 @@ export class LeadAlertService {
 
       for (const r of results) {
         if (r.status === 'rejected') {
-          this.logger.error(`Alert check failed: ${r.reason?.message}`, r.reason?.stack);
+          this.logger.error(
+            `Alert check failed: ${r.reason?.message}`,
+            r.reason?.stack,
+          );
         }
       }
     } catch (e: any) {
@@ -84,7 +90,8 @@ export class LeadAlertService {
         )
     `);
     const count = result?.rowCount ?? 0;
-    if (count > 0) this.logger.warn(`AlertEngine: created ${count} NOT_CONTACTED alert(s)`);
+    if (count > 0)
+      this.logger.warn(`AlertEngine: created ${count} NOT_CONTACTED alert(s)`);
   }
 
   // ── Condition: HIGH priority lead not updated within 12 h ───────────────────
@@ -107,7 +114,10 @@ export class LeadAlertService {
         )
     `);
     const count = result?.rowCount ?? 0;
-    if (count > 0) this.logger.warn(`AlertEngine: created ${count} HIGH_PRIORITY_STALE alert(s)`);
+    if (count > 0)
+      this.logger.warn(
+        `AlertEngine: created ${count} HIGH_PRIORITY_STALE alert(s)`,
+      );
   }
 
   // ── System alerts (not tied to a specific lead) ──────────────────────────────
@@ -117,15 +127,20 @@ export class LeadAlertService {
    * Deduplication is done in SQL to be race-safe.
    */
   async createWhatsAppDownAlert(reason: string): Promise<void> {
-    await this.ds.query(`
+    await this.ds.query(
+      `
       INSERT INTO lead_alerts (lead_id, type, message)
       SELECT NULL, 'WHATSAPP_DOWN', $1
       WHERE NOT EXISTS (
         SELECT 1 FROM lead_alerts
         WHERE type = 'WHATSAPP_DOWN' AND resolved = false
       )
-    `, [`WhatsApp disconnected: ${reason}`]);
-    this.logger.warn(`[AlertEngine] WHATSAPP_DOWN alert created (reason=${reason})`);
+    `,
+      [`WhatsApp disconnected: ${reason}`],
+    );
+    this.logger.warn(
+      `[AlertEngine] WHATSAPP_DOWN alert created (reason=${reason})`,
+    );
   }
 
   /** Resolves all open WHATSAPP_DOWN alerts (called when WhatsApp reconnects). */
@@ -135,7 +150,9 @@ export class LeadAlertService {
       { resolved: true },
     );
     if ((result.affected ?? 0) > 0) {
-      this.logger.log(`[AlertEngine] Resolved ${result.affected} WHATSAPP_DOWN alert(s)`);
+      this.logger.log(
+        `[AlertEngine] Resolved ${result.affected} WHATSAPP_DOWN alert(s)`,
+      );
     }
   }
 
@@ -146,7 +163,9 @@ export class LeadAlertService {
     try {
       await this.createWhatsAppDownAlert(payload.reason ?? 'unknown');
     } catch (e: any) {
-      this.logger.error(`[AlertEngine] Failed to create WHATSAPP_DOWN alert: ${e?.message}`);
+      this.logger.error(
+        `[AlertEngine] Failed to create WHATSAPP_DOWN alert: ${e?.message}`,
+      );
     }
   }
 
@@ -155,7 +174,9 @@ export class LeadAlertService {
     try {
       await this.resolveWhatsAppAlerts();
     } catch (e: any) {
-      this.logger.error(`[AlertEngine] Failed to resolve WHATSAPP_DOWN alerts: ${e?.message}`);
+      this.logger.error(
+        `[AlertEngine] Failed to resolve WHATSAPP_DOWN alerts: ${e?.message}`,
+      );
     }
   }
 
@@ -180,6 +201,9 @@ export class LeadAlertService {
         )
     `);
     const count = result?.rowCount ?? 0;
-    if (count > 0) this.logger.warn(`AlertEngine: created ${count} FOLLOWUP_OVERDUE alert(s)`);
+    if (count > 0)
+      this.logger.warn(
+        `AlertEngine: created ${count} FOLLOWUP_OVERDUE alert(s)`,
+      );
   }
 }

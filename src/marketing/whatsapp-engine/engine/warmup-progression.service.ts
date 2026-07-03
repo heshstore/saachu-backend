@@ -33,7 +33,9 @@ export class WarmupProgressionService {
     await this.evaluateAllPromotions('cron_0715_ist');
   }
 
-  async evaluateAllPromotions(source = 'manual'): Promise<{ evaluated: number; promoted: number }> {
+  async evaluateAllPromotions(
+    source = 'manual',
+  ): Promise<{ evaluated: number; promoted: number }> {
     const numbers = await this.numberRepo.find({ where: { is_active: true } });
     let promoted = 0;
     for (const number of numbers) {
@@ -48,7 +50,10 @@ export class WarmupProgressionService {
     return computeHealthMetrics(counts);
   }
 
-  async getDailyHealthRows(numberId: string, days = 14): Promise<DailyHealthRow[]> {
+  async getDailyHealthRows(
+    numberId: string,
+    days = 14,
+  ): Promise<DailyHealthRow[]> {
     type Row = {
       day: string;
       sent: string;
@@ -77,11 +82,11 @@ export class WarmupProgressionService {
     return rows.map((r) => {
       const base = {
         date: r.day,
-        sent:      parseInt(r.sent, 10),
+        sent: parseInt(r.sent, 10),
         delivered: parseInt(r.delivered, 10),
-        read:      parseInt(r.read, 10),
-        replied:   parseInt(r.replied, 10),
-        failed:    parseInt(r.failed, 10),
+        read: parseInt(r.read, 10),
+        replied: parseInt(r.replied, 10),
+        failed: parseInt(r.failed, 10),
       };
       return { ...base, isHealthyDay: isHealthyDay(base) };
     });
@@ -97,18 +102,20 @@ export class WarmupProgressionService {
     }
 
     const metrics = await this.getHealthMetrics(number.id);
-    const dailyRows = await this.getDailyHealthRows(number.id, PROMOTION_RULES.healthyDaysRequired + 2);
+    const dailyRows = await this.getDailyHealthRows(
+      number.id,
+      PROMOTION_RULES.healthyDaysRequired + 2,
+    );
     const streak = countHealthyDayStreak(dailyRows);
 
     const eligible =
-      metrics.isHealthy &&
-      streak >= PROMOTION_RULES.healthyDaysRequired;
+      metrics.isHealthy && streak >= PROMOTION_RULES.healthyDaysRequired;
 
     if (!eligible) {
       this.logger.log(
         `[WARMUP_HOLD] number=${number.phone} level=L${fromLevel} ` +
-        `healthy=${metrics.isHealthy} streak=${streak}/${PROMOTION_RULES.healthyDaysRequired} ` +
-        `score=${metrics.healthScore}`,
+          `healthy=${metrics.isHealthy} streak=${streak}/${PROMOTION_RULES.healthyDaysRequired} ` +
+          `score=${metrics.healthScore}`,
       );
       return { promoted: false, fromLevel, toLevel: fromLevel };
     }
@@ -140,7 +147,7 @@ export class WarmupProgressionService {
 
     this.logger.log(
       `[WARMUP_PROMOTED] number=${number.phone} L${fromLevel}→L${toLevel} ` +
-      `streak=${streak} score=${metrics.healthScore} source=${source}`,
+        `streak=${streak} score=${metrics.healthScore} source=${source}`,
     );
     return { promoted: true, fromLevel, toLevel };
   }

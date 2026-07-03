@@ -33,7 +33,10 @@ export class NumbersService {
     return this.repo.save(this.repo.create(dto));
   }
 
-  async update(id: string, dto: Partial<WhatsappNumber>): Promise<WhatsappNumber> {
+  async update(
+    id: string,
+    dto: Partial<WhatsappNumber>,
+  ): Promise<WhatsappNumber> {
     await this.findOne(id);
     if (dto.phone) dto = { ...dto, phone: this._toE164(dto.phone) };
     await this.repo.update(id, dto);
@@ -52,14 +55,18 @@ export class NumbersService {
 
   async ensureDailyCountsReset(): Promise<void> {
     const { start } = getIstDayBounds();
-    const rows = await this.ds.query<{ cnt: string }[]>(
-      `SELECT COUNT(*)::int AS cnt
+    const rows = await this.ds
+      .query<{ cnt: string }[]>(
+        `SELECT COUNT(*)::int AS cnt
        FROM engine_audit_logs
        WHERE event = $1 AND created_at >= $2`,
-      [AuditEvent.WARMUP_RESET, start],
-    ).catch(() => [{ cnt: '0' }]);
+        [AuditEvent.WARMUP_RESET, start],
+      )
+      .catch(() => [{ cnt: '0' }]);
     if (parseInt(rows[0]?.cnt ?? '0', 10) > 0) return;
-    this.logger.warn(`[WARMUP_RESET_GUARD] no reset audit found since IST midnight ${start.toISOString()} — resetting now`);
+    this.logger.warn(
+      `[WARMUP_RESET_GUARD] no reset audit found since IST midnight ${start.toISOString()} — resetting now`,
+    );
     await this.resetDailyCounts('guard');
   }
 
@@ -68,7 +75,10 @@ export class NumbersService {
     const rows = await this.repo.find({ order: { created_at: 'ASC' } });
     for (const n of rows) {
       const releaseAllowance = getReleaseAllowance(n.warmup_level);
-      await this.repo.update(n.id, { daily_sent: 0, daily_limit: releaseAllowance });
+      await this.repo.update(n.id, {
+        daily_sent: 0,
+        daily_limit: releaseAllowance,
+      });
       this.logger.log(
         `[WARMUP_RESET] number=${n.phone} number_id=${n.id} previous_count=${n.daily_sent ?? 0} new_count=0 source=${source}`,
       );
@@ -98,14 +108,16 @@ export class NumbersService {
   }
 
   // 7-day daily trend: sent / delivered / read / replied / failed per day
-  async getHealthTrend(id: string): Promise<{
-    date: string;
-    sent: number;
-    delivered: number;
-    read: number;
-    replied: number;
-    failed: number;
-  }[]> {
+  async getHealthTrend(id: string): Promise<
+    {
+      date: string;
+      sent: number;
+      delivered: number;
+      read: number;
+      replied: number;
+      failed: number;
+    }[]
+  > {
     type TrendRow = {
       day: string;
       sent: string;

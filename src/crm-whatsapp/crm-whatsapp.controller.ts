@@ -1,5 +1,12 @@
 import {
-  Controller, Get, Post, Body, Param, Query, Request, HttpCode,
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Query,
+  Request,
+  HttpCode,
 } from '@nestjs/common';
 import { CrmWhatsAppService } from './crm-whatsapp.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
@@ -54,7 +61,10 @@ export class CrmWhatsAppController {
 
   @Get('chat/:chatId/messages')
   @RequirePermission('lead.view')
-  getChatMessages(@Param('chatId') chatId: string, @Query('leadId') leadId?: string) {
+  getChatMessages(
+    @Param('chatId') chatId: string,
+    @Query('leadId') leadId?: string,
+  ) {
     return this.waService.getChatMessages(chatId, leadId ? +leadId : undefined);
   }
 }

@@ -1,4 +1,12 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
+} from 'typeorm';
 import { ManufacturingBoq } from './manufacturing-boq.entity';
 
 @Entity('manufacturing_boq_items')
@@ -9,7 +17,9 @@ export class ManufacturingBoqItem {
   @Column({ name: 'boq_id' })
   boqId: number;
 
-  @ManyToOne(() => ManufacturingBoq, (boq) => boq.lines, { onDelete: 'CASCADE' })
+  @ManyToOne(() => ManufacturingBoq, (boq) => boq.lines, {
+    onDelete: 'CASCADE',
+  })
   @JoinColumn({ name: 'boq_id' })
   boq: ManufacturingBoq;
 

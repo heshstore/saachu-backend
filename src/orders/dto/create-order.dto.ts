@@ -19,4 +19,11 @@ export class CreateOrderDto {
   }[];
 
   sales_person_id?: number;
+
+  // Dispatch / delivery
+  booking_at?: string;
+  goods_sent_by?: string;
+  transport_payment_by?: string;
+  delivery_instructions?: string;
+  delivery_type?: string;
 }

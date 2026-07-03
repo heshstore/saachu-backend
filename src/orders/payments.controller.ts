@@ -1,4 +1,12 @@
-import { Controller, Post, Get, Body, Param, ParseIntPipe, Req } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Get,
+  Body,
+  Param,
+  ParseIntPipe,
+  Req,
+} from '@nestjs/common';
 import { PaymentService } from './payment.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 

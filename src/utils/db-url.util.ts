@@ -22,11 +22,15 @@ export function sanitizeDatabaseUrl(raw: string): string {
 
 /** True when the URL indicates a cloud-hosted DB that requires TLS. */
 export function requiresSsl(url: string): boolean {
-  return /neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(url);
+  return /neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(
+    url,
+  );
 }
 
 /** Returns the pg ssl option, or false for local DBs. */
-export function buildSslOption(url: string): { rejectUnauthorized: boolean } | false {
+export function buildSslOption(
+  url: string,
+): { rejectUnauthorized: boolean } | false {
   return requiresSsl(url) ? { rejectUnauthorized: false } : false;
 }
 

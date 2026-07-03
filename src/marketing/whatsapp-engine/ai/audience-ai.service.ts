@@ -96,19 +96,25 @@ export class AudienceAiService {
         last_read_at: row.last_read_at,
       };
 
-      const newScore   = this._computeScore(member, logStats);
+      const newScore = this._computeScore(member, logStats);
       const newFatigue = this._computeFatigueScore(logStats);
 
-      const scoreChanged   = Math.abs(newScore   - member.quality_score)  > 1;
-      const fatigueChanged = Math.abs(newFatigue - (member.fatigue_score ?? 0)) > 1;
+      const scoreChanged = Math.abs(newScore - member.quality_score) > 1;
+      const fatigueChanged =
+        Math.abs(newFatigue - (member.fatigue_score ?? 0)) > 1;
 
       if (scoreChanged || fatigueChanged) {
-        await this.repo.update(row.id, { quality_score: newScore, fatigue_score: newFatigue });
+        await this.repo.update(row.id, {
+          quality_score: newScore,
+          fatigue_score: newFatigue,
+        });
         updated++;
       }
     }
 
-    this.logger.log(`[AudienceAI] updateScores: updated ${updated}/${rows.length} members`);
+    this.logger.log(
+      `[AudienceAI] updateScores: updated ${updated}/${rows.length} members`,
+    );
   }
 
   // Apply behavioral cooldowns:
@@ -171,7 +177,9 @@ export class AudienceAiService {
     const n14 = r14?.[1] ?? 0;
     const n30 = r30?.[1] ?? 0;
     const n45 = r45?.[1] ?? 0;
-    this.logger.log(`[AudienceAI] Cooldowns applied: ${n14} 14-day, ${n30} 30-day, ${n45} 45-day (fatigue)`);
+    this.logger.log(
+      `[AudienceAI] Cooldowns applied: ${n14} 14-day, ${n30} 30-day, ${n45} 45-day (fatigue)`,
+    );
   }
 
   // Reset cooldown for a contact who just replied (they're interested — re-prioritize)
@@ -192,10 +200,15 @@ export class AudienceAiService {
       .where('a.opt_out = false')
       .andWhere('a.is_whatsapp_valid = true')
       .andWhere('a.quality_score >= :minScore', { minScore })
-      .andWhere('(a.cooldown_until IS NULL OR a.cooldown_until <= :now)', { now })
+      .andWhere('(a.cooldown_until IS NULL OR a.cooldown_until <= :now)', {
+        now,
+      })
       .andWhere('a.is_test_contact IS NOT TRUE')
       // Exclude contacts confirmed NOT on WhatsApp — avoids re-queuing known invalid numbers
-      .andWhere('(a.wa_registration_status IS NULL OR a.wa_registration_status != :notReg)', { notReg: 'NOT_REGISTERED' })
+      .andWhere(
+        '(a.wa_registration_status IS NULL OR a.wa_registration_status != :notReg)',
+        { notReg: 'NOT_REGISTERED' },
+      )
       .orderBy('a.quality_score', 'DESC')
       .getMany();
 
@@ -220,21 +233,24 @@ export class AudienceAiService {
 
     // Recency penalty based on last_contacted_at
     if (member.last_contacted_at) {
-      const daysSince = (Date.now() - new Date(member.last_contacted_at).getTime()) / 86_400_000;
-      if (daysSince < 3)       score -= 30;
-      else if (daysSince < 7)  score -= 15;
+      const daysSince =
+        (Date.now() - new Date(member.last_contacted_at).getTime()) /
+        86_400_000;
+      if (daysSince < 3) score -= 30;
+      else if (daysSince < 7) score -= 15;
       else if (daysSince > 30) score -= 5;
     }
 
     // Behavioral log signals (last 30 days)
     if (logs) {
-      if (logs.reads_30d > 0)   score += 12;  // reads messages
-      if (logs.replies_30d > 0) score += 18;  // replied recently
-      if (logs.fails_30d >= 3)  score -= 20;  // high failure rate
+      if (logs.reads_30d > 0) score += 12; // reads messages
+      if (logs.replies_30d > 0) score += 18; // replied recently
+      if (logs.fails_30d >= 3) score -= 20; // high failure rate
       if (logs.sent_30d >= 5 && logs.reads_30d === 0) score -= 25; // completely ignoring
       if (logs.last_read_at) {
-        const daysSinceRead = (Date.now() - new Date(logs.last_read_at).getTime()) / 86_400_000;
-        if (daysSinceRead < 7) score += 10;  // read recently
+        const daysSinceRead =
+          (Date.now() - new Date(logs.last_read_at).getTime()) / 86_400_000;
+        if (daysSinceRead < 7) score += 10; // read recently
       }
     }
 
@@ -247,25 +263,25 @@ export class AudienceAiService {
     if (logs.sent_30d === 0) return 0;
 
     let score = 0;
-    const ignoreRate = logs.sent_30d > 0
-      ? (logs.sent_30d - logs.reads_30d) / logs.sent_30d
-      : 0;
-    const noReplyRate = logs.reads_30d > 0
-      ? (logs.reads_30d - logs.replies_30d) / logs.reads_30d
-      : 0;
+    const ignoreRate =
+      logs.sent_30d > 0 ? (logs.sent_30d - logs.reads_30d) / logs.sent_30d : 0;
+    const noReplyRate =
+      logs.reads_30d > 0
+        ? (logs.reads_30d - logs.replies_30d) / logs.reads_30d
+        : 0;
 
     // Base fatigue from ignores
-    if (ignoreRate >= 0.9)       score += 50;
-    else if (ignoreRate >= 0.7)  score += 35;
-    else if (ignoreRate >= 0.5)  score += 20;
+    if (ignoreRate >= 0.9) score += 50;
+    else if (ignoreRate >= 0.7) score += 35;
+    else if (ignoreRate >= 0.5) score += 20;
 
     // Additional fatigue from no-replies after reading
     if (noReplyRate >= 0.9 && logs.reads_30d >= 2) score += 25;
     else if (noReplyRate >= 0.7 && logs.reads_30d >= 2) score += 15;
 
     // Volume penalty: high send volume with zero engagement = severe fatigue
-    if (logs.sent_30d >= 5 && logs.reads_30d === 0)   score += 25;
-    if (logs.sent_30d >= 8 && logs.replies_30d === 0)  score += 10;
+    if (logs.sent_30d >= 5 && logs.reads_30d === 0) score += 25;
+    if (logs.sent_30d >= 8 && logs.replies_30d === 0) score += 10;
 
     return Math.max(0, Math.min(100, score));
   }

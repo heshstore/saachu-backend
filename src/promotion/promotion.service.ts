@@ -110,62 +110,117 @@ export class PromotionService {
   }> {
     await this.ensureTable();
 
-    const name    = (dto.name            || '').trim() || undefined;
-    const phone   = (dto.whatsapp_number || '').trim() || undefined;
-    const email   = (dto.email           || '').trim() || undefined;
+    const name = (dto.name || '').trim() || undefined;
+    const phone = (dto.whatsapp_number || '').trim() || undefined;
+    const email = (dto.email || '').trim() || undefined;
 
     if (!phone && !email) {
-      throw new BadRequestException('At least one of whatsapp_number or email is required.');
+      throw new BadRequestException(
+        'At least one of whatsapp_number or email is required.',
+      );
     }
 
     // ── Rule 1: name + phone → save as CRM lead, not promotion ───────────────
     if (name && phone) {
-      const leadId = await this.saveAsLead(name, phone, email, dto.source, dto.page_url);
+      const leadId = await this.saveAsLead(
+        name,
+        phone,
+        email,
+        dto.source,
+        dto.page_url,
+      );
       if (!leadId) {
-        return { success: true, message: 'Tracked as analytics (no CRM identity)', routed_to: 'skipped' };
+        return {
+          success: true,
+          message: 'Tracked as analytics (no CRM identity)',
+          routed_to: 'skipped',
+        };
       }
-      this.logger.log(`Promotion routed to lead id=${leadId} (name+phone present)`);
-      this.logsService.log(LogAction.LEAD_CREATED, { leadId, phone, routed_from: 'promotion', name });
-      return { success: true, message: 'Saved as lead', routed_to: 'lead', id: leadId };
+      this.logger.log(
+        `Promotion routed to lead id=${leadId} (name+phone present)`,
+      );
+      this.logsService.log(LogAction.LEAD_CREATED, {
+        leadId,
+        phone,
+        routed_from: 'promotion',
+        name,
+      });
+      return {
+        success: true,
+        message: 'Saved as lead',
+        routed_to: 'lead',
+        id: leadId,
+      };
     }
 
     // ── Rule 2: phone present but phone already in CRM leads → skip ───────────
     if (phone) {
       const inLeads = await this.phoneExistsInLeads(phone);
       if (inLeads) {
-        this.logger.log(`Promotion skipped — phone already in leads (phone=${phone})`);
-        this.logsService.log(LogAction.PROMOTION_SKIPPED, { phone, reason: 'phone_in_leads' });
-        return { success: true, message: 'Already a lead', routed_to: 'skipped' };
+        this.logger.log(
+          `Promotion skipped — phone already in leads (phone=${phone})`,
+        );
+        this.logsService.log(LogAction.PROMOTION_SKIPPED, {
+          phone,
+          reason: 'phone_in_leads',
+        });
+        return {
+          success: true,
+          message: 'Already a lead',
+          routed_to: 'skipped',
+        };
       }
     }
 
     // ── Rule 3: email-only or new phone-only → save to promotion_contacts ─────
     if (phone) {
-      const existing = await this.repo.findOne({ where: { whatsapp_number: phone } });
+      const existing = await this.repo.findOne({
+        where: { whatsapp_number: phone },
+      });
       if (existing) {
-        return { success: true, message: 'Already exists', routed_to: 'promotion', id: existing.id };
+        return {
+          success: true,
+          message: 'Already exists',
+          routed_to: 'promotion',
+          id: existing.id,
+        };
       }
     }
 
     if (email) {
       const existing = await this.repo.findOne({ where: { email } });
       if (existing) {
-        return { success: true, message: 'Already exists', routed_to: 'promotion', id: existing.id };
+        return {
+          success: true,
+          message: 'Already exists',
+          routed_to: 'promotion',
+          id: existing.id,
+        };
       }
     }
 
     const record = this.repo.create({
       whatsapp_number: phone ?? null,
-      email:           email ?? null,
-      source:          dto.source  || 'SHOPIFY',
-      page_url:        dto.page_url || null,
-      tag:             dto.tag     || 'promotion_capture',
+      email: email ?? null,
+      source: dto.source || 'SHOPIFY',
+      page_url: dto.page_url || null,
+      tag: dto.tag || 'promotion_capture',
     });
 
     const saved = await this.repo.save(record);
     this.logger.log(`Promotion contact saved id=${saved.id}`);
-    this.logsService.log(LogAction.PROMOTION_CAPTURED, { id: saved.id, phone: phone ?? null, email: email ?? null, tag: saved.tag });
-    return { success: true, message: 'Saved', routed_to: 'promotion', id: saved.id };
+    this.logsService.log(LogAction.PROMOTION_CAPTURED, {
+      id: saved.id,
+      phone: phone ?? null,
+      email: email ?? null,
+      tag: saved.tag,
+    });
+    return {
+      success: true,
+      message: 'Saved',
+      routed_to: 'promotion',
+      id: saved.id,
+    };
   }
 
   async findAll(): Promise<PromotionContact[]> {

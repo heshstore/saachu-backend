@@ -1,4 +1,13 @@
-import { Controller, Get, Post, Put, Delete, Body, Param, HttpCode } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Delete,
+  Body,
+  Param,
+  HttpCode,
+} from '@nestjs/common';
 import { RbacService } from './rbac.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
@@ -16,7 +25,9 @@ export class RbacController {
   /** Save full matrix — Admin only */
   @Post('matrix')
   @RequirePermission('rbac.manage')
-  saveMatrix(@Body() body: { data: { roleId: number; permissionIds: number[] }[] }) {
+  saveMatrix(
+    @Body() body: { data: { roleId: number; permissionIds: number[] }[] },
+  ) {
     return this.rbacService.saveMatrix(body.data);
   }
 

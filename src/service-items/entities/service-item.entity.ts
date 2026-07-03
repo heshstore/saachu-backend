@@ -1,4 +1,10 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+} from 'typeorm';
 
 @Entity('service_items')
 export class ServiceItem {
@@ -63,6 +69,9 @@ export class ServiceItem {
 
   @Column({ name: 'is_raw_material', default: false })
   isRawMaterial: boolean;
+
+  @Column({ name: 'image_url', type: 'text', nullable: true })
+  imageUrl: string | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;

@@ -81,7 +81,8 @@ export class LeadTagService {
 
   /** On-demand recompute for a single lead (e.g. after conversion). */
   async computeForLead(leadId: number): Promise<void> {
-    await this.ds.query(`
+    await this.ds.query(
+      `
       UPDATE leads SET tags = computed.tags
       FROM (
         SELECT
@@ -110,6 +111,8 @@ export class LeadTagService {
         WHERE l.id = $1
       ) computed
       WHERE leads.id = computed.id
-    `, [leadId]);
+    `,
+      [leadId],
+    );
   }
 }

@@ -7,10 +7,10 @@ import {
 } from 'typeorm';
 
 export enum ProductionJobStatus {
-  PENDING     = 'PENDING',
+  PENDING = 'PENDING',
   IN_PROGRESS = 'IN_PROGRESS',
-  DONE        = 'DONE',
-  CANCELLED   = 'CANCELLED',
+  DONE = 'DONE',
+  CANCELLED = 'CANCELLED',
 }
 
 export const ACTIVE_STATUSES = [
@@ -20,16 +20,16 @@ export const ACTIVE_STATUSES = [
 
 export enum ProductionStage {
   DESIGNING = 'DESIGNING',
-  PRINTING  = 'PRINTING',
-  LASER     = 'LASER',
-  ASSEMBLY  = 'ASSEMBLY',
+  PRINTING = 'PRINTING',
+  LASER = 'LASER',
+  ASSEMBLY = 'ASSEMBLY',
   COMPLETED = 'COMPLETED',
 }
 
 export enum JobPriority {
-  LOW    = 'LOW',
+  LOW = 'LOW',
   NORMAL = 'NORMAL',
-  HIGH   = 'HIGH',
+  HIGH = 'HIGH',
   URGENT = 'URGENT',
 }
 

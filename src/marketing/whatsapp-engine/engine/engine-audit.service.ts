@@ -64,7 +64,9 @@ export class EngineAuditService {
         ],
       );
     } catch (err: any) {
-      this.logger.warn(`[AuditLog] Failed to write audit event ${params.event}: ${err?.message}`);
+      this.logger.warn(
+        `[AuditLog] Failed to write audit event ${params.event}: ${err?.message}`,
+      );
     }
   }
 }

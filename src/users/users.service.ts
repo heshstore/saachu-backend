@@ -3,16 +3,24 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { User } from './entities/user.entity';
-import { normalizeUserMobile, normalizeUserRole } from './user-normalization.util';
+import {
+  normalizeUserMobile,
+  normalizeUserRole,
+} from './user-normalization.util';
+import { clearJwtCacheForUser } from '../auth/jwt.strategy';
 
 @Injectable()
 export class UsersService {
+  private _dropdownCache: { data: Partial<User>[]; ts: number } | null = null;
+
   constructor(
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
   ) {}
 
-  private normalizeUserOutput<T extends Partial<User>>(user: T | null): T | null {
+  private normalizeUserOutput<T extends Partial<User>>(
+    user: T | null,
+  ): T | null {
     if (!user) return user;
     return {
       ...user,
@@ -22,21 +30,29 @@ export class UsersService {
   }
 
   findAll() {
-    return this.userRepository.find({ where: { is_active: true } }).then(users =>
-      users.map(user => this.normalizeUserOutput(user) as User),
-    );
+    return this.userRepository
+      .find({ where: { is_active: true } })
+      .then((users) => users.map((user) => this.normalizeUserOutput(user)));
   }
 
-  findForDropdown() {
-    return this.userRepository.find({
+  async findForDropdown() {
+    if (this._dropdownCache && Date.now() - this._dropdownCache.ts < 300_000) {
+      return this._dropdownCache.data;
+    }
+    const users = await this.userRepository.find({
       where: { is_active: true },
       select: ['id', 'name', 'role', 'marketing_area'],
       order: { name: 'ASC' },
-    }).then(users => users.map(user => this.normalizeUserOutput(user) as User));
+    });
+    const result = users.map((user) => this.normalizeUserOutput(user));
+    this._dropdownCache = { data: result, ts: Date.now() };
+    return result;
   }
 
   findOne(id: number) {
-    return this.userRepository.findOne({ where: { id } }).then(user => this.normalizeUserOutput(user));
+    return this.userRepository
+      .findOne({ where: { id } })
+      .then((user) => this.normalizeUserOutput(user));
   }
 
   async create(data: any) {
@@ -54,9 +70,10 @@ export class UsersService {
       mobile,
       role,
       password_hash,
-      can_approve_order: rest.can_approve_order ?? (role === 'Admin'),
+      can_approve_order: rest.can_approve_order ?? role === 'Admin',
     });
     const saved = await this.userRepository.save(user);
+    this._dropdownCache = null;
     const { password_hash: _ph, ...result } = saved as any;
     return this.normalizeUserOutput(result);
   }
@@ -79,6 +96,8 @@ export class UsersService {
       }
     }
     await this.userRepository.update(id, data);
+    this._dropdownCache = null;
+    clearJwtCacheForUser(id);
     return this.findOne(id);
   }
 
@@ -86,6 +105,8 @@ export class UsersService {
     const user = await this.findOne(id);
     if (!user) throw new Error('User not found');
     await this.userRepository.update(id, { is_active: !user.is_active });
+    this._dropdownCache = null;
+    clearJwtCacheForUser(id);
     return this.findOne(id);
   }
 }

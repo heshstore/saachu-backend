@@ -9,7 +9,8 @@
  * Usage (local DB — reads .env automatically):
  *   node scripts/grant-admin-permissions.js
  */
-require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+const { resolveScriptDb } = require('./lib/script-db');
+const { url: DB_URL, ssl: DB_SSL } = resolveScriptDb();
 const { Client } = require('pg');
 
 const ALL_PERMISSIONS = [
@@ -74,19 +75,8 @@ const ALL_PERMISSIONS = [
 
 const FULL_ACCESS_ROLES = ['Admin', 'COO'];
 
-function sslOption(url) {
-  if (!url) return undefined;
-  if (/neon\.tech|aiven\.io|supabase\.co|render\.com|sslmode=require|ssl=true/i.test(url)) {
-    return { rejectUnauthorized: false };
-  }
-  return undefined;
-}
-
 async function main() {
-  const url = process.env.DATABASE_URL;
-  if (!url) { console.error('DATABASE_URL is missing'); process.exit(1); }
-
-  const client = new Client({ connectionString: url, ssl: sslOption(url) });
+  const client = new Client({ connectionString: DB_URL, ssl: DB_SSL });
   await client.connect();
 
   try {

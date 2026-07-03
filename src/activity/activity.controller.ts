@@ -1,4 +1,11 @@
-import { Controller, Get, Param, Query, Request, ParseIntPipe } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Param,
+  Query,
+  Request,
+  ParseIntPipe,
+} from '@nestjs/common';
 import { ActivityService } from './activity.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
@@ -10,24 +17,24 @@ export class ActivityController {
   @Get()
   @RequirePermission('staff.view')
   getGlobal(
-    @Query('module')      module?: string,
+    @Query('module') module?: string,
     @Query('entity_type') entity_type?: string,
-    @Query('source')      source?: string,
-    @Query('severity')    severity?: string,
-    @Query('user_id')     user_id?: string,
-    @Query('from')        from?: string,
-    @Query('to')          to?: string,
-    @Query('page')        page?: string,
+    @Query('source') source?: string,
+    @Query('severity') severity?: string,
+    @Query('user_id') user_id?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('page') page?: string,
   ) {
     return this.activityService.getGlobalActivity({
       module,
       entity_type,
       source,
       severity,
-      user_id:  user_id  ? parseInt(user_id, 10)  : undefined,
+      user_id: user_id ? parseInt(user_id, 10) : undefined,
       from,
       to,
-      page:     page     ? Math.max(1, parseInt(page, 10)) : 1,
+      page: page ? Math.max(1, parseInt(page, 10)) : 1,
     });
   }
 
@@ -35,9 +42,9 @@ export class ActivityController {
   @Get('entity/:type/:id')
   @RequirePermission('lead.view')
   getEntityTimeline(
-    @Param('type')            entityType: string,
-    @Param('id', ParseIntPipe) entityId:  number,
-    @Query('page')            page?: string,
+    @Param('type') entityType: string,
+    @Param('id', ParseIntPipe) entityId: number,
+    @Query('page') page?: string,
   ) {
     return this.activityService.getEntityTimeline(
       entityType,
@@ -51,7 +58,7 @@ export class ActivityController {
   @RequirePermission('staff.view')
   getUserActivity(
     @Param('id', ParseIntPipe) userId: number,
-    @Query('page')             page?: string,
+    @Query('page') page?: string,
   ) {
     return this.activityService.getUserActivity(
       userId,

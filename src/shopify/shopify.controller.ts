@@ -1,5 +1,9 @@
 import { Controller, Get, Post, Param, Logger } from '@nestjs/common';
-import { ShopifyService, getSyncStatus, isShopifyConfigured } from './shopify.service';
+import {
+  ShopifyService,
+  getSyncStatus,
+  isShopifyConfigured,
+} from './shopify.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
 @Controller('shopify')
@@ -20,19 +24,35 @@ export class ShopifyController {
   @RequirePermission('item.shopify_sync')
   startSync() {
     if (!isShopifyConfigured()) {
-      this.logger.warn('[SHOPIFY] startSync called but Shopify env vars are not configured');
-      return { started: false, reason: 'Shopify not configured — set SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN on the server' };
+      this.logger.warn(
+        '[SHOPIFY] startSync called but Shopify env vars are not configured',
+      );
+      return {
+        started: false,
+        reason:
+          'Shopify not configured — set SHOPIFY_STORE and SHOPIFY_ACCESS_TOKEN on the server',
+      };
     }
     const current = getSyncStatus();
     if (current.status === 'running') {
-      this.logger.warn('[SHOPIFY] startSync called but sync already running — attaching caller to existing run');
-      return { started: false, reason: 'Sync already in progress', status: current };
+      this.logger.warn(
+        '[SHOPIFY] startSync called but sync already running — attaching caller to existing run',
+      );
+      return {
+        started: false,
+        reason: 'Sync already in progress',
+        status: current,
+      };
     }
-    this.logger.log('[SHOPIFY] Manual sync started via POST /shopify/sync/start');
+    this.logger.log(
+      '[SHOPIFY] Manual sync started via POST /shopify/sync/start',
+    );
     // Fire without awaiting — runs in background, progress visible via /sync-status
-    void this.shopifyService.syncProducts({ trigger: 'manual' }).catch(err => {
-      this.logger.error('[SHOPIFY] Background sync error:', err?.message);
-    });
+    void this.shopifyService
+      .syncProducts({ trigger: 'manual' })
+      .catch((err) => {
+        this.logger.error('[SHOPIFY] Background sync error:', err?.message);
+      });
     return { started: true };
   }
 
@@ -46,12 +66,24 @@ export class ShopifyController {
   @Get('sync-products')
   @RequirePermission('item.shopify_sync')
   async syncProductsBlocking() {
-    this.logger.log('[SHOPIFY] Blocking sync triggered via GET /shopify/sync-products');
+    this.logger.log(
+      '[SHOPIFY] Blocking sync triggered via GET /shopify/sync-products',
+    );
     try {
       return await this.shopifyService.syncProducts();
     } catch (error: any) {
       this.logger.error('[SHOPIFY] Blocking sync error:', error?.message);
-      return { fetched: 0, variants: 0, inserted: 0, updated: 0, skipped: 0, skippedReasons: {}, errors: 1, durationMs: 0, error: error?.message ?? 'Sync failed' };
+      return {
+        fetched: 0,
+        variants: 0,
+        inserted: 0,
+        updated: 0,
+        skipped: 0,
+        skippedReasons: {},
+        errors: 1,
+        durationMs: 0,
+        error: error?.message ?? 'Sync failed',
+      };
     }
   }
 
@@ -70,7 +102,9 @@ export class ShopifyController {
     if (!isShopifyConfigured()) {
       return { started: false, reason: 'Shopify not configured' };
     }
-    this.logger.log('[SHOPIFY] Knowledge backfill started via POST /shopify/backfill-knowledge');
+    this.logger.log(
+      '[SHOPIFY] Knowledge backfill started via POST /shopify/backfill-knowledge',
+    );
     return this.shopifyService.backfillKnowledgeFields();
   }
 

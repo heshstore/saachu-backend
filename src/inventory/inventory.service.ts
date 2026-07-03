@@ -1,4 +1,8 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Warehouse } from './entities/warehouse.entity';
@@ -19,17 +23,23 @@ export class InventoryService {
   // ── Warehouse CRUD ────────────────────────────────────────────────────────────
 
   findAllWarehouses(includeInactive = false): Promise<Warehouse[]> {
-    if (includeInactive) return this.warehouseRepo.find({ order: { name: 'ASC' } });
-    return this.warehouseRepo.find({ where: { active: true }, order: { name: 'ASC' } });
+    if (includeInactive)
+      return this.warehouseRepo.find({ order: { name: 'ASC' } });
+    return this.warehouseRepo.find({
+      where: { active: true },
+      order: { name: 'ASC' },
+    });
   }
 
   async createWarehouse(data: any): Promise<Warehouse> {
-    if (!data.name?.trim()) throw new BadRequestException('Warehouse name is required');
-    if (!data.code?.trim()) throw new BadRequestException('Warehouse code is required');
+    if (!data.name?.trim())
+      throw new BadRequestException('Warehouse name is required');
+    if (!data.code?.trim())
+      throw new BadRequestException('Warehouse code is required');
     const wh = this.warehouseRepo.create({
-      name:   data.name.trim(),
-      code:   data.code.trim().toUpperCase(),
-      type:   data.type   ?? 'GENERAL',
+      name: data.name.trim(),
+      code: data.code.trim().toUpperCase(),
+      type: data.type ?? 'GENERAL',
       active: data.active !== false,
     });
     return this.warehouseRepo.save(wh);
@@ -38,33 +48,43 @@ export class InventoryService {
   async updateWarehouse(id: number, data: any): Promise<Warehouse> {
     const wh = await this.warehouseRepo.findOneBy({ id });
     if (!wh) throw new NotFoundException(`Warehouse ${id} not found`);
-    if (data.name   !== undefined) wh.name   = data.name.trim();
-    if (data.code   !== undefined) wh.code   = data.code.trim().toUpperCase();
-    if (data.type   !== undefined) wh.type   = data.type;
+    if (data.name !== undefined) wh.name = data.name.trim();
+    if (data.code !== undefined) wh.code = data.code.trim().toUpperCase();
+    if (data.type !== undefined) wh.type = data.type;
     if (data.active !== undefined) wh.active = Boolean(data.active);
     return this.warehouseRepo.save(wh);
   }
 
   // ── Transaction Entry ─────────────────────────────────────────────────────────
 
-  async createTransaction(data: any, userId?: number): Promise<InventoryTransaction> {
+  async createTransaction(
+    data: any,
+    userId?: number,
+  ): Promise<InventoryTransaction> {
     // Validate required fields
-    if (!data.itemId)          throw new BadRequestException('itemId is required');
-    if (!data.warehouseId)     throw new BadRequestException('warehouseId is required');
-    if (!data.transactionType) throw new BadRequestException('transactionType is required');
-    if (!data.direction)       throw new BadRequestException('direction is required');
+    if (!data.itemId) throw new BadRequestException('itemId is required');
+    if (!data.warehouseId)
+      throw new BadRequestException('warehouseId is required');
+    if (!data.transactionType)
+      throw new BadRequestException('transactionType is required');
+    if (!data.direction) throw new BadRequestException('direction is required');
 
     const qty = Number(data.qty);
-    if (!qty || qty <= 0)      throw new BadRequestException('qty must be > 0');
+    if (!qty || qty <= 0) throw new BadRequestException('qty must be > 0');
 
     const VALID_DIRECTIONS = ['IN', 'OUT', 'ADJUSTMENT'];
     if (!VALID_DIRECTIONS.includes(data.direction)) {
-      throw new BadRequestException(`direction must be one of: ${VALID_DIRECTIONS.join(', ')}`);
+      throw new BadRequestException(
+        `direction must be one of: ${VALID_DIRECTIONS.join(', ')}`,
+      );
     }
 
     // Verify warehouse exists
-    const wh = await this.warehouseRepo.findOneBy({ id: Number(data.warehouseId) });
-    if (!wh) throw new NotFoundException(`Warehouse ${data.warehouseId} not found`);
+    const wh = await this.warehouseRepo.findOneBy({
+      id: Number(data.warehouseId),
+    });
+    if (!wh)
+      throw new NotFoundException(`Warehouse ${data.warehouseId} not found`);
 
     // Verify item exists in service_items or shopify_catalog_items
     const itemRows = await this.dataSource.query(
@@ -74,20 +94,21 @@ export class InventoryService {
        LIMIT 1`,
       [Number(data.itemId)],
     );
-    if (!itemRows.length) throw new NotFoundException(`Item ${data.itemId} not found`);
+    if (!itemRows.length)
+      throw new NotFoundException(`Item ${data.itemId} not found`);
 
     const tx = this.txRepo.create({
-      itemId:          Number(data.itemId),
-      warehouseId:     Number(data.warehouseId),
+      itemId: Number(data.itemId),
+      warehouseId: Number(data.warehouseId),
       transactionType: data.transactionType,
-      direction:       data.direction,
+      direction: data.direction,
       qty,
-      unit:            data.unit            ?? 'PCS',
-      rate:            data.rate != null     ? Number(data.rate) : null,
-      referenceType:   data.referenceType   ?? null,
-      referenceId:     data.referenceId     ? Number(data.referenceId) : null,
-      notes:           data.notes           ?? null,
-      createdBy:       userId               ?? null,
+      unit: data.unit ?? 'PCS',
+      rate: data.rate != null ? Number(data.rate) : null,
+      referenceType: data.referenceType ?? null,
+      referenceId: data.referenceId ? Number(data.referenceId) : null,
+      notes: data.notes ?? null,
+      createdBy: userId ?? null,
     });
     return this.txRepo.save(tx);
   }
@@ -139,32 +160,36 @@ export class InventoryService {
     // Group by item — each item can span multiple warehouses
     const byItem = new Map<number, any>();
     for (const r of rows) {
-      const meta = itemMap.get(r.itemId) ?? { itemName: `Item #${r.itemId}`, itemCode: '', categoryType: null };
+      const meta = itemMap.get(r.itemId) ?? {
+        itemName: `Item #${r.itemId}`,
+        itemCode: '',
+        categoryType: null,
+      };
       if (!byItem.has(r.itemId)) {
         byItem.set(r.itemId, {
-          itemId:       r.itemId,
-          itemName:     meta.itemName,
-          itemCode:     meta.itemCode,
+          itemId: r.itemId,
+          itemName: meta.itemName,
+          itemCode: meta.itemCode,
           categoryType: meta.categoryType,
-          unit:         r.unit,
-          totalIn:      0,
-          totalOut:     0,
+          unit: r.unit,
+          totalIn: 0,
+          totalOut: 0,
           currentStock: 0,
-          warehouses:   [],
+          warehouses: [],
         });
       }
       const item = byItem.get(r.itemId)!;
-      item.totalIn      += Number(r.totalIn);
-      item.totalOut     += Number(r.totalOut);
+      item.totalIn += Number(r.totalIn);
+      item.totalOut += Number(r.totalOut);
       item.currentStock += Number(r.currentStock);
       item.warehouses.push({
-        warehouseId:   r.warehouseId,
+        warehouseId: r.warehouseId,
         warehouseName: r.warehouseName,
         warehouseCode: r.warehouseCode,
         warehouseType: r.warehouseType,
-        totalIn:       Number(r.totalIn),
-        totalOut:      Number(r.totalOut),
-        currentStock:  Number(r.currentStock),
+        totalIn: Number(r.totalIn),
+        totalOut: Number(r.totalOut),
+        currentStock: Number(r.currentStock),
       });
     }
 
@@ -191,7 +216,8 @@ export class InventoryService {
     if (!itemMeta) throw new NotFoundException(`Item ${itemId} not found`);
 
     // Transactions in chronological order
-    const txRows: any[] = await this.dataSource.query(`
+    const txRows: any[] = await this.dataSource.query(
+      `
       SELECT
         t.id,
         t.transaction_type  AS "transactionType",
@@ -211,10 +237,13 @@ export class InventoryService {
       JOIN warehouses w ON w.id = t.warehouse_id
       WHERE t.item_id = $1
       ORDER BY t.created_at ASC, t.id ASC
-    `, [itemId]);
+    `,
+      [itemId],
+    );
 
     // Warehouse balances
-    const balRows: any[] = await this.dataSource.query(`
+    const balRows: any[] = await this.dataSource.query(
+      `
       SELECT
         w.id                AS "warehouseId",
         w.name              AS "warehouseName",
@@ -230,14 +259,16 @@ export class InventoryService {
       WHERE t.item_id = $1
       GROUP BY w.id, w.name, w.code, w.type, t.unit
       ORDER BY w.name
-    `, [itemId]);
+    `,
+      [itemId],
+    );
 
     const totalStock = balRows.reduce((s, r) => s + Number(r.currentStock), 0);
 
     return {
-      item:         itemMeta,
+      item: itemMeta,
       totalStock,
-      warehouses:   balRows,
+      warehouses: balRows,
       transactions: txRows,
     };
   }
@@ -245,7 +276,8 @@ export class InventoryService {
   // ── Transactions List (for admin / audit) ─────────────────────────────────────
 
   async getTransactions(limit = 100, offset = 0): Promise<any[]> {
-    return this.dataSource.query(`
+    return this.dataSource.query(
+      `
       SELECT
         t.*,
         w.name AS "warehouseName",
@@ -254,6 +286,8 @@ export class InventoryService {
       JOIN warehouses w ON w.id = t.warehouse_id
       ORDER BY t.created_at DESC, t.id DESC
       LIMIT $1 OFFSET $2
-    `, [limit, offset]);
+    `,
+      [limit, offset],
+    );
   }
 }

@@ -8,14 +8,20 @@ import { NotificationEngineService } from './notification-engine.service';
 import { ProductionJob } from '../orders/entities/production-job.entity';
 import { User } from '../users/entities/user.entity';
 import { CrmWhatsAppModule } from '../crm-whatsapp/crm-whatsapp.module';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Notification, ProductionJob, User]),
     CrmWhatsAppModule,
+    AuthModule,
   ],
   controllers: [NotificationController],
-  providers: [NotificationService, NotificationEngineService, NotificationGateway],
+  providers: [
+    NotificationService,
+    NotificationEngineService,
+    NotificationGateway,
+  ],
   exports: [NotificationService],
 })
 export class NotificationsModule {}

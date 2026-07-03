@@ -32,12 +32,14 @@ export class AnalyticsService {
   ) {}
 
   async getCampaignStats(campaignId: string): Promise<Record<string, number>> {
-    const stats = await fetchAuthoritativeMetrics(this.ds, new Date(0), { campaignId });
+    const stats = await fetchAuthoritativeMetrics(this.ds, new Date(0), {
+      campaignId,
+    });
 
     this.logger.log(
       `[MKT_CAMPAIGN_STATS_QUERY] campaign_id=${campaignId} ` +
-      `sent=${stats.sent} read=${stats.read} delivered=${stats.delivered} ` +
-      `failed=${stats.failed} skipped=${stats.skipped} not_on_whatsapp=${stats.not_on_whatsapp} total=${stats.total}`,
+        `sent=${stats.sent} read=${stats.read} delivered=${stats.delivered} ` +
+        `failed=${stats.failed} skipped=${stats.skipped} not_on_whatsapp=${stats.not_on_whatsapp} total=${stats.total}`,
     );
     return { ...stats };
   }
@@ -47,7 +49,9 @@ export class AnalyticsService {
   }
 
   async getNumberStats(numberId: string): Promise<Record<string, number>> {
-    return { ...(await fetchAuthoritativeMetrics(this.ds, new Date(0), { numberId })) };
+    return {
+      ...(await fetchAuthoritativeMetrics(this.ds, new Date(0), { numberId })),
+    };
   }
 
   async findLogs(filters: {
@@ -57,21 +61,38 @@ export class AnalyticsService {
     limit?: number;
   }): Promise<WhatsappMessageLog[]> {
     const limit = filters.limit ?? 100;
-    const qb = this.repo.createQueryBuilder('l').orderBy('l.sent_at', 'DESC').limit(limit);
-    if (filters.status)     qb.andWhere('l.status = :status',        { status: filters.status });
-    if (filters.phone)      qb.andWhere('l.customer_phone = :phone', { phone: filters.phone });
-    if (filters.campaignId) qb.andWhere('l.campaign_id = :campaignId', { campaignId: filters.campaignId });
+    const qb = this.repo
+      .createQueryBuilder('l')
+      .orderBy('l.sent_at', 'DESC')
+      .limit(limit);
+    if (filters.status)
+      qb.andWhere('l.status = :status', { status: filters.status });
+    if (filters.phone)
+      qb.andWhere('l.customer_phone = :phone', { phone: filters.phone });
+    if (filters.campaignId)
+      qb.andWhere('l.campaign_id = :campaignId', {
+        campaignId: filters.campaignId,
+      });
     return qb.getMany();
   }
 
   async getEngineDashboardStats(): Promise<Record<string, number | string>> {
     const todayMidnight = startOfToday();
-    this.logger.log(`[MKT_DASHBOARD] endpoint=engine/dashboard starting stats fetch`);
+    this.logger.log(
+      `[MKT_DASHBOARD] endpoint=engine/dashboard starting stats fetch`,
+    );
 
     let active_numbers = 0;
     let metrics = {
-      sent: 0, delivered: 0, read: 0, replied: 0, leads: 0,
-      failed: 0, skipped: 0, not_on_whatsapp: 0, queue_pending: 0,
+      sent: 0,
+      delivered: 0,
+      read: 0,
+      replied: 0,
+      leads: 0,
+      failed: 0,
+      skipped: 0,
+      not_on_whatsapp: 0,
+      queue_pending: 0,
     };
 
     try {
@@ -80,14 +101,16 @@ export class AnalyticsService {
         fetchAuthoritativeMetrics(this.ds, todayMidnight),
       ]);
     } catch (err: any) {
-      this.logger.error(`[MKT_DASHBOARD] endpoint=engine/dashboard fail=stats_query reason=${err?.message}`);
+      this.logger.error(
+        `[MKT_DASHBOARD] endpoint=engine/dashboard fail=stats_query reason=${err?.message}`,
+      );
     }
 
     this.logger.log(
       `[MKT_DASHBOARD] endpoint=engine/dashboard success=true ` +
-      `active_numbers=${active_numbers} queue_pending=${metrics.queue_pending} sent_today=${metrics.sent} ` +
-      `delivered_today=${metrics.delivered} read_today=${metrics.read} replied_today=${metrics.replied} ` +
-      `not_on_whatsapp_today=${metrics.not_on_whatsapp} failed_today=${metrics.failed} crm_leads_today=${metrics.leads}`,
+        `active_numbers=${active_numbers} queue_pending=${metrics.queue_pending} sent_today=${metrics.sent} ` +
+        `delivered_today=${metrics.delivered} read_today=${metrics.read} replied_today=${metrics.replied} ` +
+        `not_on_whatsapp_today=${metrics.not_on_whatsapp} failed_today=${metrics.failed} crm_leads_today=${metrics.leads}`,
     );
 
     return {
@@ -104,16 +127,18 @@ export class AnalyticsService {
   }
 
   // Per-template reply/read performance from last 30 days
-  async getTemplatePerformance(): Promise<{
-    template_id: string;
-    template_name: string;
-    performance_weight: number;
-    sent: number;
-    read: number;
-    replied: number;
-    read_rate_pct: number;
-    reply_rate_pct: number;
-  }[]> {
+  async getTemplatePerformance(): Promise<
+    {
+      template_id: string;
+      template_name: string;
+      performance_weight: number;
+      sent: number;
+      read: number;
+      replied: number;
+      read_rate_pct: number;
+      reply_rate_pct: number;
+    }[]
+  > {
     type TRow = {
       template_id: string;
       template_name: string;
@@ -140,8 +165,8 @@ export class AnalyticsService {
     `);
 
     return rows.map((r) => {
-      const sent    = parseInt(r.sent, 10);
-      const read    = parseInt(r.read, 10);
+      const sent = parseInt(r.sent, 10);
+      const read = parseInt(r.read, 10);
       const replied = parseInt(r.replied, 10);
       return {
         template_id: r.template_id,
@@ -150,7 +175,7 @@ export class AnalyticsService {
         sent,
         read,
         replied,
-        read_rate_pct:  sent > 0 ? Math.round((read    / sent) * 100) : 0,
+        read_rate_pct: sent > 0 ? Math.round((read / sent) * 100) : 0,
         reply_rate_pct: sent > 0 ? Math.round((replied / sent) * 100) : 0,
       };
     });
@@ -160,12 +185,34 @@ export class AnalyticsService {
   async getDailyReport(): Promise<{
     date: string;
     delivery_funnel: Record<string, number>;
-    audience: { total: number; eligible: number; in_cooldown: number; opted_out: number };
-    number_health: { id: string; phone: string; name: string; daily_sent: number; daily_cap: number; risk_score: number; is_active: boolean; waState: string }[];
-    top_templates: { template_name: string; replied: number; reply_rate_pct: number }[];
+    audience: {
+      total: number;
+      eligible: number;
+      in_cooldown: number;
+      opted_out: number;
+    };
+    number_health: {
+      id: string;
+      phone: string;
+      name: string;
+      daily_sent: number;
+      daily_cap: number;
+      risk_score: number;
+      is_active: boolean;
+      waState: string;
+    }[];
+    top_templates: {
+      template_name: string;
+      replied: number;
+      reply_rate_pct: number;
+    }[];
     crm_leads_today: number;
     risk_alerts: number;
-    env: { pilot_mode: boolean; test_only: boolean; max_daily_audience: string };
+    env: {
+      pilot_mode: boolean;
+      test_only: boolean;
+      max_daily_audience: string;
+    };
   }> {
     const todayMidnight = startOfToday();
 
@@ -200,10 +247,10 @@ export class AnalyticsService {
         not_on_whatsapp: metrics.not_on_whatsapp,
       },
       audience: {
-        total:       parseInt(ar.total       ?? '0', 10),
-        eligible:    parseInt(ar.eligible    ?? '0', 10),
+        total: parseInt(ar.total ?? '0', 10),
+        eligible: parseInt(ar.eligible ?? '0', 10),
         in_cooldown: parseInt(ar.in_cooldown ?? '0', 10),
-        opted_out:   parseInt(ar.opted_out   ?? '0', 10),
+        opted_out: parseInt(ar.opted_out ?? '0', 10),
       },
       number_health: numbers.map((n) => ({
         id: n.id,
@@ -218,13 +265,18 @@ export class AnalyticsService {
       top_templates: templatePerf
         .filter((t) => t.sent > 0)
         .slice(0, 5)
-        .map((t) => ({ template_name: t.template_name, replied: t.replied, reply_rate_pct: t.reply_rate_pct })),
+        .map((t) => ({
+          template_name: t.template_name,
+          replied: t.replied,
+          reply_rate_pct: t.reply_rate_pct,
+        })),
       crm_leads_today,
       risk_alerts: riskAlerts,
       env: {
-        pilot_mode:         process.env.WHATSAPP_ENGINE_PILOT_MODE  === 'true',
-        test_only:          process.env.WHATSAPP_ENGINE_TEST_ONLY   === 'true',
-        max_daily_audience: process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE ?? 'unlimited',
+        pilot_mode: process.env.WHATSAPP_ENGINE_PILOT_MODE === 'true',
+        test_only: process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true',
+        max_daily_audience:
+          process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE ?? 'unlimited',
       },
     };
   }
@@ -280,25 +332,30 @@ export class AnalyticsService {
     const l = leadRows[0];
 
     const uniqueMessaged = parseInt(f?.unique_messaged ?? '0', 10);
-    const messagesSent   = parseInt(f?.messages_sent   ?? '0', 10);
-    const replied        = parseInt(replyCountRows[0]?.cnt ?? '0', 10);
-    const crmLeads       = parseInt(l?.crm_leads       ?? '0', 10);
-    const followedUp     = parseInt(l?.followed_up     ?? '0', 10);
+    const messagesSent = parseInt(f?.messages_sent ?? '0', 10);
+    const replied = parseInt(replyCountRows[0]?.cnt ?? '0', 10);
+    const crmLeads = parseInt(l?.crm_leads ?? '0', 10);
+    const followedUp = parseInt(l?.followed_up ?? '0', 10);
 
     return {
       since: since.toISOString().slice(0, 10),
-      unique_messaged:      uniqueMessaged,
-      messages_sent:        messagesSent,
+      unique_messaged: uniqueMessaged,
+      messages_sent: messagesSent,
       replied,
-      crm_leads:            crmLeads,
+      crm_leads: crmLeads,
       telecaller_followed_up: followedUp,
-      reply_rate_pct:    uniqueMessaged > 0 ? Math.round((replied        / uniqueMessaged) * 100) : 0,
-      lead_rate_pct:     uniqueMessaged > 0 ? Math.round((crmLeads       / uniqueMessaged) * 100) : 0,
-      followup_rate_pct: crmLeads      > 0 ? Math.round((followedUp     / crmLeads)       * 100) : 0,
+      reply_rate_pct:
+        uniqueMessaged > 0 ? Math.round((replied / uniqueMessaged) * 100) : 0,
+      lead_rate_pct:
+        uniqueMessaged > 0 ? Math.round((crmLeads / uniqueMessaged) * 100) : 0,
+      followup_rate_pct:
+        crmLeads > 0 ? Math.round((followedUp / crmLeads) * 100) : 0,
     };
   }
 
-  async getHistoricalPromotionAnalytics(days = 90): Promise<Record<string, unknown>> {
+  async getHistoricalPromotionAnalytics(
+    days = 90,
+  ): Promise<Record<string, unknown>> {
     const since = new Date(Date.now() - Math.max(1, days) * 86_400_000);
 
     const [
@@ -312,7 +369,9 @@ export class AnalyticsService {
       warmupHistory,
       promotionHistory,
     ] = await Promise.all([
-      this.ds.query(`
+      this.ds
+        .query(
+          `
         SELECT
           c.id, c.promo_id, c.campaign_name, c.status, c.test_mode,
           c.telecaller_number_id, n.phone AS telecaller_phone, c.created_at,
@@ -325,8 +384,13 @@ export class AnalyticsService {
         GROUP BY c.id, n.phone
         ORDER BY c.created_at DESC
         LIMIT 100
-      `, [startOfToday()]).catch(() => []),
-      this.ds.query(`
+      `,
+          [startOfToday()],
+        )
+        .catch(() => []),
+      this.ds
+        .query(
+          `
         SELECT
           q.status, q.error_message AS skip_reason,
           n.phone AS telecaller_phone, n.name AS telecaller_name,
@@ -336,8 +400,13 @@ export class AnalyticsService {
         WHERE q.created_at >= $1
         GROUP BY q.status, q.error_message, n.phone, n.name
         ORDER BY n.phone, q.status
-      `, [since]).catch(() => []),
-      this.ds.query(`
+      `,
+          [since],
+        )
+        .catch(() => []),
+      this.ds
+        .query(
+          `
         SELECT
           r.sku, s.item_name AS product_name, r.campaign_id, c.promo_id,
           n.phone AS telecaller_phone,
@@ -351,8 +420,13 @@ export class AnalyticsService {
         GROUP BY r.sku, s.item_name, r.campaign_id, c.promo_id, n.phone
         ORDER BY last_sent_at DESC
         LIMIT 100
-      `, [since]).catch(() => []),
-      this.ds.query(`
+      `,
+          [since],
+        )
+        .catch(() => []),
+      this.ds
+        .query(
+          `
         SELECT
           c.id, c.promo_id, c.campaign_name, c.status, c.created_at,
           COUNT(q.id)::int AS queue_total,
@@ -366,11 +440,16 @@ export class AnalyticsService {
         GROUP BY c.id
         ORDER BY c.created_at DESC
         LIMIT 100
-      `, [since]).catch(() => []),
+      `,
+          [since],
+        )
+        .catch(() => []),
       this._trendRows('day', since),
       this._trendRows('week', since),
       this._trendRows('month', since),
-      this.ds.query(`
+      this.ds
+        .query(
+          `
         SELECT
           al.created_at,
           al.number_id,
@@ -385,8 +464,13 @@ export class AnalyticsService {
           AND al.created_at >= $1
         ORDER BY al.created_at DESC
         LIMIT 200
-      `, [since]).catch(() => []),
-      this.ds.query(`
+      `,
+          [since],
+        )
+        .catch(() => []),
+      this.ds
+        .query(
+          `
         SELECT
           al.created_at,
           al.number_id,
@@ -400,7 +484,10 @@ export class AnalyticsService {
           AND al.created_at >= $1
         ORDER BY al.created_at DESC
         LIMIT 200
-      `, [since]).catch(() => []),
+      `,
+          [since],
+        )
+        .catch(() => []),
     ]);
 
     return {
@@ -418,8 +505,13 @@ export class AnalyticsService {
     };
   }
 
-  private async _trendRows(bucket: 'day' | 'week' | 'month', since: Date): Promise<Record<string, unknown>[]> {
-    return this.ds.query(`
+  private async _trendRows(
+    bucket: 'day' | 'week' | 'month',
+    since: Date,
+  ): Promise<Record<string, unknown>[]> {
+    return this.ds
+      .query(
+        `
       SELECT
         DATE_TRUNC('${bucket}', l.sent_at AT TIME ZONE 'Asia/Kolkata')::date AS period,
         COUNT(*) FILTER (WHERE l.status IN ('sent','delivered','read','replied'))::int AS sent,
@@ -434,7 +526,10 @@ export class AnalyticsService {
       WHERE l.sent_at >= $1
       GROUP BY 1
       ORDER BY 1 ASC
-    `, [since]).catch(() => []);
+    `,
+        [since],
+      )
+      .catch(() => []);
   }
 
   private _buildStats(rows: StatusRow[]): Record<string, number> {
@@ -450,9 +545,9 @@ export class AnalyticsService {
 
     this.logger.log(
       `[CAMPAIGN_AUDIT] _buildStats cumulative rollup: ` +
-      `raw={sent:${raw['sent'] ?? 0},delivered:${raw['delivered'] ?? 0},read:${raw['read'] ?? 0},replied:${raw['replied'] ?? 0}} ` +
-      `cumulative={sent:${rolled.sent},delivered:${rolled.delivered},read:${rolled.read},replied:${rolled.replied}} ` +
-      `failed:${rolled.failed} skipped:${rolled.skipped} total:${total}`,
+        `raw={sent:${raw['sent'] ?? 0},delivered:${raw['delivered'] ?? 0},read:${raw['read'] ?? 0},replied:${raw['replied'] ?? 0}} ` +
+        `cumulative={sent:${rolled.sent},delivered:${rolled.delivered},read:${rolled.read},replied:${rolled.replied}} ` +
+        `failed:${rolled.failed} skipped:${rolled.skipped} total:${total}`,
     );
 
     return {

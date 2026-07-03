@@ -30,16 +30,19 @@ export class AudienceController {
   /** Paginated, filterable, searchable contact list — replaces full findAll for UI. */
   @Get('search')
   search(
-    @Query('q')             q?: string,
-    @Query('city')          city?: string,
+    @Query('q') q?: string,
+    @Query('city') city?: string,
     @Query('business_type') business_type?: string,
-    @Query('status')        status?: string,
-    @Query('page')          page?: string,
-    @Query('limit')         limit?: string,
+    @Query('status') status?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
     return this.audienceService.search({
-      q, city, business_type, status,
-      page:  page  ? parseInt(page,  10) : 1,
+      q,
+      city,
+      business_type,
+      status,
+      page: page ? parseInt(page, 10) : 1,
       limit: limit ? parseInt(limit, 10) : 50,
     });
   }
@@ -56,7 +59,9 @@ export class AudienceController {
   }
 
   @Post()
-  create(@Body() body: Partial<MarketingAudience> & { confirm_production?: boolean }) {
+  create(
+    @Body() body: Partial<MarketingAudience> & { confirm_production?: boolean },
+  ) {
     const { confirm_production, ...dto } = body;
     return this.audienceService.create(dto, {
       confirmProduction: confirm_production === true,
@@ -64,14 +69,16 @@ export class AudienceController {
   }
 
   @Post('bulk')
-  async bulkUpsert(@Body() body: {
-    rows: Partial<MarketingAudience>[];
-    confirm_production?: boolean;
-  }) {
-    const result = await this.audienceService.bulkUpsert(
-      body.rows ?? [],
-      { confirmProduction: body.confirm_production === true },
-    );
+  async bulkUpsert(
+    @Body()
+    body: {
+      rows: Partial<MarketingAudience>[];
+      confirm_production?: boolean;
+    },
+  ) {
+    const result = await this.audienceService.bulkUpsert(body.rows ?? [], {
+      confirmProduction: body.confirm_production === true,
+    });
     this.autonomousEngine.fillRemainingCapacity().catch(() => {});
     // Fire-and-forget: persist skip records for Skip Recovery Dashboard.
     // Non-blocking — import response is not delayed by this.

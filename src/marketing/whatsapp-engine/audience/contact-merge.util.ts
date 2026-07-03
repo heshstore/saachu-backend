@@ -25,7 +25,7 @@ export function isMeaningful(value: string | null | undefined): boolean {
 
 export function normalizeEmail(raw: string | null | undefined): string | null {
   if (!isMeaningful(raw)) return null;
-  return raw!.trim().toLowerCase();
+  return raw.trim().toLowerCase();
 }
 
 /** Prefer the longer meaningful display name. */
@@ -33,8 +33,8 @@ export function mergeName(
   existing: string | null | undefined,
   incoming: string | null | undefined,
 ): string | null {
-  const e = isMeaningful(existing) ? existing!.trim() : null;
-  const i = isMeaningful(incoming) ? incoming!.trim() : null;
+  const e = isMeaningful(existing) ? existing.trim() : null;
+  const i = isMeaningful(incoming) ? incoming.trim() : null;
   if (!i) return e;
   if (!e) return i;
   return i.length > e.length ? i : e;
@@ -45,8 +45,8 @@ export function mergeFillMissing(
   existing: string | null | undefined,
   incoming: string | null | undefined,
 ): string | null {
-  if (isMeaningful(existing)) return existing!.trim();
-  return isMeaningful(incoming) ? incoming!.trim() : (existing ?? null);
+  if (isMeaningful(existing)) return existing.trim();
+  return isMeaningful(incoming) ? incoming.trim() : (existing ?? null);
 }
 
 /** Email: fill only if existing empty. */
@@ -54,8 +54,10 @@ export function mergeEmail(
   existing: string | null | undefined,
   incoming: string | null | undefined,
 ): string | null {
-  if (isMeaningful(existing)) return existing!.trim();
-  return isMeaningful(incoming) ? incoming!.trim().toLowerCase() : (existing ?? null);
+  if (isMeaningful(existing)) return existing.trim();
+  return isMeaningful(incoming)
+    ? incoming.trim().toLowerCase()
+    : (existing ?? null);
 }
 
 /** Append incoming notes; never destroy existing. */
@@ -63,8 +65,8 @@ export function mergeNotes(
   existing: string | null | undefined,
   incoming: string | null | undefined,
 ): string | null {
-  const e = isMeaningful(existing) ? existing!.trim() : '';
-  const i = isMeaningful(incoming) ? incoming!.trim() : '';
+  const e = isMeaningful(existing) ? existing.trim() : '';
+  const i = isMeaningful(incoming) ? incoming.trim() : '';
   if (!i) return e || null;
   if (!e) return i;
   if (e.includes(i)) return e;
@@ -77,9 +79,9 @@ export function mergeSources(
   incomingSource: string | null | undefined,
 ): string[] {
   const base = Array.isArray(existing) ? [...existing] : [];
-  const label = isMeaningful(incomingSource) ? incomingSource!.trim() : null;
+  const label = isMeaningful(incomingSource) ? incomingSource.trim() : null;
   if (!label) return base;
-  if (!base.some(s => s.toLowerCase() === label.toLowerCase())) {
+  if (!base.some((s) => s.toLowerCase() === label.toLowerCase())) {
     base.push(label);
   }
   return base;
@@ -110,13 +112,17 @@ export function mergeImportRows(
   incoming: ImportRow,
 ): ImportRow {
   const sourceLabel = incoming.source ?? acc.source ?? 'CSV Import';
-  const sources = mergeSources(acc.sources_used as string[] | undefined, sourceLabel);
+  const sources = mergeSources(acc.sources_used, sourceLabel);
 
   return {
     ...acc,
     phone: acc.phone ?? incoming.phone,
-    name: mergeName(acc.name, incoming.name) ?? mergeName(acc.customer_name, incoming.customer_name),
-    customer_name: mergeName(acc.customer_name, incoming.customer_name) ?? mergeName(acc.name, incoming.name),
+    name:
+      mergeName(acc.name, incoming.name) ??
+      mergeName(acc.customer_name, incoming.customer_name),
+    customer_name:
+      mergeName(acc.customer_name, incoming.customer_name) ??
+      mergeName(acc.name, incoming.name),
     email: mergeEmail(acc.email, incoming.email),
     ...mergeGeoFields(acc, incoming),
     company: mergeFillMissing(acc.company, incoming.company),
@@ -136,7 +142,11 @@ export function mergeImportRows(
  * Never overwrite existing geo with blank imports. Never trust imported state/country.
  */
 export function mergeGeoFields(
-  existing: { city?: string | null; state?: string | null; country?: string | null },
+  existing: {
+    city?: string | null;
+    state?: string | null;
+    country?: string | null;
+  },
   incoming: ImportRow,
 ): { city: string | null; state: string | null; country: string | null } {
   const mergedCity = mergeFillMissing(existing.city, incoming.city);
@@ -149,7 +159,11 @@ export function mergeGeoFields(
     };
   }
 
-  if (isMeaningful(mergedCity) && isMeaningful(existing.city) && !isMeaningful(incoming.city)) {
+  if (
+    isMeaningful(mergedCity) &&
+    isMeaningful(existing.city) &&
+    !isMeaningful(incoming.city)
+  ) {
     return {
       city: mergedCity,
       state: existing.state ?? null,
@@ -169,7 +183,7 @@ function mergeGeoCorrections(
   incoming: GeoCorrection[] | null | undefined,
 ): MarketingAudience['geo_corrections'] {
   const base = Array.isArray(existing) ? [...existing] : [];
-  const add = Array.isArray(incoming) ? incoming.map(c => ({ ...c })) : [];
+  const add = Array.isArray(incoming) ? incoming.map((c) => ({ ...c })) : [];
   return [...base, ...add];
 }
 
@@ -201,8 +215,14 @@ export function mergeIntoExisting(
 ): Partial<MarketingAudience> {
   const sourceLabel = incoming.source ?? 'CSV Import';
   const sources = mergeSources(existing.sources_used, sourceLabel);
-  const mergedName = mergeName(existing.name, incoming.name ?? incoming.customer_name);
-  const mergedCustomerName = mergeName(existing.customer_name, incoming.customer_name ?? incoming.name);
+  const mergedName = mergeName(
+    existing.name,
+    incoming.name ?? incoming.customer_name,
+  );
+  const mergedCustomerName = mergeName(
+    existing.customer_name,
+    incoming.customer_name ?? incoming.name,
+  );
   const geo = mergeGeoFields(existing, incoming);
 
   const patch: Partial<MarketingAudience> = {
@@ -214,7 +234,10 @@ export function mergeIntoExisting(
     country: geo.country,
     company: mergeFillMissing(existing.company, incoming.company),
     gst: mergeFillMissing(existing.gst, incoming.gst),
-    business_type: mergeFillMissing(existing.business_type, incoming.business_type),
+    business_type: mergeFillMissing(
+      existing.business_type,
+      incoming.business_type,
+    ),
     address: mergeFillMissing(existing.address, incoming.address),
     mobile_2: mergeFillMissing(existing.mobile_2, incoming.mobile_2),
     notes: mergeNotes(existing.notes, incoming.notes),
@@ -222,10 +245,22 @@ export function mergeIntoExisting(
     source_count: sources.length,
     source: sources[sources.length - 1] ?? existing.source,
     last_enriched_at: new Date(),
-    geo_corrections: mergeGeoCorrections(existing.geo_corrections, incoming._geoCorrections),
-    geo_source: incoming._geoResolved ? (incoming._geoSource ?? existing.geo_source) : existing.geo_source,
-    geo_resolved_at: incoming._geoResolved ? new Date() : existing.geo_resolved_at,
-    geo_quality: pickGeoQuality(existing.geo_quality, incoming._geoQuality, geo, existing.phone),
+    geo_corrections: mergeGeoCorrections(
+      existing.geo_corrections,
+      incoming._geoCorrections,
+    ),
+    geo_source: incoming._geoResolved
+      ? (incoming._geoSource ?? existing.geo_source)
+      : existing.geo_source,
+    geo_resolved_at: incoming._geoResolved
+      ? new Date()
+      : existing.geo_resolved_at,
+    geo_quality: pickGeoQuality(
+      existing.geo_quality,
+      incoming._geoQuality,
+      geo,
+      existing.phone,
+    ),
   };
 
   patch.contact_strength = computeContactStrength({
@@ -249,7 +284,7 @@ export function collapseBatchByPhone(
   let duplicatesMerged = 0;
 
   for (const row of rows) {
-    const phone = normalizePhone(row.phone!);
+    const phone = normalizePhone(row.phone);
     if (!phone) continue;
     const normalized: ImportRow = {
       ...row,
@@ -259,7 +294,7 @@ export function collapseBatchByPhone(
       source_count: 1,
     };
     if (byPhone.has(phone)) {
-      byPhone.set(phone, mergeImportRows(byPhone.get(phone)!, normalized));
+      byPhone.set(phone, mergeImportRows(byPhone.get(phone), normalized));
       duplicatesMerged++;
     } else {
       byPhone.set(phone, normalized);

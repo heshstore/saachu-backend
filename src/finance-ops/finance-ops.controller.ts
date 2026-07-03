@@ -1,9 +1,19 @@
 import {
-  Body, Controller, Get, Param, ParseIntPipe, Post, Query, Req,
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseIntPipe,
+  Post,
+  Query,
+  Req,
 } from '@nestjs/common';
 import { RequirePermission } from '../auth/require-permission.decorator';
 import { FinanceOpsService } from './finance-ops.service';
-import { FinancePaymentMode, FinancePaymentType } from './entities/payment-entry.entity';
+import {
+  FinancePaymentMode,
+  FinancePaymentType,
+} from './entities/payment-entry.entity';
 
 @Controller('finance-ops')
 export class FinanceOpsController {
@@ -77,26 +87,38 @@ export class FinanceOpsController {
 
   @Post('customer-receipts')
   @RequirePermission('payment.create')
-  customerReceipt(@Body() body: {
-    orderId: number;
-    amount: number;
-    paymentMode: FinancePaymentMode;
-    paymentReference?: string;
-    remarks?: string;
-    idempotencyKey?: string;
-  }, @Req() req: { user?: { id?: number } }) {
+  customerReceipt(
+    @Body()
+    body: {
+      orderId: number;
+      amount: number;
+      paymentMode: FinancePaymentMode;
+      paymentReference?: string;
+      remarks?: string;
+      idempotencyKey?: string;
+      productionAmount?: number;
+      productionBank?: string;
+      tradingAmount?: number;
+      tradingBank?: string;
+    },
+    @Req() req: { user?: { id?: number } },
+  ) {
     return this.finance.addCustomerReceipt(body, req.user?.id);
   }
 
   @Post('vendor-payments')
   @RequirePermission('payment.create')
-  vendorPayment(@Body() body: {
-    purchaseOrderId: number;
-    amount: number;
-    paymentMode: FinancePaymentMode;
-    paymentDate?: string;
-    remarks?: string;
-  }, @Req() req: { user?: { id?: number } }) {
+  vendorPayment(
+    @Body()
+    body: {
+      purchaseOrderId: number;
+      amount: number;
+      paymentMode: FinancePaymentMode;
+      paymentDate?: string;
+      remarks?: string;
+    },
+    @Req() req: { user?: { id?: number } },
+  ) {
     return this.finance.addVendorPayment(body, req.user?.id);
   }
 

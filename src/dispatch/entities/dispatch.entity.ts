@@ -8,17 +8,17 @@ import {
 } from 'typeorm';
 
 export enum DispatchStatus {
-  PENDING    = 'PENDING',
+  PENDING = 'PENDING',
   DISPATCHED = 'DISPATCHED',
-  DELIVERED  = 'DELIVERED',
+  DELIVERED = 'DELIVERED',
 }
 
 export enum TransportType {
-  COURIER   = 'Courier',
+  COURIER = 'Courier',
   TRANSPORT = 'Transport',
-  BUS       = 'Bus',
-  TRAIN     = 'Train',
-  AIR       = 'Air',
+  BUS = 'Bus',
+  TRAIN = 'Train',
+  AIR = 'Air',
 }
 
 @Entity('dispatches')

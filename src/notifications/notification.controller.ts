@@ -1,4 +1,13 @@
-import { Controller, Get, Post, Patch, Delete, Param, Query, Request } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Param,
+  Query,
+  Request,
+} from '@nestjs/common';
 import { NotificationService } from './notification.service';
 
 @Controller('notifications')
@@ -12,16 +21,16 @@ export class NotificationController {
     @Request() req,
     @Query('category') category?: string,
     @Query('priority') priority?: string,
-    @Query('unread')   unread?: string,
-    @Query('page')     page?: string,
+    @Query('unread') unread?: string,
+    @Query('page') page?: string,
   ) {
     // If any filter/page param is provided, serve the center view (paginated)
     if (category || priority || unread || page) {
       return this.notifService.getNotificationsForCenter(req.user.id, {
         category,
         priority,
-        unread:  unread === 'true',
-        page:    page ? Math.max(1, parseInt(page, 10)) : 1,
+        unread: unread === 'true',
+        page: page ? Math.max(1, parseInt(page, 10)) : 1,
       });
     }
     // Default: panel list (50 items, active only — existing behavior)
@@ -30,7 +39,9 @@ export class NotificationController {
 
   @Get('count')
   async getUnreadCount(@Request() req) {
-    const { total, byCategory } = await this.notifService.getCountByCategory(req.user.id);
+    const { total, byCategory } = await this.notifService.getCountByCategory(
+      req.user.id,
+    );
     return { count: total, byCategory };
   }
 

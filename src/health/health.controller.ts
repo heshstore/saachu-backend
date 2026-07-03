@@ -1,4 +1,9 @@
-import { Controller, Get, Logger, OnApplicationBootstrap } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Logger,
+  OnApplicationBootstrap,
+} from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Public } from '../auth/public.decorator';
@@ -24,10 +29,10 @@ export class HealthController implements OnApplicationBootstrap {
       const opts = (this.ds.driver as any)?.options ?? {};
       this.logger.log(
         `[DB] Connected — db=${r['db'] ?? opts.database ?? '?'} ` +
-        `host=${opts.host ?? '?'} ` +
-        `pool_max=${opts.extra?.max ?? 10} ` +
-        `retryAttempts=${(this.ds as any)?.options?.retryAttempts ?? 20} ` +
-        `keepAlive=true`,
+          `host=${opts.host ?? '?'} ` +
+          `pool_max=${opts.extra?.max ?? 10} ` +
+          `retryAttempts=${(this.ds as any)?.options?.retryAttempts ?? 20} ` +
+          `keepAlive=true`,
       );
       this.dbHealth.recordSuccess();
     } catch (err: any) {
@@ -39,8 +44,12 @@ export class HealthController implements OnApplicationBootstrap {
   @Public()
   @Get()
   async getHealth() {
-    const dbOk = await this.ds.query('SELECT 1')
-      .then(() => { this.dbHealth.recordSuccess(); return true; })
+    const dbOk = await this.ds
+      .query('SELECT 1')
+      .then(() => {
+        this.dbHealth.recordSuccess();
+        return true;
+      })
       .catch(() => false);
 
     let waDbStatus = 'UNKNOWN';
@@ -53,28 +62,28 @@ export class HealthController implements OnApplicationBootstrap {
       waDbStatus = 'DB_ERROR';
     }
 
-    const waReady   = waDbStatus === 'CONNECTED';
-    const mem       = process.memoryUsage();
+    const waReady = waDbStatus === 'CONNECTED';
+    const mem = process.memoryUsage();
     const uptimeSec = Math.floor(process.uptime());
 
     return {
       // ── Simplified status contract ─────────────────────────────────────────
-      db:       dbOk   ? 'up'       : 'down',
-      whatsapp: waReady ? 'ready'   : 'connecting',
-      auth:     dbOk   ? 'up'       : 'degraded',
+      db: dbOk ? 'up' : 'down',
+      whatsapp: waReady ? 'ready' : 'connecting',
+      auth: dbOk ? 'up' : 'degraded',
       // ── Detailed fields ───────────────────────────────────────────────────
-      status:          dbOk ? 'ok' : 'degraded',
-      app_version:     process.env.APP_VERSION  ?? 'dev',
-      deployed_at:     process.env.DEPLOYED_AT  ?? null,
-      node_env:        process.env.NODE_ENV      ?? 'development',
-      boot_time:       BOOT_TIME.toISOString(),
-      uptime_seconds:  uptimeSec,
-      database:        dbOk ? 'connected' : 'error',
+      status: dbOk ? 'ok' : 'degraded',
+      app_version: process.env.APP_VERSION ?? 'dev',
+      deployed_at: process.env.DEPLOYED_AT ?? null,
+      node_env: process.env.NODE_ENV ?? 'development',
+      boot_time: BOOT_TIME.toISOString(),
+      uptime_seconds: uptimeSec,
+      database: dbOk ? 'connected' : 'error',
       whatsapp_status: waDbStatus,
       memory: {
-        rss_mb:        Math.round(mem.rss         / 1_048_576),
-        heap_used_mb:  Math.round(mem.heapUsed    / 1_048_576),
-        heap_total_mb: Math.round(mem.heapTotal   / 1_048_576),
+        rss_mb: Math.round(mem.rss / 1_048_576),
+        heap_used_mb: Math.round(mem.heapUsed / 1_048_576),
+        heap_total_mb: Math.round(mem.heapTotal / 1_048_576),
       },
     };
   }
@@ -92,8 +101,8 @@ export class HealthController implements OnApplicationBootstrap {
   getVersion() {
     return {
       backend_version: process.env.APP_VERSION ?? 'dev',
-      deployed_at:     process.env.DEPLOYED_AT ?? null,
-      node_env:        process.env.NODE_ENV    ?? 'development',
+      deployed_at: process.env.DEPLOYED_AT ?? null,
+      node_env: process.env.NODE_ENV ?? 'development',
     };
   }
 }

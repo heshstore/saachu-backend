@@ -1,5 +1,10 @@
 import {
-  ExceptionFilter, Catch, ArgumentsHost, HttpException, HttpStatus, Logger,
+  ExceptionFilter,
+  Catch,
+  ArgumentsHost,
+  HttpException,
+  HttpStatus,
+  Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 
@@ -8,10 +13,10 @@ export class AllExceptionsFilter implements ExceptionFilter {
   private readonly logger = new Logger('Exception');
 
   catch(exception: unknown, host: ArgumentsHost) {
-    const ctx    = host.switchToHttp();
-    const req    = ctx.getRequest<Request>();
-    const res    = ctx.getResponse<Response>();
-    const user   = (req as any).user;
+    const ctx = host.switchToHttp();
+    const req = ctx.getRequest<Request>();
+    const res = ctx.getResponse<Response>();
+    const user = (req as any).user;
     const userTag = user ? ` uid=${user.id} role=${user.role}` : '';
 
     const status =
@@ -30,18 +35,25 @@ export class AllExceptionsFilter implements ExceptionFilter {
         (exception as any)?.stack,
       );
     } else if (status >= 400) {
-      this.logger.warn(`${req.method} ${req.url}${userTag} → ${status}: ${message}`);
+      this.logger.warn(
+        `${req.method} ${req.url}${userTag} → ${status}: ${message}`,
+      );
     }
 
     if (res.headersSent) return;
 
     const errorCode =
-      status === 400 ? 'VALIDATION_ERROR' :
-      status === 401 ? 'UNAUTHORIZED'     :
-      status === 403 ? 'FORBIDDEN'        :
-      status === 404 ? 'NOT_FOUND'        :
-      status === 409 ? 'CONFLICT'         :
-                       'INTERNAL_ERROR';
+      status === 400
+        ? 'VALIDATION_ERROR'
+        : status === 401
+          ? 'UNAUTHORIZED'
+          : status === 403
+            ? 'FORBIDDEN'
+            : status === 404
+              ? 'NOT_FOUND'
+              : status === 409
+                ? 'CONFLICT'
+                : 'INTERNAL_ERROR';
 
     res.status(status).json({
       success: false,

@@ -58,7 +58,7 @@ export class RiskAiService {
     }
 
     const releaseAllowance = getReleaseAllowance(number.warmup_level);
-    if (releaseAllowance > 0 && (number.daily_sent / releaseAllowance) >= 0.9) {
+    if (releaseAllowance > 0 && number.daily_sent / releaseAllowance >= 0.9) {
       score += 15;
     }
 

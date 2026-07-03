@@ -8,12 +8,14 @@ export class FinanceOpsListener {
 
   @OnEvent('order.approved')
   async onOrderApproved(payload: { orderId: number }) {
-    if (payload?.orderId) await this.finance.syncCustomerReceivable(payload.orderId);
+    if (payload?.orderId)
+      await this.finance.syncCustomerReceivable(payload.orderId);
   }
 
   @OnEvent('order.updated')
   async onOrderUpdated(payload: { orderId: number }) {
-    if (payload?.orderId) await this.finance.syncCustomerReceivable(payload.orderId);
+    if (payload?.orderId)
+      await this.finance.syncCustomerReceivable(payload.orderId);
   }
 
   @OnEvent('payment.received')
@@ -32,16 +34,19 @@ export class FinanceOpsListener {
 
   @OnEvent('dispatch.created')
   async onDispatchCreated(payload: { order_id?: number }) {
-    if (payload?.order_id) await this.finance.syncCustomerReceivable(payload.order_id);
+    if (payload?.order_id)
+      await this.finance.syncCustomerReceivable(payload.order_id);
   }
 
   @OnEvent('dispatch.delivered')
   async onDispatchDelivered(payload: { order_id?: number }) {
-    if (payload?.order_id) await this.finance.syncCustomerReceivable(payload.order_id);
+    if (payload?.order_id)
+      await this.finance.syncCustomerReceivable(payload.order_id);
   }
 
   @OnEvent('purchase_order.updated')
   async onPurchaseOrderUpdated(payload: { purchaseOrderId: number }) {
-    if (payload?.purchaseOrderId) await this.finance.syncVendorPayable(payload.purchaseOrderId);
+    if (payload?.purchaseOrderId)
+      await this.finance.syncVendorPayable(payload.purchaseOrderId);
   }
 }

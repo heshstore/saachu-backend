@@ -6,15 +6,15 @@ import {
   Index,
 } from 'typeorm';
 
-export type ActivitySource   = 'USER' | 'SYSTEM' | 'AUTOMATION' | 'WHATSAPP';
+export type ActivitySource = 'USER' | 'SYSTEM' | 'AUTOMATION' | 'WHATSAPP';
 export type ActivitySeverity = 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
 
 @Entity('activity_logs')
-@Index('idx_act_module',    ['module'])
-@Index('idx_act_entity',    ['entity_type', 'entity_id'])
-@Index('idx_act_actor',     ['performed_by_user_id'])
-@Index('idx_act_severity',  ['severity'])
-@Index('idx_act_created',   ['created_at'])
+@Index('idx_act_module', ['module'])
+@Index('idx_act_entity', ['entity_type', 'entity_id'])
+@Index('idx_act_actor', ['performed_by_user_id'])
+@Index('idx_act_severity', ['severity'])
+@Index('idx_act_created', ['created_at'])
 export class ActivityLog {
   @PrimaryGeneratedColumn('uuid')
   id: string;

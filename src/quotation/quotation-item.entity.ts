@@ -54,4 +54,11 @@ export class QuotationItem {
 
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   amount: number;
+
+  @Column({ nullable: true })
+  billing_category: string;
+
+  /** Snapshot of the item master's photo URL at creation time. */
+  @Column({ type: 'text', nullable: true })
+  image_url: string;
 }

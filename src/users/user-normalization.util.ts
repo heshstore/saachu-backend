@@ -9,7 +9,10 @@ export function normalizeUserRole(role?: string | null): string {
   const trimmed = String(role || '').trim();
   if (!trimmed) return '';
 
-  if (trimmed.toLowerCase() === 'admin' || LEGACY_ADMIN_ROLES.has(trimmed.toLowerCase())) {
+  if (
+    trimmed.toLowerCase() === 'admin' ||
+    LEGACY_ADMIN_ROLES.has(trimmed.toLowerCase())
+  ) {
     return 'Admin';
   }
 

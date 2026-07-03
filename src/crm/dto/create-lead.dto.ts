@@ -1,16 +1,21 @@
 import {
-  IsBoolean, IsEnum, IsOptional, IsString,
-  IsDateString, IsNumber, Matches,
+  IsBoolean,
+  IsEnum,
+  IsOptional,
+  IsString,
+  IsDateString,
+  IsNumber,
+  Matches,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { LeadSource, LeadStatus, LeadPriority } from '../entities/lead.entity';
 
 /** Maps legacy/frontend source strings to canonical LeadSource enum values. */
 export const LEGACY_SOURCE_MAP: Record<string, string> = {
-  MANUAL:      'DIRECT',
+  MANUAL: 'DIRECT',
   DIRECT_CALL: 'DIRECT',
-  META_ADS:    'META',
-  GOOGLE_ADS:  'GOOGLE',
+  META_ADS: 'META',
+  GOOGLE_ADS: 'GOOGLE',
 };
 
 /**
@@ -29,7 +34,8 @@ export class CreateLeadDto {
   @IsOptional()
   @IsString()
   @Matches(/^(\+\d{10,15}|\d{10})$/, {
-    message: 'Phone must be a 10-digit number or E.164 format (e.g. +919876543210)',
+    message:
+      'Phone must be a 10-digit number or E.164 format (e.g. +919876543210)',
   })
   phone?: string;
 

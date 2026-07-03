@@ -3,41 +3,50 @@ import { normalizePhone } from './lead-normalizer';
 import { LeadSource } from '../entities/lead.entity';
 import { LeadContext, contextToLabel } from '../enums/lead-context.enum';
 
-function buildWebhookExternalId(phone: string, email: string): string | undefined {
+function buildWebhookExternalId(
+  phone: string,
+  email: string,
+): string | undefined {
   const p = phone.replace(/\D/g, '').slice(-10);
   const e = (email || '').toLowerCase().trim();
   const key = p || e;
   if (!key) return undefined;
-  return 'sh_wh_' + crypto.createHash('sha256').update(key).digest('hex').slice(0, 24);
+  return (
+    'sh_wh_' +
+    crypto.createHash('sha256').update(key).digest('hex').slice(0, 24)
+  );
 }
 
 function resolveShopifyContext(action: string): string {
   const a = action.toLowerCase();
-  if (a.includes('whatsapp')) return contextToLabel(LeadContext.SHOPIFY_WHATSAPP_CLICK);
-  if (a.includes('exit') || a.includes('popup')) return contextToLabel(LeadContext.SHOPIFY_EXIT_POPUP);
-  if (a.includes('float')) return contextToLabel(LeadContext.SHOPIFY_FLOATING_BUTTON);
+  if (a.includes('whatsapp'))
+    return contextToLabel(LeadContext.SHOPIFY_WHATSAPP_CLICK);
+  if (a.includes('exit') || a.includes('popup'))
+    return contextToLabel(LeadContext.SHOPIFY_EXIT_POPUP);
+  if (a.includes('float'))
+    return contextToLabel(LeadContext.SHOPIFY_FLOATING_BUTTON);
   return contextToLabel(LeadContext.SHOPIFY_PRODUCT_FORM);
 }
 
 export function normalizeShopify(payload: any) {
   const rawPhone = payload.phone || payload.mobile || '';
-  const phone    = normalizePhone(rawPhone);
-  const email    = payload.email || '';
-  const action   = payload.type || '';
+  const phone = normalizePhone(rawPhone);
+  const email = payload.email || '';
+  const action = payload.type || '';
 
   return {
-    name:             payload.name || payload.contact_name || 'Unknown Lead',
+    name: payload.name || payload.contact_name || 'Unknown Lead',
     phone,
-    email:            email || undefined,
-    source:           LeadSource.SHOPIFY,
+    email: email || undefined,
+    source: LeadSource.SHOPIFY,
     product_interest: payload.product || payload.product_title || undefined,
-    notes:            payload.message || payload.body || undefined,
-    context:          resolveShopifyContext(action),
+    notes: payload.message || payload.body || undefined,
+    context: resolveShopifyContext(action),
     lead_source_label: (action || 'shopify_webhook').slice(0, 50),
-    channel:          action.toLowerCase().includes('whatsapp') ? 'WHATSAPP' : 'FORM',
-    utm_source:       action || 'shopify_contact',
-    landing_page:     payload.page_url || undefined,
-    external_id:      buildWebhookExternalId(rawPhone, email),
-    raw_payload:      payload,
+    channel: action.toLowerCase().includes('whatsapp') ? 'WHATSAPP' : 'FORM',
+    utm_source: action || 'shopify_contact',
+    landing_page: payload.page_url || undefined,
+    external_id: buildWebhookExternalId(rawPhone, email),
+    raw_payload: payload,
   };
 }

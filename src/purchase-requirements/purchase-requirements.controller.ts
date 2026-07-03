@@ -1,5 +1,11 @@
 import {
-  Controller, Get, Patch, Post, Body, Param, Query,
+  Controller,
+  Get,
+  Patch,
+  Post,
+  Body,
+  Param,
+  Query,
 } from '@nestjs/common';
 import { PurchaseRequirementsService } from './purchase-requirements.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
@@ -11,15 +17,15 @@ export class PurchaseRequirementsController {
   @Get()
   @RequirePermission('inventory.view')
   findAll(
-    @Query('status')    status?:    string,
-    @Query('priority')  priority?:  string,
-    @Query('itemId')    itemId?:    string,
-    @Query('sourceId')  sourceId?:  string,
+    @Query('status') status?: string,
+    @Query('priority') priority?: string,
+    @Query('itemId') itemId?: string,
+    @Query('sourceId') sourceId?: string,
   ) {
     return this.svc.findAll({
       status,
       priority,
-      itemId:   itemId   ? +itemId   : undefined,
+      itemId: itemId ? +itemId : undefined,
       sourceId: sourceId ? +sourceId : undefined,
     });
   }
@@ -40,9 +46,9 @@ export class PurchaseRequirementsController {
   @RequirePermission('inventory.manage')
   update(@Param('id') id: string, @Body() body: any) {
     return this.svc.update(+id, {
-      status:   body.status,
+      status: body.status,
       priority: body.priority,
-      notes:    body.notes,
+      notes: body.notes,
     });
   }
 

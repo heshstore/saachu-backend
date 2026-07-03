@@ -8,10 +8,16 @@ import { LeadSource } from '../entities/lead.entity';
 
 /** Canonical platform list. All sources collapse into one of these values. */
 export const ALLOWED_PLATFORMS = [
-  'SHOPIFY', 'META', 'GOOGLE', 'INDIAMART', 'LINKEDIN', 'WHATSAPP', 'DIRECT',
+  'SHOPIFY',
+  'META',
+  'GOOGLE',
+  'INDIAMART',
+  'LINKEDIN',
+  'WHATSAPP',
+  'DIRECT',
 ] as const;
 
-export type Platform = typeof ALLOWED_PLATFORMS[number];
+export type Platform = (typeof ALLOWED_PLATFORMS)[number];
 
 /**
  * Maps any raw source/platform string to the canonical platform list.
@@ -21,12 +27,18 @@ export type Platform = typeof ALLOWED_PLATFORMS[number];
 export function normalizePlatform(input: string): Platform {
   const v = (input || '').toUpperCase().replace(/[\s_-]/g, '');
 
-  if (v.includes('META') || v.includes('FACEBOOK') || v.includes('FB') || v.includes('INSTAGRAM')) return 'META';
-  if (v.includes('SHOPIFY'))   return 'SHOPIFY';
-  if (v.includes('GOOGLE'))    return 'GOOGLE';
+  if (
+    v.includes('META') ||
+    v.includes('FACEBOOK') ||
+    v.includes('FB') ||
+    v.includes('INSTAGRAM')
+  )
+    return 'META';
+  if (v.includes('SHOPIFY')) return 'SHOPIFY';
+  if (v.includes('GOOGLE')) return 'GOOGLE';
   if (v.includes('INDIAMART')) return 'INDIAMART';
-  if (v.includes('LINKEDIN'))  return 'LINKEDIN';
-  if (v.includes('WHATSAPP'))  return 'WHATSAPP';
+  if (v.includes('LINKEDIN')) return 'LINKEDIN';
+  if (v.includes('WHATSAPP')) return 'WHATSAPP';
 
   return 'DIRECT';
 }
@@ -53,13 +65,15 @@ export function normalizePhone(raw: string): string {
   if (digits.length === 10) return '+91' + digits;
 
   // 11-digit with leading 0 (e.g. 09876543210) → +91XXXXXXXXXX
-  if (digits.length === 11 && digits.startsWith('0')) return '+91' + digits.slice(1);
+  if (digits.length === 11 && digits.startsWith('0'))
+    return '+91' + digits.slice(1);
 
   // 12-digit with country code 91 → +91XXXXXXXXXX
   if (digits.length === 12 && digits.startsWith('91')) return '+' + digits;
 
   // 13-digit with leading 0 + country code 91 (e.g. 0919876543210) → +91XXXXXXXXXX
-  if (digits.length === 13 && digits.startsWith('091')) return '+' + digits.slice(1);
+  if (digits.length === 13 && digits.startsWith('091'))
+    return '+' + digits.slice(1);
 
   return 'unknown';
 }
@@ -80,10 +94,19 @@ export function isShopifyPhoneReal(raw: string): boolean {
   return true;
 }
 
-const IDENTITY_SENTINELS = new Set(['unknown', 'null', 'undefined', 'n/a', 'na', 'none']);
+const IDENTITY_SENTINELS = new Set([
+  'unknown',
+  'null',
+  'undefined',
+  'n/a',
+  'na',
+  'none',
+]);
 
 /** Strip empty strings and sentinel text → null (email, name fragments, raw phone input). */
-export function normalizeIdentityField(value: string | null | undefined): string | null {
+export function normalizeIdentityField(
+  value: string | null | undefined,
+): string | null {
   if (value == null) return null;
   const trimmed = String(value).trim();
   if (!trimmed) return null;
@@ -95,7 +118,9 @@ export function normalizeIdentityField(value: string | null | undefined): string
  * CRM-safe phone: null when missing, sentinel, or not valid E.164.
  * Does not return the legacy 'unknown' sentinel.
  */
-export function normalizePhoneForIdentity(raw: string | null | undefined): string | null {
+export function normalizePhoneForIdentity(
+  raw: string | null | undefined,
+): string | null {
   const cleaned = normalizeIdentityField(raw);
   if (!cleaned) return null;
   const e164 = normalizePhone(cleaned);
@@ -138,21 +163,24 @@ export function toSentenceCase(s: string): string {
 /** Title-cases every word: "ravi kumar" → "Ravi Kumar", "RAVI KUMAR" → "Ravi Kumar" */
 export function sentenceCaseWords(s: string): string {
   if (!s) return s;
-  return s.trim().toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+  return s
+    .trim()
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 // ─── Standardized lead shape ─────────────────────────────────────────────────
 
 export interface StandardizedLead {
   name: string;
-  phone: string;               // always +E.164
+  phone: string; // always +E.164
   email?: string;
   city?: string;
   product_interest?: string;
   notes?: string;
   source: LeadSource;
-  lead_source_label?: string;  // e.g. whatsapp_click, meta_lead_form
-  channel?: string;            // WHATSAPP | CALL | FORM
+  lead_source_label?: string; // e.g. whatsapp_click, meta_lead_form
+  channel?: string; // WHATSAPP | CALL | FORM
   utm_source?: string;
   utm_campaign?: string;
   landing_page?: string;
@@ -167,13 +195,18 @@ type SourceType = 'shopify' | 'meta' | 'whatsapp' | 'indiamart' | 'manual';
  * CRM-ready StandardizedLead. Use instead of calling source-specific
  * normalizers directly when you control the entry point.
  */
-export function normalizeLeadData(rawInput: any, sourceType: SourceType): StandardizedLead {
+export function normalizeLeadData(
+  rawInput: any,
+  sourceType: SourceType,
+): StandardizedLead {
   const phone = normalizePhone(rawInput.phone || rawInput.mobile || '');
-  const name  = sentenceCaseWords(
-    rawInput.name || rawInput.full_name || rawInput.contact_name || '',
-  ) || 'Unknown Lead';
+  const name =
+    sentenceCaseWords(
+      rawInput.name || rawInput.full_name || rawInput.contact_name || '',
+    ) || 'Unknown Lead';
   const email = (rawInput.email || '').trim().toLowerCase() || undefined;
-  const city  = sentenceCaseWords(rawInput.city || rawInput.location || '') || undefined;
+  const city =
+    sentenceCaseWords(rawInput.city || rawInput.location || '') || undefined;
 
   const base: Omit<StandardizedLead, 'source'> = { name, phone, email, city };
 
@@ -183,10 +216,14 @@ export function normalizeLeadData(rawInput: any, sourceType: SourceType): Standa
       return {
         ...base,
         source: LeadSource.SHOPIFY,
-        product_interest: rawInput.product || rawInput.product_title || undefined,
-        notes: toSentenceCase(rawInput.message || rawInput.body || '') || undefined,
+        product_interest:
+          rawInput.product || rawInput.product_title || undefined,
+        notes:
+          toSentenceCase(rawInput.message || rawInput.body || '') || undefined,
         lead_source_label: (action || 'shopify').slice(0, 50),
-        channel: action.toLowerCase().includes('whatsapp') ? 'WHATSAPP' : 'FORM',
+        channel: action.toLowerCase().includes('whatsapp')
+          ? 'WHATSAPP'
+          : 'FORM',
         utm_source: action || 'shopify',
         utm_campaign: rawInput.product || undefined,
         landing_page: rawInput.page_url || undefined,
@@ -199,8 +236,14 @@ export function normalizeLeadData(rawInput: any, sourceType: SourceType): Standa
       return {
         ...base,
         source: LeadSource.META,
-        product_interest: rawInput.product || rawInput.product_title || rawInput.product_interest || undefined,
-        notes: toSentenceCase(rawInput.message || rawInput.product_interest || '') || undefined,
+        product_interest:
+          rawInput.product ||
+          rawInput.product_title ||
+          rawInput.product_interest ||
+          undefined,
+        notes:
+          toSentenceCase(rawInput.message || rawInput.product_interest || '') ||
+          undefined,
         lead_source_label: 'meta_lead_form',
         channel: 'FORM',
         utm_source: 'meta',
@@ -226,32 +269,43 @@ export function normalizeLeadData(rawInput: any, sourceType: SourceType): Standa
       return {
         ...base,
         source: LeadSource.INDIAMART,
-        product_interest: rawInput.product || rawInput.product_title || rawInput.QUERY_PRODUCT_NAME || rawInput.SUBJECT || undefined,
+        product_interest:
+          rawInput.product ||
+          rawInput.product_title ||
+          rawInput.QUERY_PRODUCT_NAME ||
+          rawInput.SUBJECT ||
+          undefined,
         notes: toSentenceCase(rawInput.QUERY_MESSAGE || '') || undefined,
         lead_source_label: 'indiamart_query',
         channel: 'FORM',
         utm_source: 'indiamart',
-        external_id: rawInput.UNIQUE_QUERY_ID || rawInput.unique_query_id || undefined,
+        external_id:
+          rawInput.UNIQUE_QUERY_ID || rawInput.unique_query_id || undefined,
         raw_payload: rawInput,
       };
     }
 
     default:
-      return { ...base, source: LeadSource.DIRECT, channel: 'FORM', utm_source: 'manual' };
+      return {
+        ...base,
+        source: LeadSource.DIRECT,
+        channel: 'FORM',
+        utm_source: 'manual',
+      };
   }
 }
 
 // ─── Display formatter ───────────────────────────────────────────────────────
 
 export interface LeadDisplayFormat {
-  header: string;     // "👤 Ravi Kumar"
-  phone: string;      // "+919876543210"
-  phoneLink: string;  // "tel:+919876543210"
-  location: string;   // "📍 Chennai"
-  product: string;    // "📦 Microfiber Cloth"
-  note: string;       // "🧾 Need bulk 500 pcs"
-  context: string;    // "🌐 META – meta_lead_form"
-  platform: string;   // "META"
+  header: string; // "👤 Ravi Kumar"
+  phone: string; // "+919876543210"
+  phoneLink: string; // "tel:+919876543210"
+  location: string; // "📍 Chennai"
+  product: string; // "📦 Microfiber Cloth"
+  note: string; // "🧾 Need bulk 500 pcs"
+  context: string; // "🌐 META – meta_lead_form"
+  platform: string; // "META"
 }
 
 export function formatLeadDisplay(lead: {
@@ -264,27 +318,27 @@ export function formatLeadDisplay(lead: {
   lead_source_label?: string;
 }): LeadDisplayFormat {
   const platform = sourceToPlatform(lead.source);
-  const label    = lead.lead_source_label || lead.source;
+  const label = lead.lead_source_label || lead.source;
 
   return {
-    header:    `👤 ${lead.name}`,
-    phone:     lead.phone,
+    header: `👤 ${lead.name}`,
+    phone: lead.phone,
     phoneLink: `tel:${lead.phone}`,
-    location:  `📍 ${lead.city || 'Unknown'}`,
-    product:   `📦 ${lead.product_interest || '-'}`,
-    note:      `🧾 ${lead.notes || '-'}`,
-    context:   `🌐 ${platform} – ${label}`,
+    location: `📍 ${lead.city || 'Unknown'}`,
+    product: `📦 ${lead.product_interest || '-'}`,
+    note: `🧾 ${lead.notes || '-'}`,
+    context: `🌐 ${platform} – ${label}`,
     platform,
   };
 }
 
 // Source values are now identical to platform labels — map is kept for legacy entries in DB
 const LEGACY_SOURCE_MAP: Record<string, string> = {
-  META_ADS:    'META',
-  GOOGLE_ADS:  'GOOGLE',
+  META_ADS: 'META',
+  GOOGLE_ADS: 'GOOGLE',
   DIRECT_CALL: 'DIRECT',
-  FACEBOOK:    'META',
-  FB:          'META',
+  FACEBOOK: 'META',
+  FB: 'META',
 };
 
 function sourceToPlatform(source: string): string {

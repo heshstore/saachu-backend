@@ -11,7 +11,11 @@ export function resolveNumberConnectionState(input: {
   browserConnected?: boolean | null;
   clientExists?: boolean | null;
 }): NumberConnectionState {
-  if (input.connected === true || input.effectiveState === 'ready' || input.waState === 'ready') {
+  if (
+    input.connected === true ||
+    input.effectiveState === 'ready' ||
+    input.waState === 'ready'
+  ) {
     return NumberConnectionState.CONNECTED;
   }
 

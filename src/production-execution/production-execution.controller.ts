@@ -1,5 +1,12 @@
 import {
-  Controller, Get, Post, Patch, Body, Param, Query, Req,
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Body,
+  Param,
+  Query,
+  Req,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { ProductionExecutionService } from './production-execution.service';
@@ -14,16 +21,16 @@ export class ProductionExecutionController {
   @Get('jobs')
   @RequirePermission('production.view')
   findJobs(
-    @Query('status')       status?:       string,
-    @Query('priority')     priority?:     string,
+    @Query('status') status?: string,
+    @Query('priority') priority?: string,
     @Query('departmentId') departmentId?: string,
-    @Query('orderId')      orderId?:      string,
+    @Query('orderId') orderId?: string,
   ) {
     return this.svc.findJobs({
       status,
       priority,
       departmentId: departmentId ? +departmentId : undefined,
-      orderId:      orderId      ? +orderId      : undefined,
+      orderId: orderId ? +orderId : undefined,
     });
   }
 
@@ -76,7 +83,8 @@ export class ProductionExecutionController {
   @RequirePermission('production.update')
   stopStage(
     @Param('stageId') stageId: string,
-    @Body() body: {
+    @Body()
+    body: {
       completedQty: number;
       rejectedQty?: number;
       remarks?: string;
@@ -106,7 +114,8 @@ export class ProductionExecutionController {
   @RequirePermission('production.update')
   completeStage(
     @Param('stageId') stageId: string,
-    @Body() body: {
+    @Body()
+    body: {
       completedQty: number;
       rejectedQty?: number;
       remarks?: string;
@@ -142,13 +151,19 @@ export class ProductionExecutionController {
 
   @Patch('stages/:stageId/cancel')
   @RequirePermission('production.update')
-  cancelStage(@Param('stageId') stageId: string, @Body() body: { remarks?: string }) {
+  cancelStage(
+    @Param('stageId') stageId: string,
+    @Body() body: { remarks?: string },
+  ) {
     return this.svc.cancelStage(+stageId, body.remarks);
   }
 
   @Patch('stages/:stageId/assign')
   @RequirePermission('production.assign')
-  assignStage(@Param('stageId') stageId: string, @Body() body: { userId: number }) {
+  assignStage(
+    @Param('stageId') stageId: string,
+    @Body() body: { userId: number },
+  ) {
     return this.svc.assignStage(+stageId, body.userId);
   }
 }

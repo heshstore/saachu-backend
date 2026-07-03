@@ -1,6 +1,16 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
-import { Repository, DataSource, DeepPartial, EntityManager, In } from 'typeorm';
+import {
+  Repository,
+  DataSource,
+  DeepPartial,
+  EntityManager,
+  In,
+} from 'typeorm';
 import { MarketingAudience } from '../entities/marketing-audience.entity';
 import { ReplyStatus } from '../entities/enums';
 import { AudienceAiService } from '../ai/audience-ai.service';
@@ -102,11 +112,17 @@ export class AudienceService {
     status?: string;
     page?: number;
     limit?: number;
-  }): Promise<{ data: MarketingAudience[]; total: number; page: number; limit: number; pages: number }> {
-    const page   = Math.max(1, params.page  ?? 1);
-    const limit  = Math.min(250, Math.max(1, params.limit ?? 50));
+  }): Promise<{
+    data: MarketingAudience[];
+    total: number;
+    page: number;
+    limit: number;
+    pages: number;
+  }> {
+    const page = Math.max(1, params.page ?? 1);
+    const limit = Math.min(250, Math.max(1, params.limit ?? 50));
     const offset = (page - 1) * limit;
-    const q      = (params.q ?? '').trim();
+    const q = (params.q ?? '').trim();
 
     const qb = this.repo.createQueryBuilder('a');
 
@@ -120,17 +136,35 @@ export class AudienceService {
       qb.andWhere('a.city ILIKE :city', { city: `%${params.city}%` });
     }
     if (params.business_type) {
-      qb.andWhere('a.business_type ILIKE :bt', { bt: `%${params.business_type}%` });
+      qb.andWhere('a.business_type ILIKE :bt', {
+        bt: `%${params.business_type}%`,
+      });
     }
 
     switch (params.status) {
-      case 'opted_out':       qb.andWhere('a.opt_out = true'); break;
-      case 'active':          qb.andWhere('a.opt_out = false').andWhere('a.customer_id IS NULL'); break;
-      case 'customer_linked': qb.andWhere('a.customer_id IS NOT NULL'); break;
-      case 'cooldown':        qb.andWhere('a.cooldown_until IS NOT NULL').andWhere('a.cooldown_until > NOW()'); break;
-      case 'not_on_whatsapp': qb.andWhere("a.wa_registration_status = 'NOT_REGISTERED'"); break;
-      case 'lead':            qb.andWhere("a.reply_status = 'LEAD_CREATED'"); break;
-      case 'replied':         qb.andWhere("a.reply_status = 'REPLIED'"); break;
+      case 'opted_out':
+        qb.andWhere('a.opt_out = true');
+        break;
+      case 'active':
+        qb.andWhere('a.opt_out = false').andWhere('a.customer_id IS NULL');
+        break;
+      case 'customer_linked':
+        qb.andWhere('a.customer_id IS NOT NULL');
+        break;
+      case 'cooldown':
+        qb.andWhere('a.cooldown_until IS NOT NULL').andWhere(
+          'a.cooldown_until > NOW()',
+        );
+        break;
+      case 'not_on_whatsapp':
+        qb.andWhere("a.wa_registration_status = 'NOT_REGISTERED'");
+        break;
+      case 'lead':
+        qb.andWhere("a.reply_status = 'LEAD_CREATED'");
+        break;
+      case 'replied':
+        qb.andWhere("a.reply_status = 'REPLIED'");
+        break;
     }
 
     qb.orderBy(
@@ -143,18 +177,25 @@ export class AudienceService {
     return { data, total, page, limit, pages: Math.ceil(total / limit) };
   }
 
-  async getFilterOptions(): Promise<{ cities: string[]; business_types: string[] }> {
+  async getFilterOptions(): Promise<{
+    cities: string[];
+    business_types: string[];
+  }> {
     const [cities, business_types] = await Promise.all([
-      this.ds.query<{ city: string }[]>(
-        `SELECT DISTINCT city FROM marketing_audience WHERE city IS NOT NULL AND TRIM(city) != '' ORDER BY city LIMIT 200`,
-      ).catch(() => []),
-      this.ds.query<{ business_type: string }[]>(
-        `SELECT DISTINCT business_type FROM marketing_audience WHERE business_type IS NOT NULL AND TRIM(business_type) != '' ORDER BY business_type LIMIT 200`,
-      ).catch(() => []),
+      this.ds
+        .query<
+          { city: string }[]
+        >(`SELECT DISTINCT city FROM marketing_audience WHERE city IS NOT NULL AND TRIM(city) != '' ORDER BY city LIMIT 200`)
+        .catch(() => []),
+      this.ds
+        .query<
+          { business_type: string }[]
+        >(`SELECT DISTINCT business_type FROM marketing_audience WHERE business_type IS NOT NULL AND TRIM(business_type) != '' ORDER BY business_type LIMIT 200`)
+        .catch(() => []),
     ]);
     return {
-      cities:         cities.map(r => r.city),
-      business_types: business_types.map(r => r.business_type),
+      cities: cities.map((r) => r.city),
+      business_types: business_types.map((r) => r.business_type),
     };
   }
 
@@ -183,24 +224,33 @@ export class AudienceService {
     return this.findOne(id);
   }
 
-  async remove(id: string, opts?: { confirmProduction?: boolean }): Promise<void> {
+  async remove(
+    id: string,
+    opts?: { confirmProduction?: boolean },
+  ): Promise<void> {
     assertPromotionalWriteAllowed(opts?.confirmProduction === true);
     await this.findOne(id);
     await this.repo.delete(id);
   }
 
-  async checkConflicts(phones: string[]): Promise<{
-    phone: string;
-    id: string;
-    name: string | null;
-    city: string | null;
-    business_type: string | null;
-    customer_id: number | null;
-  }[]> {
+  async checkConflicts(phones: string[]): Promise<
+    {
+      phone: string;
+      id: string;
+      name: string | null;
+      city: string | null;
+      business_type: string | null;
+      customer_id: number | null;
+    }[]
+  > {
     if (!phones.length) return [];
-    const normalized = [...new Set(
-      phones.map(p => normalizeAudiencePhone(p)).filter((p): p is string => !!p),
-    )];
+    const normalized = [
+      ...new Set(
+        phones
+          .map((p) => normalizeAudiencePhone(p))
+          .filter((p): p is string => !!p),
+      ),
+    ];
     if (!normalized.length) return [];
     const rows: any[] = await this.ds.query(
       `SELECT id, phone, name, city, business_type, customer_id
@@ -252,26 +302,52 @@ export class AudienceService {
       const hasPhone = !!r.phone?.trim();
       const hasEmail = !!r.email?.trim();
       if (!hasPhone && !hasEmail) {
-        errors.push({ phone: String(r.phone ?? r.email ?? ''), reason: 'Requires phone or email' });
-        skipReasons.push({ row_number: rowNumber, name: r.name ?? null, phone: r.phone ?? null, reason_code: 'missing_contact_info', reason: 'No phone or email provided' });
+        errors.push({
+          phone: String(r.phone ?? r.email ?? ''),
+          reason: 'Requires phone or email',
+        });
+        skipReasons.push({
+          row_number: rowNumber,
+          name: r.name ?? null,
+          phone: r.phone ?? null,
+          reason_code: 'missing_contact_info',
+          reason: 'No phone or email provided',
+        });
         rowsSkipped++;
         continue;
       }
-      valid.push({ ...r, source: r.source ?? 'CSV Import', _rowIndex: rowNumber });
+      valid.push({
+        ...r,
+        source: r.source ?? 'CSV Import',
+        _rowIndex: rowNumber,
+      });
     }
 
     if (!valid.length) {
-      return { ...empty, total: rows.length, rows_skipped: rowsSkipped, skipped_contacts: rowsSkipped, errors,
-        skip_reasons: skipReasons, skip_reason_breakdown: _breakdown(skipReasons) };
+      return {
+        ...empty,
+        total: rows.length,
+        rows_skipped: rowsSkipped,
+        skipped_contacts: rowsSkipped,
+        errors,
+        skip_reasons: skipReasons,
+        skip_reason_breakdown: _breakdown(skipReasons),
+      };
     }
 
     // Step 1–3: normalize + merge within batch
     const phoneCandidates: ImportRow[] = [];
-    for (const r of valid.filter(row => !!row.phone?.trim())) {
-      const canonical = normalizeAudiencePhone(r.phone!);
+    for (const r of valid.filter((row) => !!row.phone?.trim())) {
+      const canonical = normalizeAudiencePhone(r.phone);
       if (!canonical) {
-        errors.push({ phone: r.phone!, reason: 'Invalid phone number' });
-        skipReasons.push({ row_number: r._rowIndex ?? 0, name: r.name ?? null, phone: r.phone ?? null, reason_code: 'invalid_phone', reason: 'Phone could not be normalized to E.164' });
+        errors.push({ phone: r.phone, reason: 'Invalid phone number' });
+        skipReasons.push({
+          row_number: r._rowIndex ?? 0,
+          name: r.name ?? null,
+          phone: r.phone ?? null,
+          reason_code: 'invalid_phone',
+          reason: 'Phone could not be normalized to E.164',
+        });
         rowsSkipped++;
         continue;
       }
@@ -289,8 +365,8 @@ export class AudienceService {
 
     for (let i = 0; i < collapsedRows.length; i++) {
       const row = collapsedRows[i];
-      const phone = row.phone!;
-      const geo = geoResolved.get(i)!;
+      const phone = row.phone;
+      const geo = geoResolved.get(i);
       const emailValid = isValidEmailFormat(row.email);
 
       const enriched: ImportRow = {
@@ -321,7 +397,13 @@ export class AudienceService {
           ? 'Garbage city value'
           : 'No usable contact data';
         errors.push({ phone, reason: `JUNK rejected: ${junkDetail}` });
-        skipReasons.push({ row_number: row._rowIndex ?? 0, name: row.name ?? null, phone, reason_code: 'junk_rejected', reason: `JUNK: ${junkDetail}` });
+        skipReasons.push({
+          row_number: row._rowIndex ?? 0,
+          name: row.name ?? null,
+          phone,
+          reason_code: 'junk_rejected',
+          reason: `JUNK: ${junkDetail}`,
+        });
         junkRejected++;
         rowsSkipped++;
         continue;
@@ -334,28 +416,44 @@ export class AudienceService {
       enrichedRows.push(enriched);
     }
 
-    const emailOnly = valid.filter(r => !r.phone?.trim());
+    const emailOnly = valid.filter((r) => !r.phone?.trim());
 
     let newContacts = 0;
     let updatedContacts = 0;
     let enrichedMerges = 0;
 
     if (!enrichedRows.length && !emailOnly.length) {
-      return this._buildResult(rows.length, newContacts, updatedContacts, inFileMerged, enrichedMerges,
-        duplicateEmailsDetected, rowsSkipped, errors, emailWarnings, geoValid, geoPartial, junkRejected, geoCorrections, skipReasons);
+      return this._buildResult(
+        rows.length,
+        newContacts,
+        updatedContacts,
+        inFileMerged,
+        enrichedMerges,
+        duplicateEmailsDetected,
+        rowsSkipped,
+        errors,
+        emailWarnings,
+        geoValid,
+        geoPartial,
+        junkRejected,
+        geoCorrections,
+        skipReasons,
+      );
     }
 
-    const phones = enrichedRows.map(r => r.phone!);
-    const customerPhoneSet = phones.length ? await this._customerPhoneSet(phones) : new Set<string>();
+    const phones = enrichedRows.map((r) => r.phone);
+    const customerPhoneSet = phones.length
+      ? await this._customerPhoneSet(phones)
+      : new Set<string>();
 
     const existingRows = phones.length
       ? await this.repo.find({ where: { phone: In(phones) } })
       : [];
-    const existingMap = new Map(existingRows.map(e => [e.phone!, e]));
+    const existingMap = new Map(existingRows.map((e) => [e.phone, e]));
 
     const emailsToCheck: string[] = [];
     for (const incoming of enrichedRows) {
-      const existing = existingMap.get(incoming.phone!);
+      const existing = existingMap.get(incoming.phone);
       emailsToCheck.push(incoming.email ?? '', existing?.email ?? '');
     }
     const emailDupMap = await this._bulkEmailDuplicateMap(emailsToCheck);
@@ -364,20 +462,36 @@ export class AudienceService {
     const toUpdate: { id: string; patch: Partial<MarketingAudience> }[] = [];
 
     for (const incoming of enrichedRows) {
-      const phone = incoming.phone!;
+      const phone = incoming.phone;
 
       const existing = existingMap.get(phone);
 
       if (customerPhoneSet.has(phone) && !existing?.customer_id) {
-        errors.push({ phone, reason: 'Phone exists in Customer DB — cannot import without customer link' });
-        skipReasons.push({ row_number: incoming._rowIndex ?? 0, name: incoming.name ?? null, phone, reason_code: 'crm_protected', reason: 'Phone exists in Customer DB' });
+        errors.push({
+          phone,
+          reason:
+            'Phone exists in Customer Contacts — cannot import without customer link',
+        });
+        skipReasons.push({
+          row_number: incoming._rowIndex ?? 0,
+          name: incoming.name ?? null,
+          phone,
+          reason_code: 'crm_protected',
+          reason: 'Phone exists in Customer Contacts',
+        });
         rowsSkipped++;
         continue;
       }
 
       if (existing?.customer_id != null) {
         errors.push({ phone, reason: 'Linked to customer — cannot overwrite' });
-        skipReasons.push({ row_number: incoming._rowIndex ?? 0, name: incoming.name ?? null, phone, reason_code: 'crm_linked', reason: 'Contact is linked to a Customer record' });
+        skipReasons.push({
+          row_number: incoming._rowIndex ?? 0,
+          name: incoming.name ?? null,
+          phone,
+          reason_code: 'crm_linked',
+          reason: 'Contact is linked to a Customer record',
+        });
         rowsSkipped++;
         continue;
       }
@@ -402,7 +516,7 @@ export class AudienceService {
           duplicateEmailsDetected++;
           emailWarnings.push({
             phone,
-            email: normalizeEmail(patch.email ?? existing.email)!,
+            email: normalizeEmail(patch.email ?? existing.email),
             conflicting_phone: emailDup.phone,
             conflicting_id: emailDup.id,
           });
@@ -414,7 +528,11 @@ export class AudienceService {
       } else {
         const score = this._profileScore(incoming as MarketingAudience);
         const row = buildNewContactRow(incoming, score);
-        const emailDup = this._resolveEmailDuplicate(emailDupMap, row.email, phone);
+        const emailDup = this._resolveEmailDuplicate(
+          emailDupMap,
+          row.email,
+          phone,
+        );
         if (emailDup) {
           row.duplicate_status = 'POSSIBLE_DUPLICATE';
           row.duplicate_email_phone = emailDup.phone;
@@ -428,7 +546,7 @@ export class AudienceService {
           duplicateEmailsDetected++;
           emailWarnings.push({
             phone,
-            email: row.email!,
+            email: row.email,
             conflicting_phone: emailDup.phone,
             conflicting_id: emailDup.id,
           });
@@ -445,7 +563,12 @@ export class AudienceService {
       if (emailOnly.length) {
         await queryRunner.manager.save(
           MarketingAudience,
-          emailOnly.map(r => queryRunner.manager.create(MarketingAudience, r as DeepPartial<MarketingAudience>)),
+          emailOnly.map((r) =>
+            queryRunner.manager.create(
+              MarketingAudience,
+              r as DeepPartial<MarketingAudience>,
+            ),
+          ),
         );
         newContacts += emailOnly.length;
       }
@@ -469,22 +592,47 @@ export class AudienceService {
     }
 
     return this._buildResult(
-      rows.length, newContacts, updatedContacts, inFileMerged, enrichedMerges,
-      duplicateEmailsDetected, rowsSkipped, errors, emailWarnings,
-      geoValid, geoPartial, junkRejected, geoCorrections, skipReasons,
+      rows.length,
+      newContacts,
+      updatedContacts,
+      inFileMerged,
+      enrichedMerges,
+      duplicateEmailsDetected,
+      rowsSkipped,
+      errors,
+      emailWarnings,
+      geoValid,
+      geoPartial,
+      junkRejected,
+      geoCorrections,
+      skipReasons,
     );
   }
 
   private _emptyResult(): BulkUpsertResult {
     return {
-      total: 0, created: 0, updated: 0,
-      duplicates_found: 0, duplicates_removed: 0,
-      rows_inserted: 0, rows_updated: 0, rows_skipped: 0,
-      new_contacts: 0, updated_contacts: 0, merged_contacts: 0,
-      duplicate_phones_removed: 0, duplicate_emails_detected: 0, skipped_contacts: 0,
-      errors: [], email_duplicate_warnings: [],
-      geo_valid: 0, geo_partial: 0, junk_rejected: 0, geo_corrections: [],
-      skip_reasons: [], skip_reason_breakdown: _emptyBreakdown(),
+      total: 0,
+      created: 0,
+      updated: 0,
+      duplicates_found: 0,
+      duplicates_removed: 0,
+      rows_inserted: 0,
+      rows_updated: 0,
+      rows_skipped: 0,
+      new_contacts: 0,
+      updated_contacts: 0,
+      merged_contacts: 0,
+      duplicate_phones_removed: 0,
+      duplicate_emails_detected: 0,
+      skipped_contacts: 0,
+      errors: [],
+      email_duplicate_warnings: [],
+      geo_valid: 0,
+      geo_partial: 0,
+      junk_rejected: 0,
+      geo_corrections: [],
+      skip_reasons: [],
+      skip_reason_breakdown: _emptyBreakdown(),
     };
   }
 
@@ -544,7 +692,7 @@ export class AudienceService {
     } as MarketingAudience);
   }
 
-  /** Read-only — canonical promo phones that match Customer DB mobiles (last-10-digit). */
+  /** Read-only — canonical promo phones that match Customer Contact mobiles (last-10-digit). */
   private async _customerPhoneSet(phones: string[]): Promise<Set<string>> {
     const last10ToCanon = new Map<string, string>();
     for (const p of phones) {
@@ -554,15 +702,17 @@ export class AudienceService {
     const last10 = [...last10ToCanon.keys()];
     if (!last10.length) return new Set();
 
-    const fromCustomer: { m: string }[] = await this.ds.query(
-      `SELECT mobile1 AS m FROM customer
+    const fromCustomer: { m: string }[] = await this.ds
+      .query(
+        `SELECT mobile1 AS m FROM customer
        WHERE RIGHT(REGEXP_REPLACE(mobile1, '[^0-9]', '', 'g'), 10) = ANY($1)
        UNION
        SELECT mobile2 AS m FROM customer
        WHERE mobile2 IS NOT NULL
          AND RIGHT(REGEXP_REPLACE(mobile2, '[^0-9]', '', 'g'), 10) = ANY($1)`,
-      [last10],
-    ).catch(() => []);
+        [last10],
+      )
+      .catch(() => []);
 
     const blocked = new Set<string>();
     for (const r of fromCustomer) {
@@ -579,18 +729,21 @@ export class AudienceService {
   private async _bulkEmailDuplicateMap(
     rawEmails: string[],
   ): Promise<Map<string, { id: string; phone: string }>> {
-    const norms = [...new Set(
-      rawEmails.map(e => normalizeEmail(e)).filter((e): e is string => !!e),
-    )];
+    const norms = [
+      ...new Set(
+        rawEmails.map((e) => normalizeEmail(e)).filter((e): e is string => !!e),
+      ),
+    ];
     if (!norms.length) return new Map();
 
-    const rows: { id: string; phone: string; norm_email: string }[] = await this.ds.query(
-      `SELECT id, phone, LOWER(TRIM(email)) AS norm_email
+    const rows: { id: string; phone: string; norm_email: string }[] =
+      await this.ds.query(
+        `SELECT id, phone, LOWER(TRIM(email)) AS norm_email
        FROM marketing_audience
        WHERE LOWER(TRIM(email)) = ANY($1)
          AND phone IS NOT NULL`,
-      [norms],
-    );
+        [norms],
+      );
 
     const map = new Map<string, { id: string; phone: string }>();
     for (const row of rows) {
@@ -630,7 +783,13 @@ export class AudienceService {
   }
 
   async getContactHistory(id: string): Promise<{
-    contact: { created_at: Date; opt_out: boolean; reply_status: string; last_contacted_at: Date | null; last_reply_at: Date | null };
+    contact: {
+      created_at: Date;
+      opt_out: boolean;
+      reply_status: string;
+      last_contacted_at: Date | null;
+      last_reply_at: Date | null;
+    };
     logs: {
       campaign_id: string | null;
       campaign_name: string | null;
@@ -643,8 +802,9 @@ export class AudienceService {
     }[];
   }> {
     const contact = await this.findOne(id);
-    const logs = await this.ds.query<any[]>(
-      `SELECT
+    const logs = await this.ds
+      .query<any[]>(
+        `SELECT
          l.campaign_id, c.campaign_name,
          l.status, l.sent_at, l.delivered_at, l.read_at,
          l.reply_received, l.reply_message
@@ -653,23 +813,30 @@ export class AudienceService {
        WHERE l.customer_phone = $1
        ORDER BY l.sent_at DESC
        LIMIT 100`,
-      [contact.phone],
-    ).catch(() => []);
+        [contact.phone],
+      )
+      .catch(() => []);
     return {
       contact: {
-        created_at:       contact.created_at,
-        opt_out:          contact.opt_out,
-        reply_status:     contact.reply_status,
+        created_at: contact.created_at,
+        opt_out: contact.opt_out,
+        reply_status: contact.reply_status,
         last_contacted_at: contact.last_contacted_at ?? null,
-        last_reply_at:    contact.last_reply_at ?? null,
+        last_reply_at: contact.last_reply_at ?? null,
       },
       logs,
     };
   }
 
-  async markOptOut(id: string, opts?: { confirmProduction?: boolean }): Promise<MarketingAudience> {
+  async markOptOut(
+    id: string,
+    opts?: { confirmProduction?: boolean },
+  ): Promise<MarketingAudience> {
     assertPromotionalWriteAllowed(opts?.confirmProduction === true);
-    await this.repo.update(id, { opt_out: true, reply_status: ReplyStatus.OPTED_OUT });
+    await this.repo.update(id, {
+      opt_out: true,
+      reply_status: ReplyStatus.OPTED_OUT,
+    });
     return this.findOne(id);
   }
 
@@ -678,14 +845,18 @@ export class AudienceService {
       .createQueryBuilder('a')
       .where('a.opt_out = false')
       .andWhere('a.is_whatsapp_valid = true')
-      .andWhere('(a.wa_registration_status IS NULL OR a.wa_registration_status != :notReg)', { notReg: 'NOT_REGISTERED' });
+      .andWhere(
+        '(a.wa_registration_status IS NULL OR a.wa_registration_status != :notReg)',
+        { notReg: 'NOT_REGISTERED' },
+      );
 
     if (testOnly) {
       qb.andWhere('a.is_test_contact = true');
     } else {
-      qb
-        .andWhere('a.quality_score >= :minScore', { minScore })
-        .andWhere('(a.cooldown_until IS NULL OR a.cooldown_until <= :now)', { now: new Date() })
+      qb.andWhere('a.quality_score >= :minScore', { minScore })
+        .andWhere('(a.cooldown_until IS NULL OR a.cooldown_until <= :now)', {
+          now: new Date(),
+        })
         .andWhere('a.is_test_contact IS NOT TRUE');
     }
 
@@ -693,7 +864,10 @@ export class AudienceService {
   }
 
   findTestContacts(): Promise<MarketingAudience[]> {
-    return this.repo.find({ where: { is_test_contact: true }, order: { created_at: 'DESC' } });
+    return this.repo.find({
+      where: { is_test_contact: true },
+      order: { created_at: 'DESC' },
+    });
   }
 
   getTestPhones(): Promise<string[]> {
@@ -770,16 +944,16 @@ export class AudienceService {
       in_cooldown: parseInt(r.in_cooldown, 10),
       eligible: parseInt(r.eligible, 10),
       score_distribution: [
-        { bucket: '0–20',   count: parseInt(r.s0_20,   10) },
-        { bucket: '21–40',  count: parseInt(r.s21_40,  10) },
-        { bucket: '41–60',  count: parseInt(r.s41_60,  10) },
-        { bucket: '61–80',  count: parseInt(r.s61_80,  10) },
+        { bucket: '0–20', count: parseInt(r.s0_20, 10) },
+        { bucket: '21–40', count: parseInt(r.s21_40, 10) },
+        { bucket: '41–60', count: parseInt(r.s41_60, 10) },
+        { bucket: '61–80', count: parseInt(r.s61_80, 10) },
         { bucket: '81–100', count: parseInt(r.s81_100, 10) },
       ],
       strength_distribution: [
-        { strength: 'LOW',    count: parseInt(r.low,    10) },
+        { strength: 'LOW', count: parseInt(r.low, 10) },
         { strength: 'MEDIUM', count: parseInt(r.medium, 10) },
-        { strength: 'HIGH',   count: parseInt(r.high,   10) },
+        { strength: 'HIGH', count: parseInt(r.high, 10) },
       ],
       possible_email_duplicates: parseInt(r.email_dupes, 10),
     };
@@ -787,7 +961,13 @@ export class AudienceService {
 }
 
 function _emptyBreakdown(): Record<SkipReasonCode, number> {
-  return { missing_contact_info: 0, invalid_phone: 0, junk_rejected: 0, crm_protected: 0, crm_linked: 0 };
+  return {
+    missing_contact_info: 0,
+    invalid_phone: 0,
+    junk_rejected: 0,
+    crm_protected: 0,
+    crm_linked: 0,
+  };
 }
 
 function _breakdown(entries: SkipEntry[]): Record<SkipReasonCode, number> {

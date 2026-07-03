@@ -1,5 +1,12 @@
 import {
-  Controller, Get, Post, Patch, Body, Param, Query, Req,
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Body,
+  Param,
+  Query,
+  Req,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { InventoryService } from './inventory.service';
@@ -58,7 +65,7 @@ export class InventoryController {
   @Get('transactions')
   @RequirePermission('inventory.view')
   getTransactions(
-    @Query('limit')  limit  = '100',
+    @Query('limit') limit = '100',
     @Query('offset') offset = '0',
   ) {
     return this.svc.getTransactions(+limit, +offset);

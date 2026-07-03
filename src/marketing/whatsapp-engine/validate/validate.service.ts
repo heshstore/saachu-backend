@@ -65,12 +65,16 @@ export interface ValidationReport {
   };
   queue: QueuePatternReport;
   delivery_flow: DeliveryFlowReport;
-  recent_audit_events: { event: string; reason: string | null; created_at: string }[];
+  recent_audit_events: {
+    event: string;
+    reason: string | null;
+    created_at: string;
+  }[];
   anomalies: string[];
 }
 
 const WINDOW_START = 10 * 60;
-const WINDOW_END   = 18 * 60;
+const WINDOW_END = 18 * 60;
 const STUCK_PROCESSING_MS = 5 * 60 * 1000; // 5 minutes
 
 @Injectable()
@@ -93,10 +97,19 @@ export class ValidateService {
   ) {}
 
   async getValidationReport(): Promise<ValidationReport> {
-    const [queuePattern, deliveryFlow, testContacts, recentAuditEvents, catalogRows] = await Promise.all([
+    const [
+      queuePattern,
+      deliveryFlow,
+      testContacts,
+      recentAuditEvents,
+      catalogRows,
+    ] = await Promise.all([
       this._analyzeQueuePatterns(),
       this._getDeliveryFlow(),
-      this.audienceRepo.find({ where: { is_test_contact: true }, select: ['phone'] }),
+      this.audienceRepo.find({
+        where: { is_test_contact: true },
+        select: ['phone'],
+      }),
       this._getRecentAuditEvents(),
       this.ds.query(`
         SELECT
@@ -108,13 +121,15 @@ export class ValidateService {
 
     // Log every test contact's raw DB values so mismatches are visible in server logs
     if (testContacts.length > 0) {
-      const fullRows = await this.audienceRepo.find({ where: { is_test_contact: true } });
+      const fullRows = await this.audienceRepo.find({
+        where: { is_test_contact: true },
+      });
       for (const r of fullRows) {
         this.logger.log(
           `[MKT_AUDIENCE_FETCH] validate_report test_contact ` +
-          `id=${r.id} phone=${JSON.stringify(r.phone)} ` +
-          `is_whatsapp_valid=${r.is_whatsapp_valid} quality_score=${r.quality_score} ` +
-          `opt_out=${r.opt_out} cooldown_until=${r.cooldown_until?.toISOString() ?? 'NULL'}`,
+            `id=${r.id} phone=${JSON.stringify(r.phone)} ` +
+            `is_whatsapp_valid=${r.is_whatsapp_valid} quality_score=${r.quality_score} ` +
+            `opt_out=${r.opt_out} cooldown_until=${r.cooldown_until?.toISOString() ?? 'NULL'}`,
         );
       }
     }
@@ -125,36 +140,67 @@ export class ValidateService {
 
     const anomalies: string[] = [];
 
-    if (!process.env.WHATSAPP_ENGINE_ENABLED || process.env.WHATSAPP_ENGINE_ENABLED === 'false') {
-      anomalies.push('Engine is DISABLED — set WHATSAPP_ENGINE_ENABLED=true to enable');
+    if (
+      !process.env.WHATSAPP_ENGINE_ENABLED ||
+      process.env.WHATSAPP_ENGINE_ENABLED === 'false'
+    ) {
+      anomalies.push(
+        'Engine is DISABLED — set WHATSAPP_ENGINE_ENABLED=true to enable',
+      );
     }
     if (!this.whatsAppService.isAnyConnected()) {
       anomalies.push('WhatsApp is not connected — check session status');
     }
     if (queuePattern.stuck_processing > 0) {
-      anomalies.push(`${queuePattern.stuck_processing} item(s) stuck in PROCESSING > 5 min — watchdog will recover these`);
+      anomalies.push(
+        `${queuePattern.stuck_processing} item(s) stuck in PROCESSING > 5 min — watchdog will recover these`,
+      );
     }
     if (queuePattern.retry_loops > 0) {
-      anomalies.push(`${queuePattern.retry_loops} item(s) have 3+ failed attempts — investigate send failures`);
+      anomalies.push(
+        `${queuePattern.retry_loops} item(s) have 3+ failed attempts — investigate send failures`,
+      );
     }
     if (queuePattern.duplicate_phones.length > 0) {
-      anomalies.push(`${queuePattern.duplicate_phones.length} phone(s) queued more than once`);
+      anomalies.push(
+        `${queuePattern.duplicate_phones.length} phone(s) queued more than once`,
+      );
     }
     if (queuePattern.outside_window > 0) {
-      anomalies.push(`${queuePattern.outside_window} queue item(s) scheduled outside the 10am–5:30pm window`);
+      anomalies.push(
+        `${queuePattern.outside_window} queue item(s) scheduled outside the 10am–5:30pm window`,
+      );
     }
-    if (testContacts.length === 0 && process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true') {
-      anomalies.push('TEST_ONLY mode is active but no test contacts are configured');
+    if (
+      testContacts.length === 0 &&
+      process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true'
+    ) {
+      anomalies.push(
+        'TEST_ONLY mode is active but no test contacts are configured',
+      );
     }
-    const catalogData = catalogRows?.[0] ?? { active_templates: 0, active_campaigns: 0, pending_queue_items: 0 };
+    const catalogData = catalogRows?.[0] ?? {
+      active_templates: 0,
+      active_campaigns: 0,
+      pending_queue_items: 0,
+    };
     if (catalogData.active_templates === 0) {
-      anomalies.push('No active templates — queue cannot build. Restart backend to auto-create the default test template.');
+      anomalies.push(
+        'No active templates — queue cannot build. Restart backend to auto-create the default test template.',
+      );
     }
-    if (queuePattern.total_pending === 0 && process.env.WHATSAPP_ENGINE_ENABLED === 'true') {
-      anomalies.push('Queue is empty — daily queue may not have been built yet');
+    if (
+      queuePattern.total_pending === 0 &&
+      process.env.WHATSAPP_ENGINE_ENABLED === 'true'
+    ) {
+      anomalies.push(
+        'Queue is empty — daily queue may not have been built yet',
+      );
     }
     if (deliveryFlow.fail_rate_pct > 30 && deliveryFlow.sent > 5) {
-      anomalies.push(`High failure rate: ${deliveryFlow.fail_rate_pct}% of sends are failing`);
+      anomalies.push(
+        `High failure rate: ${deliveryFlow.fail_rate_pct}% of sends are failing`,
+      );
     }
 
     return {
@@ -163,7 +209,8 @@ export class ValidateService {
         dry_run_mode: process.env.WHATSAPP_ENGINE_DRY_RUN === 'true',
         test_only_mode: process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true',
         pilot_mode: process.env.WHATSAPP_ENGINE_PILOT_MODE === 'true',
-        test_bypass_send_window: process.env.MARKETING_TEST_BYPASS_SEND_WINDOW === 'true',
+        test_bypass_send_window:
+          process.env.MARKETING_TEST_BYPASS_SEND_WINDOW === 'true',
       },
       server: {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -206,9 +253,11 @@ export class ValidateService {
 
     // 2. Per-contact filter verdict — reveal exactly which condition fails
     const filterResults = rawRows.map((c: any) => {
-      const cooldownActive = c.cooldown_until && new Date(c.cooldown_until) > now;
+      const cooldownActive =
+        c.cooldown_until && new Date(c.cooldown_until) > now;
       const failReasons: string[] = [];
-      if (c.opt_out === true || c.opt_out === 'true') failReasons.push('opt_out=true');
+      if (c.opt_out === true || c.opt_out === 'true')
+        failReasons.push('opt_out=true');
       if (c.is_whatsapp_valid === false || c.is_whatsapp_valid === 'false')
         failReasons.push('is_whatsapp_valid=false');
       if (Number(c.quality_score) < 30)
@@ -231,7 +280,8 @@ export class ValidateService {
     });
 
     // 3. What filterByQuality(30) actually returns right now
-    const filteredRows: any[] = await this.ds.query(`
+    const filteredRows: any[] = await this.ds.query(
+      `
       SELECT phone, quality_score::float, is_whatsapp_valid, opt_out, cooldown_until
       FROM marketing_audience
       WHERE opt_out = false
@@ -239,7 +289,9 @@ export class ValidateService {
         AND quality_score >= 30
         AND (cooldown_until IS NULL OR cooldown_until <= $1)
       ORDER BY quality_score DESC
-    `, [now]);
+    `,
+      [now],
+    );
 
     // 4. Numbers eligibility
     const numbersRows: any[] = await this.ds.query(`
@@ -248,7 +300,10 @@ export class ValidateService {
       ORDER BY created_at DESC
     `);
     const safeNumbers = numbersRows.filter(
-      (n: any) => n.is_active && n.status === 'ACTIVE' && Number(n.daily_sent) < getActiveLimits(Number(n.warmup_level)).daily,
+      (n: any) =>
+        n.is_active &&
+        n.status === 'ACTIVE' &&
+        Number(n.daily_sent) < getActiveLimits(Number(n.warmup_level)).daily,
     );
 
     // 5. Templates eligibility
@@ -297,10 +352,10 @@ export class ValidateService {
         filteredRows.length === 0
           ? 'BLOCKED: no contacts pass filterByQuality(30) — see filter_results for exact reasons'
           : safeNumbers.length === 0
-          ? 'BLOCKED: audience passes filter but no safe numbers available'
-          : activeTemplates.length === 0
-          ? 'BLOCKED: audience + numbers OK but no active templates'
-          : 'OK: all gates pass — queue should build',
+            ? 'BLOCKED: audience passes filter but no safe numbers available'
+            : activeTemplates.length === 0
+              ? 'BLOCKED: audience + numbers OK but no active templates'
+              : 'OK: all gates pass — queue should build',
     };
   }
 
@@ -327,7 +382,15 @@ export class ValidateService {
           cooldown_until: null,
         } as any)
         .orUpdate(
-          ['name', 'is_test_contact', 'is_whatsapp_valid', 'quality_score', 'opt_out', 'source', 'cooldown_until'],
+          [
+            'name',
+            'is_test_contact',
+            'is_whatsapp_valid',
+            'quality_score',
+            'opt_out',
+            'source',
+            'cooldown_until',
+          ],
           ['phone'],
         )
         .execute();
@@ -360,7 +423,8 @@ export class ValidateService {
     for (const r of statusRows) logCounts[r.status] = parseInt(r.count, 10);
 
     const queueCounts: Record<string, number> = {};
-    for (const r of queueStatusRows) queueCounts[r.status] = parseInt(r.count, 10);
+    for (const r of queueStatusRows)
+      queueCounts[r.status] = parseInt(r.count, 10);
 
     const sent = logCounts['sent'] ?? 0;
     const delivered = logCounts['delivered'] ?? 0;
@@ -392,10 +456,19 @@ export class ValidateService {
     const [pendingItems, stuckCount, retryLoopCount] = await Promise.all([
       this.queueRepo.find({
         where: { status: QueueStatus.PENDING },
-        select: ['id', 'customer_phone', 'template_id', 'number_id', 'scheduled_at'],
+        select: [
+          'id',
+          'customer_phone',
+          'template_id',
+          'number_id',
+          'scheduled_at',
+        ],
       }),
       this.queueRepo.count({
-        where: { status: QueueStatus.PROCESSING, updated_at: LessThan(stuckCutoff) },
+        where: {
+          status: QueueStatus.PROCESSING,
+          updated_at: LessThan(stuckCutoff),
+        },
       }),
       this.queueRepo.count({
         where: { status: QueueStatus.FAILED },
@@ -412,7 +485,8 @@ export class ValidateService {
     // Duplicate phone detection
     const phoneCounts: Record<string, number> = {};
     for (const item of pendingItems) {
-      phoneCounts[item.customer_phone] = (phoneCounts[item.customer_phone] ?? 0) + 1;
+      phoneCounts[item.customer_phone] =
+        (phoneCounts[item.customer_phone] ?? 0) + 1;
     }
     const duplicate_phones = Object.entries(phoneCounts)
       .filter(([, count]) => count > 1)
@@ -435,7 +509,10 @@ export class ValidateService {
       templateCounts[key] = (templateCounts[key] ?? 0) + 1;
     }
     const template_distribution = Object.entries(templateCounts)
-      .map(([template_id, count]) => ({ template_id: template_id === 'none' ? null : template_id, count }))
+      .map(([template_id, count]) => ({
+        template_id: template_id === 'none' ? null : template_id,
+        count,
+      }))
       .sort((a, b) => b.count - a.count);
 
     const numberCounts: Record<string, number> = {};
@@ -444,7 +521,10 @@ export class ValidateService {
       numberCounts[key] = (numberCounts[key] ?? 0) + 1;
     }
     const number_distribution = Object.entries(numberCounts)
-      .map(([number_id, count]) => ({ number_id: number_id === 'none' ? null : number_id, count }))
+      .map(([number_id, count]) => ({
+        number_id: number_id === 'none' ? null : number_id,
+        count,
+      }))
       .sort((a, b) => b.count - a.count);
 
     return {
@@ -473,7 +553,10 @@ export class ValidateService {
       return rows.map((r) => ({
         event: r.event,
         reason: r.reason,
-        created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+        created_at:
+          r.created_at instanceof Date
+            ? r.created_at.toISOString()
+            : String(r.created_at),
       }));
     } catch {
       return [];

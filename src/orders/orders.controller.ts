@@ -22,6 +22,10 @@ import { RequirePermission } from '../auth/require-permission.decorator';
 import { SendEmailDto } from '../shared/dto/send-email.dto';
 import { appConfig } from '../config/config';
 import { TransactionalEmailService } from '../email-transactional/transactional-email.service';
+import {
+  DocumentActionLogService,
+  DocumentActionType,
+} from '../shared/document-action-log.service';
 
 @Controller('orders')
 export class OrdersController {
@@ -34,7 +38,22 @@ export class OrdersController {
     private readonly pdfService: PdfService,
     private readonly mailService: MailService,
     private readonly transactionalEmailService: TransactionalEmailService,
+    private readonly documentActionLogService: DocumentActionLogService,
   ) {}
+
+  @Post(':id/track')
+  @RequirePermission('order.view')
+  async track(
+    @Param('id') id: string,
+    @Body() body: { action: DocumentActionType },
+  ) {
+    await this.documentActionLogService.record(
+      'order',
+      Number(id),
+      body.action,
+    );
+    return { ok: true };
+  }
 
   @Post()
   @RequirePermission('order.create')
@@ -81,13 +100,21 @@ export class OrdersController {
   @Patch(':id/approve')
   @RequirePermission('order.approve')
   approve(@Param('id') id: string, @Body() body: any, @Req() req: Request) {
-    return this.ordersService.approveOrder(Number(id), body?.remarks, (req as any).user);
+    return this.ordersService.approveOrder(
+      Number(id),
+      body?.remarks,
+      (req as any).user,
+    );
   }
 
   @Patch(':id/reject')
   @RequirePermission('order.reject')
   reject(@Param('id') id: string, @Body() body: any, @Req() req: Request) {
-    return this.ordersService.rejectOrder(Number(id), body?.remarks, (req as any).user);
+    return this.ordersService.rejectOrder(
+      Number(id),
+      body?.remarks,
+      (req as any).user,
+    );
   }
 
   @Patch(':id/send-for-approval')
@@ -117,13 +144,24 @@ export class OrdersController {
   @Post(':id/payment')
   @RequirePermission('payment.create')
   addPayment(@Param('id') id: string, @Body() body: any, @Req() req: Request) {
-    const { amount, payment_mode, mode, payment_reference, reference_no, notes } = body;
-    return this.paymentService.addPayment(Number(id), {
-      amount:             Number(amount),
-      payment_mode:       (payment_mode ?? mode ?? 'cash').toLowerCase(),
-      payment_reference:  payment_reference ?? reference_no ?? undefined,
-      notes:              notes ?? undefined,
-    }, (req as any).user?.id);
+    const {
+      amount,
+      payment_mode,
+      mode,
+      payment_reference,
+      reference_no,
+      notes,
+    } = body;
+    return this.paymentService.addPayment(
+      Number(id),
+      {
+        amount: Number(amount),
+        payment_mode: (payment_mode ?? mode ?? 'cash').toLowerCase(),
+        payment_reference: payment_reference ?? reference_no ?? undefined,
+        notes: notes ?? undefined,
+      },
+      (req as any).user?.id,
+    );
   }
 
   @Get(':id/split-invoice')
@@ -136,7 +174,7 @@ export class OrdersController {
   @RequirePermission('order.view')
   async getPdf(@Param('id') id: string, @Res() res: Response) {
     const numId = Number(id);
-    const data  = await this.ordersService.findOne(numId);
+    const data = await this.ordersService.findOne(numId);
 
     if (!data) {
       res.status(404).json({ message: 'Order not found' });
@@ -146,16 +184,22 @@ export class OrdersController {
     const items = (data as any).items;
     if (!Array.isArray(items) || items.length === 0) {
       this.logger.warn(`[PDF] Order ${numId} has no items`);
-      throw new BadRequestException('Order has no items — add items before generating a PDF');
+      throw new BadRequestException(
+        'Order has no items — add items before generating a PDF',
+      );
     }
 
-    const orderNo = (data as any).order_no || (data as any).order_number || `ORD-${numId}`;
+    const orderNo =
+      (data as any).order_no || (data as any).order_number || `ORD-${numId}`;
     this.logger.log(`[PDF] Generating PDF for order ${numId} (${orderNo})`);
 
-    const buffer   = await this.pdfService.generateBuffer(this.pdfService.orderTemplate(data));
+    const buffer = await this.pdfService.generateBuffer(
+      this.pdfService.orderTemplate(data),
+    );
+    await this.documentActionLogService.record('order', numId, 'pdf');
     const filename = orderNo.replace(/\//g, '-') + '.pdf';
     res.set({
-      'Content-Type':        'application/pdf',
+      'Content-Type': 'application/pdf',
       'Content-Disposition': `attachment; filename="${filename}"`,
     });
     res.send(buffer);
@@ -169,7 +213,10 @@ export class OrdersController {
   ) {
     const data = await this.ordersService.findOne(Number(id));
     await this.transactionalEmailService.sendOrderEmail(
-      Number(id), body.to, data, { publicUrl: body.publicUrl },
+      Number(id),
+      body.to,
+      data,
+      { publicUrl: body.publicUrl },
     );
     return { ok: true };
   }

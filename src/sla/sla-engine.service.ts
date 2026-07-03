@@ -18,25 +18,25 @@ const NOTIFY_COOLDOWN_MS = 60 * 60_000; // 1 hour between re-notifications for s
 
 // First manager role tried per module; falls back to Admin if no match found
 const MANAGER_ROLES: Record<string, string[]> = {
-  CRM:        ['Sales Manager'],
+  CRM: ['Sales Manager'],
   PRODUCTION: ['Production Manager'],
-  ACCOUNTS:   ['Admin'],
-  DISPATCH:   ['Admin'],
+  ACCOUNTS: ['Admin'],
+  DISPATCH: ['Admin'],
 };
 
 const JOB_PRIORITY_MAP: Record<string, SlaPriority> = {
   URGENT: 'CRITICAL',
-  HIGH:   'HIGH',
+  HIGH: 'HIGH',
   MEDIUM: 'MEDIUM',
-  LOW:    'LOW',
+  LOW: 'LOW',
   NORMAL: 'MEDIUM',
 };
 
 const ENTITY_ROUTES: Record<string, (id: number) => string> = {
-  job:      (id) => `/production/jobs/${id}`,
-  order:    (id) => `/orders/${id}`,
-  dispatch: (_)  => `/dispatch`,
-  lead:     (id) => `/crm/leads/${id}`,
+  job: (id) => `/production/jobs/${id}`,
+  order: (id) => `/orders/${id}`,
+  dispatch: (_) => `/dispatch`,
+  lead: (id) => `/crm/leads/${id}`,
   followup: (id) => `/crm/leads/${id}`,
 };
 
@@ -58,43 +58,45 @@ export class SlaEngineService {
   // ── SLA creation ─────────────────────────────────────────────────────────────
 
   async createSlaEvent(params: {
-    module:                SlaModule;
-    entity_type:           string;
-    entity_id:             number;
-    entity_label:          string;
-    assigned_user_id?:     number | null;
-    priority?:             SlaPriority;
-    sla_deadline:          Date;
+    module: SlaModule;
+    entity_type: string;
+    entity_id: number;
+    entity_label: string;
+    assigned_user_id?: number | null;
+    priority?: SlaPriority;
+    sla_deadline: Date;
     warning_hours_before?: number;
-    metadata?:             Record<string, any>;
+    metadata?: Record<string, any>;
   }): Promise<SlaEvent | null> {
     // One active SLA per entity — skip if already tracking
     const existing = await this.slaRepo.findOne({
       where: {
         entity_type: params.entity_type,
-        entity_id:   params.entity_id,
-        status:      Not(In(['RESOLVED'])) as any,
+        entity_id: params.entity_id,
+        status: Not(In(['RESOLVED'])) as any,
       },
     });
     if (existing) return null;
 
     const warningHours = params.warning_hours_before ?? 4;
-    const warningAt    = new Date(params.sla_deadline.getTime() - warningHours * 3_600_000);
-    const now          = new Date();
+    const warningAt = new Date(
+      params.sla_deadline.getTime() - warningHours * 3_600_000,
+    );
+    const now = new Date();
 
     return this.slaRepo.save(
       this.slaRepo.create({
-        module:           params.module,
-        entity_type:      params.entity_type,
-        entity_id:        params.entity_id,
-        entity_label:     params.entity_label,
+        module: params.module,
+        entity_type: params.entity_type,
+        entity_id: params.entity_id,
+        entity_label: params.entity_label,
         assigned_user_id: params.assigned_user_id ?? null,
-        priority:         params.priority ?? 'MEDIUM',
-        sla_deadline:     params.sla_deadline,
-        warning_at:       warningAt > now ? warningAt : null,
-        status:           'ACTIVE',
+        priority: params.priority ?? 'MEDIUM',
+        sla_deadline: params.sla_deadline,
+        warning_at: warningAt > now ? warningAt : null,
+        status: 'ACTIVE',
         escalation_level: 0,
-        metadata:         params.metadata ?? null,
+        metadata: params.metadata ?? null,
       }),
     );
   }
@@ -104,10 +106,18 @@ export class SlaEngineService {
       where: { entity_type, entity_id, status: Not('RESOLVED') as any },
     });
     if (events.length === 0) return;
-    const ids = events.map(e => e.id);
-    await this.slaRepo.update(ids, { status: 'RESOLVED', resolved_at: new Date() });
+    const ids = events.map((e) => e.id);
+    await this.slaRepo.update(ids, {
+      status: 'RESOLVED',
+      resolved_at: new Date(),
+    });
     for (const event of events) {
-      this.eventEmitter.emit('sla.resolved', { entity_label: event.entity_label, entity_type: event.entity_type, entity_id: event.entity_id, module: event.module });
+      this.eventEmitter.emit('sla.resolved', {
+        entity_label: event.entity_label,
+        entity_type: event.entity_type,
+        entity_id: event.entity_id,
+        module: event.module,
+      });
     }
   }
 
@@ -124,15 +134,15 @@ export class SlaEngineService {
     if (!job.due_date || !job.assigned_to) return;
     try {
       await this.createSlaEvent({
-        module:               'PRODUCTION',
-        entity_type:          'job',
-        entity_id:            job.id,
-        entity_label:         `Job #${job.id} — ${job.current_stage}`,
-        assigned_user_id:     job.assigned_to,
-        priority:             JOB_PRIORITY_MAP[job.priority?.toUpperCase()] ?? 'MEDIUM',
-        sla_deadline:         new Date(job.due_date),
+        module: 'PRODUCTION',
+        entity_type: 'job',
+        entity_id: job.id,
+        entity_label: `Job #${job.id} — ${job.current_stage}`,
+        assigned_user_id: job.assigned_to,
+        priority: JOB_PRIORITY_MAP[job.priority?.toUpperCase()] ?? 'MEDIUM',
+        sla_deadline: new Date(job.due_date),
         warning_hours_before: 4,
-        metadata:             { stage: job.current_stage },
+        metadata: { stage: job.current_stage },
       });
     } catch (e: any) {
       this.logger.warn(`SLA create (job.assigned) failed: ${e?.message}`);
@@ -141,17 +151,23 @@ export class SlaEngineService {
 
   @OnEvent('job.completed')
   async onJobCompleted(job: { id: number }): Promise<void> {
-    try { await this.resolveSlaEvent('job', job.id); } catch {}
+    try {
+      await this.resolveSlaEvent('job', job.id);
+    } catch {}
   }
 
   @OnEvent('dispatch.delivered')
   async onDispatchDelivered(payload: { id: number }): Promise<void> {
-    try { await this.resolveSlaEvent('dispatch', payload.id); } catch {}
+    try {
+      await this.resolveSlaEvent('dispatch', payload.id);
+    } catch {}
   }
 
   @OnEvent('lead.followup.completed')
   async onFollowupCompleted(payload: { followup_id: number }): Promise<void> {
-    try { await this.resolveSlaEvent('followup', payload.followup_id); } catch {}
+    try {
+      await this.resolveSlaEvent('followup', payload.followup_id);
+    } catch {}
   }
 
   // ── Cron: evaluate all open SLA events every 5 minutes ───────────────────────
@@ -163,7 +179,11 @@ export class SlaEngineService {
     const now = new Date();
     try {
       const events = await this.slaRepo.find({
-        where: [{ status: 'ACTIVE' }, { status: 'WARNING' }, { status: 'ESCALATED' }],
+        where: [
+          { status: 'ACTIVE' },
+          { status: 'WARNING' },
+          { status: 'ESCALATED' },
+        ],
       });
       for (const event of events) {
         await this.processEvent(event, now).catch((e: any) =>
@@ -183,7 +203,7 @@ export class SlaEngineService {
       : Infinity;
 
     const isPastDeadline = now >= new Date(event.sla_deadline);
-    const isPastWarning  = event.warning_at && now >= new Date(event.warning_at);
+    const isPastWarning = event.warning_at && now >= new Date(event.warning_at);
 
     // Level 2 (admin): re-notify hourly while overdue
     if (event.status === 'ESCALATED' && event.escalation_level >= 2) {
@@ -198,47 +218,66 @@ export class SlaEngineService {
       if (event.escalation_level === 0) {
         const escalated = await this.escalateToManager(event, now);
         if (!escalated) await this.escalateToAdmin(event, now);
-      } else if (event.escalation_level === 1 && sinceLastNotif >= NOTIFY_COOLDOWN_MS) {
+      } else if (
+        event.escalation_level === 1 &&
+        sinceLastNotif >= NOTIFY_COOLDOWN_MS
+      ) {
         await this.escalateToAdmin(event, now);
       }
       return;
     }
 
-    if (isPastWarning && event.status === 'ACTIVE' && sinceLastNotif >= NOTIFY_COOLDOWN_MS) {
+    if (
+      isPastWarning &&
+      event.status === 'ACTIVE' &&
+      sinceLastNotif >= NOTIFY_COOLDOWN_MS
+    ) {
       await this.sendWarning(event, now);
     }
   }
 
   private async sendWarning(event: SlaEvent, now: Date): Promise<void> {
-    const msLeft     = new Date(event.sla_deadline).getTime() - now.getTime();
+    const msLeft = new Date(event.sla_deadline).getTime() - now.getTime();
     const minutesLeft = Math.round(msLeft / 60_000);
-    const timeStr    = minutesLeft > 60 ? `${Math.round(minutesLeft / 60)}h` : `${minutesLeft}m`;
+    const timeStr =
+      minutesLeft > 60 ? `${Math.round(minutesLeft / 60)}h` : `${minutesLeft}m`;
 
     if (event.assigned_user_id) {
       await this.notifService.createNotification({
-        user_id:         event.assigned_user_id,
-        type:            NotificationType.REMINDER,
-        priority:        event.priority as NotificationPriority,
-        category:        event.module as unknown as NotificationCategory,
-        title:           `SLA Warning: ${event.entity_label}`,
-        message:         `Deadline in ${timeStr}. Complete this task to avoid escalation.`,
-        entity_type:     event.entity_type,
-        entity_id:       event.entity_id,
-        action_url:      this.getActionUrl(event),
+        user_id: event.assigned_user_id,
+        type: NotificationType.REMINDER,
+        priority: event.priority as NotificationPriority,
+        category: event.module as unknown as NotificationCategory,
+        title: `SLA Warning: ${event.entity_label}`,
+        message: `Deadline in ${timeStr}. Complete this task to avoid escalation.`,
+        entity_type: event.entity_type,
+        entity_id: event.entity_id,
+        action_url: this.getActionUrl(event),
         cooldownMinutes: 55,
-        is_automated:    true,
+        is_automated: true,
       });
     }
 
-    await this.slaRepo.update(event.id, { status: 'WARNING', last_notification_at: now });
-    this.eventEmitter.emit('sla.warning', { entity_label: event.entity_label, entity_type: event.entity_type, entity_id: event.entity_id, module: event.module });
+    await this.slaRepo.update(event.id, {
+      status: 'WARNING',
+      last_notification_at: now,
+    });
+    this.eventEmitter.emit('sla.warning', {
+      entity_label: event.entity_label,
+      entity_type: event.entity_type,
+      entity_id: event.entity_id,
+      module: event.module,
+    });
   }
 
-  private async escalateToManager(event: SlaEvent, now: Date): Promise<boolean> {
+  private async escalateToManager(
+    event: SlaEvent,
+    now: Date,
+  ): Promise<boolean> {
     const managerRoles = MANAGER_ROLES[event.module] ?? [];
     const managers = managerRoles.length
       ? await this.userRepo.find({
-          where: managerRoles.map(role => ({ role, is_active: true })),
+          where: managerRoles.map((role) => ({ role, is_active: true })),
           select: ['id'],
         })
       : [];
@@ -249,43 +288,49 @@ export class SlaEngineService {
 
     for (const manager of managers) {
       await this.notifService.createNotification({
-        user_id:         manager.id,
-        type:            NotificationType.ACTION,
-        priority:        NotificationPriority.HIGH,
-        category:        event.module as unknown as NotificationCategory,
-        title:           `Escalation: ${event.entity_label}`,
-        message:         `SLA breached by ${overdueStr}. Immediate attention required.`,
-        entity_type:     event.entity_type,
-        entity_id:       event.entity_id,
-        action_url:      this.getActionUrl(event),
+        user_id: manager.id,
+        type: NotificationType.ACTION,
+        priority: NotificationPriority.HIGH,
+        category: event.module as unknown as NotificationCategory,
+        title: `Escalation: ${event.entity_label}`,
+        message: `SLA breached by ${overdueStr}. Immediate attention required.`,
+        entity_type: event.entity_type,
+        entity_id: event.entity_id,
+        action_url: this.getActionUrl(event),
         cooldownMinutes: 55,
-        is_automated:    true,
+        is_automated: true,
       });
     }
 
     if (event.assigned_user_id) {
       await this.notifService.createNotification({
-        user_id:         event.assigned_user_id,
-        type:            NotificationType.ACTION,
-        priority:        NotificationPriority.CRITICAL,
-        category:        event.module as unknown as NotificationCategory,
-        title:           `OVERDUE: ${event.entity_label}`,
-        message:         `SLA breached — your manager has been notified. Resolve immediately.`,
-        entity_type:     event.entity_type,
-        entity_id:       event.entity_id,
-        action_url:      this.getActionUrl(event),
+        user_id: event.assigned_user_id,
+        type: NotificationType.ACTION,
+        priority: NotificationPriority.CRITICAL,
+        category: event.module as unknown as NotificationCategory,
+        title: `OVERDUE: ${event.entity_label}`,
+        message: `SLA breached — your manager has been notified. Resolve immediately.`,
+        entity_type: event.entity_type,
+        entity_id: event.entity_id,
+        action_url: this.getActionUrl(event),
         cooldownMinutes: 55,
-        is_automated:    true,
+        is_automated: true,
       });
     }
 
     await this.slaRepo.update(event.id, {
-      status:               'ESCALATED',
-      escalation_level:     1,
-      escalated_at:         now,
+      status: 'ESCALATED',
+      escalation_level: 1,
+      escalated_at: now,
       last_notification_at: now,
     });
-    this.eventEmitter.emit('sla.escalated', { entity_label: event.entity_label, entity_type: event.entity_type, entity_id: event.entity_id, module: event.module, escalation_level: 1 });
+    this.eventEmitter.emit('sla.escalated', {
+      entity_label: event.entity_label,
+      entity_type: event.entity_type,
+      entity_id: event.entity_id,
+      module: event.module,
+      escalation_level: 1,
+    });
 
     return true;
   }
@@ -293,27 +338,33 @@ export class SlaEngineService {
   private async escalateToAdmin(event: SlaEvent, now: Date): Promise<void> {
     await this.notifyAdmin(event, now);
     await this.slaRepo.update(event.id, {
-      status:               'ESCALATED',
-      escalation_level:     2,
-      escalated_at:         event.escalated_at ?? now,
+      status: 'ESCALATED',
+      escalation_level: 2,
+      escalated_at: event.escalated_at ?? now,
       last_notification_at: now,
     });
-    this.eventEmitter.emit('sla.escalated', { entity_label: event.entity_label, entity_type: event.entity_type, entity_id: event.entity_id, module: event.module, escalation_level: 2 });
+    this.eventEmitter.emit('sla.escalated', {
+      entity_label: event.entity_label,
+      entity_type: event.entity_type,
+      entity_id: event.entity_id,
+      module: event.module,
+      escalation_level: 2,
+    });
   }
 
   private async notifyAdmin(event: SlaEvent, now: Date): Promise<void> {
     const overdueStr = this.formatOverdue(now, event.sla_deadline);
     await this.notifService.createRoleNotification(['Admin'], {
-      type:            NotificationType.ACTION,
-      priority:        NotificationPriority.CRITICAL,
-      category:        event.module as unknown as NotificationCategory,
-      title:           `Admin Escalation: ${event.entity_label}`,
-      message:         `SLA breached by ${overdueStr} with no resolution. Admin action required.`,
-      entity_type:     event.entity_type,
-      entity_id:       event.entity_id,
-      action_url:      this.getActionUrl(event),
+      type: NotificationType.ACTION,
+      priority: NotificationPriority.CRITICAL,
+      category: event.module as unknown as NotificationCategory,
+      title: `Admin Escalation: ${event.entity_label}`,
+      message: `SLA breached by ${overdueStr} with no resolution. Admin action required.`,
+      entity_type: event.entity_type,
+      entity_id: event.entity_id,
+      action_url: this.getActionUrl(event),
       cooldownMinutes: 55,
-      is_automated:    true,
+      is_automated: true,
     });
   }
 
@@ -322,7 +373,7 @@ export class SlaEngineService {
   }
 
   private formatOverdue(now: Date, deadline: Date | string): string {
-    const ms      = now.getTime() - new Date(deadline).getTime();
+    const ms = now.getTime() - new Date(deadline).getTime();
     const minutes = Math.round(ms / 60_000);
     if (minutes < 60) return `${minutes}m`;
     const h = Math.floor(minutes / 60);
@@ -337,8 +388,12 @@ export class SlaEngineService {
     if (this._running) return;
     this._running = true;
     try {
-      const rows: Array<{ id: number; lead_id: number; due_date: string; assigned_to: number | null }> =
-        await this.slaRepo.manager.query(`
+      const rows: Array<{
+        id: number;
+        lead_id: number;
+        due_date: string;
+        assigned_to: number | null;
+      }> = await this.slaRepo.manager.query(`
           SELECT lf.id, lf.lead_id, lf.due_date, l.assigned_to
           FROM lead_followups lf
           JOIN leads l ON l.id = lf.lead_id
@@ -350,15 +405,15 @@ export class SlaEngineService {
 
       for (const row of rows) {
         await this.createSlaEvent({
-          module:               'CRM',
-          entity_type:          'followup',
-          entity_id:            row.id,
-          entity_label:         `Follow-up #${row.id} (Lead #${row.lead_id})`,
-          assigned_user_id:     row.assigned_to ?? null,
-          priority:             'MEDIUM',
-          sla_deadline:         new Date(row.due_date),
+          module: 'CRM',
+          entity_type: 'followup',
+          entity_id: row.id,
+          entity_label: `Follow-up #${row.id} (Lead #${row.lead_id})`,
+          assigned_user_id: row.assigned_to ?? null,
+          priority: 'MEDIUM',
+          sla_deadline: new Date(row.due_date),
           warning_hours_before: 2,
-          metadata:             { lead_id: row.lead_id },
+          metadata: { lead_id: row.lead_id },
         });
       }
     } catch (e: any) {
@@ -371,10 +426,10 @@ export class SlaEngineService {
   // ── Query API ─────────────────────────────────────────────────────────────────
 
   async listAll(filters: {
-    status?:   string;
-    module?:   string;
+    status?: string;
+    module?: string;
     priority?: string;
-    page?:     number;
+    page?: number;
   }): Promise<{ items: SlaEvent[]; total: number }> {
     const { status, module, priority, page = 1 } = filters;
     const PAGE = 25;
@@ -392,12 +447,15 @@ export class SlaEngineService {
       )
       .addOrderBy('s.sla_deadline', 'ASC');
 
-    if (status)   qb.andWhere('s.status = :status',     { status });
-    if (module)   qb.andWhere('s.module = :module',     { module });
+    if (status) qb.andWhere('s.status = :status', { status });
+    if (module) qb.andWhere('s.module = :module', { module });
     if (priority) qb.andWhere('s.priority = :priority', { priority });
 
     const total = await qb.getCount();
-    const items = await qb.skip((page - 1) * PAGE).take(PAGE).getMany();
+    const items = await qb
+      .skip((page - 1) * PAGE)
+      .take(PAGE)
+      .getMany();
     return { items, total };
   }
 

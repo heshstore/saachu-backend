@@ -37,12 +37,7 @@ const LOCAL_HOST_PATTERNS = [
   /\.local$/i,
 ];
 
-const TEST_HOST_PATTERNS = [
-  /test/i,
-  /staging/i,
-  /preview/i,
-  /sandbox/i,
-];
+const TEST_HOST_PATTERNS = [/test/i, /staging/i, /preview/i, /sandbox/i];
 
 /** Production Neon host — env override, then hardcoded fallback. */
 export function productionHostFingerprint(): string {
@@ -65,13 +60,19 @@ function parseDbUrl(raw: string): { host: string; database: string } {
 
 function hostMatchesProduction(host: string): boolean {
   const prodFp = productionHostFingerprint();
-  if (prodFp && (host === prodFp || host.includes(prodFp) || prodFp.includes(host))) {
+  if (
+    prodFp &&
+    (host === prodFp || host.includes(prodFp) || prodFp.includes(host))
+  ) {
     return true;
   }
   const prodUrl = (process.env.PRODUCTION_DATABASE_URL || '').trim();
   if (prodUrl) {
     const prodHost = parseDbUrl(prodUrl).host;
-    if (prodHost !== 'unknown' && (host === prodHost || host.includes(prodHost) || prodHost.includes(host))) {
+    if (
+      prodHost !== 'unknown' &&
+      (host === prodHost || host.includes(prodHost) || prodHost.includes(host))
+    ) {
       return true;
     }
   }
@@ -80,8 +81,8 @@ function hostMatchesProduction(host: string): boolean {
 
 function classifyHost(host: string): EnvironmentLabel {
   if (!host || host === 'unknown') return 'UNKNOWN';
-  if (LOCAL_HOST_PATTERNS.some(p => p.test(host))) return 'LOCAL';
-  if (TEST_HOST_PATTERNS.some(p => p.test(host))) return 'TEST';
+  if (LOCAL_HOST_PATTERNS.some((p) => p.test(host))) return 'LOCAL';
+  if (TEST_HOST_PATTERNS.some((p) => p.test(host))) return 'TEST';
 
   if (hostMatchesProduction(host)) return 'PRODUCTION';
   if (/neon\.tech/i.test(host)) return 'LOCAL';
@@ -121,7 +122,7 @@ export function resolveDatabaseUrl(): string {
     if (!hostMatchesProduction(parseDbUrl(url).host)) {
       throw new Error(
         `FATAL: Production DATABASE_URL host does not match production fingerprint ` +
-        `(${productionHostFingerprint()}). Refusing to start.`,
+          `(${productionHostFingerprint()}). Refusing to start.`,
       );
     }
     return sanitizeDatabaseUrl(url);
@@ -131,7 +132,7 @@ export function resolveDatabaseUrl(): string {
   if (!local) {
     throw new Error(
       'FATAL: Local development requires LOCAL_DATABASE_URL. ' +
-      'DATABASE_URL fallback is disabled. Refusing to start.',
+        'DATABASE_URL fallback is disabled. Refusing to start.',
     );
   }
   if (isProductionDatabaseUrl(local)) {
@@ -173,33 +174,46 @@ function redactConfiguredUrl(raw: string | undefined): string | null {
   }
 }
 
-export function buildEnvironmentAudit(activeUrl: string): DatabaseEnvironmentSnapshot['audit'] {
+export function buildEnvironmentAudit(
+  activeUrl: string,
+): DatabaseEnvironmentSnapshot['audit'] {
   const localRaw = (process.env.LOCAL_DATABASE_URL || '').trim();
-  const prodRaw = (process.env.PRODUCTION_DATABASE_URL || process.env.DATABASE_URL || '').trim();
+  const prodRaw = (
+    process.env.PRODUCTION_DATABASE_URL ||
+    process.env.DATABASE_URL ||
+    ''
+  ).trim();
   const isProdNode = process.env.NODE_ENV === 'production';
   const activeLabel = classifyHost(parseDbUrl(activeUrl).host);
   const prodFp = productionHostFingerprint();
 
   const localRedacted = redactConfiguredUrl(localRaw);
-  const prodRedacted = redactConfiguredUrl(prodRaw)
-    || `postgresql://***@${prodFp}/***`;
+  const prodRedacted =
+    redactConfiguredUrl(prodRaw) || `postgresql://***@${prodFp}/***`;
 
   let isolation_status: EnvironmentIsolationStatus = 'PASS';
   let overwrite_risk: OverwriteRisk = 'LOW';
-  let overwrite_risk_reason = 'Active binding matches NODE_ENV; local and production URLs are separated.';
+  let overwrite_risk_reason =
+    'Active binding matches NODE_ENV; local and production URLs are separated.';
 
   if (!isProdNode && activeLabel === 'PRODUCTION') {
     isolation_status = 'FAIL';
     overwrite_risk = 'HIGH';
-    overwrite_risk_reason = 'Development server is connected to the production database.';
-  } else if (isProdNode && (activeLabel === 'LOCAL' || activeLabel === 'TEST')) {
+    overwrite_risk_reason =
+      'Development server is connected to the production database.';
+  } else if (
+    isProdNode &&
+    (activeLabel === 'LOCAL' || activeLabel === 'TEST')
+  ) {
     isolation_status = 'FAIL';
     overwrite_risk = 'HIGH';
-    overwrite_risk_reason = 'Production server is connected to a local/test database.';
+    overwrite_risk_reason =
+      'Production server is connected to a local/test database.';
   } else if (!localRaw && !isProdNode) {
     isolation_status = 'FAIL';
     overwrite_risk = 'HIGH';
-    overwrite_risk_reason = 'LOCAL_DATABASE_URL is required for development — no DATABASE_URL fallback.';
+    overwrite_risk_reason =
+      'LOCAL_DATABASE_URL is required for development — no DATABASE_URL fallback.';
   }
 
   return {
@@ -244,8 +258,10 @@ export function buildEnvironmentSnapshot(
   };
 }
 
-/** Guard all promotional DB writes — throws if write not allowed. */
-export function assertPromotionalWriteAllowed(confirmProduction: boolean): void {
+/** Guard all promotional contact writes — throws if write not allowed. */
+export function assertPromotionalWriteAllowed(
+  confirmProduction: boolean,
+): void {
   const url = getActiveDatabaseUrl();
   const environment = classifyHost(parseDbUrl(url).host);
   const isProdNode = process.env.NODE_ENV === 'production';
@@ -253,7 +269,7 @@ export function assertPromotionalWriteAllowed(confirmProduction: boolean): void 
   if (!isProdNode && environment === 'PRODUCTION') {
     throw new ForbiddenException(
       'Promotional write blocked: non-production server is connected to the production database. ' +
-      'Set LOCAL_DATABASE_URL to a dev database.',
+        'Set LOCAL_DATABASE_URL to a dev database.',
     );
   }
 
@@ -268,20 +284,29 @@ export function assertPromotionalWriteAllowed(confirmProduction: boolean): void 
 export const assertPromotionalImportAllowed = assertPromotionalWriteAllowed;
 
 /** Used by deploy scripts — returns 0 if URL looks like production. */
-export function validateProductionDatabaseUrl(url: string): { ok: boolean; reason: string } {
+export function validateProductionDatabaseUrl(url: string): {
+  ok: boolean;
+  reason: string;
+} {
   const trimmed = (url || '').trim();
   if (!trimmed) return { ok: false, reason: 'DATABASE_URL missing' };
 
   const { host } = parseDbUrl(trimmed);
-  if (LOCAL_HOST_PATTERNS.some(p => p.test(host))) {
+  if (LOCAL_HOST_PATTERNS.some((p) => p.test(host))) {
     return { ok: false, reason: `Local database host detected: ${host}` };
   }
-  if (TEST_HOST_PATTERNS.some(p => p.test(host))) {
-    return { ok: false, reason: `Test/staging database host detected: ${host}` };
+  if (TEST_HOST_PATTERNS.some((p) => p.test(host))) {
+    return {
+      ok: false,
+      reason: `Test/staging database host detected: ${host}`,
+    };
   }
 
   if (!hostMatchesProduction(host)) {
-    return { ok: false, reason: `Host ${host} does not match production fingerprint` };
+    return {
+      ok: false,
+      reason: `Host ${host} does not match production fingerprint`,
+    };
   }
 
   return { ok: true, reason: `Production database verified: ${host}` };

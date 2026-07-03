@@ -1,4 +1,11 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Unique, Index } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  Unique,
+  Index,
+} from 'typeorm';
 
 @Entity()
 @Unique('UQ_customer_name_tag_city', ['companyName', 'tag', 'city'])
@@ -52,7 +59,7 @@ export class Customer {
   @Column({ nullable: true })
   createdBy: string;
 
-  @Column({ default: "India" })
+  @Column({ default: 'India' })
   country: string;
 
   @Column({ default: '+91' })

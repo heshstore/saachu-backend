@@ -1,6 +1,11 @@
 import {
-  IsEnum, IsNotEmpty, IsOptional, IsString,
-  IsNumber, IsDateString, Matches,
+  IsEnum,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  IsNumber,
+  IsDateString,
+  Matches,
 } from 'class-validator';
 import { Transform } from 'class-transformer';
 import { LeadSource, LeadPriority } from '../entities/lead.entity';
@@ -21,7 +26,8 @@ export class CreateManualLeadDto {
   @IsOptional()
   @IsString()
   @Matches(/^(\+\d{10,15}|\d{10})$/, {
-    message: 'Phone must be a 10-digit number or E.164 format (e.g. +919876543210)',
+    message:
+      'Phone must be a 10-digit number or E.164 format (e.g. +919876543210)',
   })
   phone?: string;
 

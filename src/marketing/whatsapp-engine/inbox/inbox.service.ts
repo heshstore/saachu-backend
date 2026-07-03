@@ -143,15 +143,18 @@ export class InboxService {
 
     this.logger.log(
       `[INBOX_GROUPING] conversation_count=${rows.length} ` +
-      `unread_conversations=${rows.filter(r => r.unread_count > 0).length} ` +
-      `total_unread=${rows.reduce((s, r) => s + Number(r.unread_count), 0)}`,
+        `unread_conversations=${rows.filter((r) => r.unread_count > 0).length} ` +
+        `total_unread=${rows.reduce((s, r) => s + Number(r.unread_count), 0)}`,
     );
 
     return rows;
   }
 
   findByPhone(phone: string): Promise<WhatsappReply[]> {
-    return this.repo.find({ where: { customer_phone: phone }, order: { received_at: 'DESC' } });
+    return this.repo.find({
+      where: { customer_phone: phone },
+      order: { received_at: 'DESC' },
+    });
   }
 
   async markLeadCreated(id: string, leadId: number): Promise<WhatsappReply> {
@@ -162,7 +165,7 @@ export class InboxService {
       { phone: reply.customer_phone },
       { reply_status: ReplyStatus.LEAD_CREATED, last_reply_at: new Date() },
     );
-    return this.repo.findOne({ where: { id } }) as Promise<WhatsappReply>;
+    return this.repo.findOne({ where: { id } });
   }
 
   async markRead(id: string): Promise<void> {
@@ -171,7 +174,10 @@ export class InboxService {
 
   // Send a reply to the customer via the same number that received their message.
   // Falls back to any connected number if number_id is unset.
-  async sendReply(replyId: string, message: string): Promise<{ sent: boolean; log_id?: string }> {
+  async sendReply(
+    replyId: string,
+    message: string,
+  ): Promise<{ sent: boolean; log_id?: string }> {
     const reply = await this.repo.findOne({ where: { id: replyId } });
     if (!reply) throw new NotFoundException(`Reply ${replyId} not found`);
 
@@ -179,8 +185,12 @@ export class InboxService {
 
     // Fallback: find a number whose WA client is live in memory (waState=ready)
     if (!numberId) {
-      const activeNumbers = await this.numberRepo.find({ where: { is_active: true } });
-      const liveNumber = activeNumbers.find((n) => this.whatsAppService.isConnected(n.id));
+      const activeNumbers = await this.numberRepo.find({
+        where: { is_active: true },
+      });
+      const liveNumber = activeNumbers.find((n) =>
+        this.whatsAppService.isConnected(n.id),
+      );
       numberId = liveNumber?.id ?? null;
     }
 
@@ -191,18 +201,23 @@ export class InboxService {
     // Validate client health before attempting send — aborts on corrupted browser/session
     await this.whatsAppService.assertHealthyClient(numberId);
 
-    const waResult = await this.whatsAppService.sendViaNumber(numberId, reply.customer_phone, message);
-    const waMessageId: string | null = waResult?.id?._serialized ?? waResult?.id ?? null;
+    const waResult = await this.whatsAppService.sendViaNumber(
+      numberId,
+      reply.customer_phone,
+      message,
+    );
+    const waMessageId: string | null =
+      waResult?.id?._serialized ?? waResult?.id ?? null;
 
     // Log the outbound message to WhatsappMessageLog for full conversation context
     const logRow = await this.logRepo.save(
       this.logRepo.create({
-        number_id:      numberId,
+        number_id: numberId,
         customer_phone: reply.customer_phone,
-        message_type:   MessageType.TEXT,
-        message_body:   message,
-        status:         QueueStatus.SENT,
-        sent_at:        new Date(),
+        message_type: MessageType.TEXT,
+        message_body: message,
+        status: QueueStatus.SENT,
+        sent_at: new Date(),
       }),
     );
 
@@ -218,7 +233,7 @@ export class InboxService {
 
     this.logger.log(
       `[MKT_INBOX_REPLY] replyId=${replyId} phone=${reply.customer_phone} ` +
-      `number_id=${numberId} log_id=${logRow.id} wa_message_id=${waMessageId ?? 'none'}`,
+        `number_id=${numberId} log_id=${logRow.id} wa_message_id=${waMessageId ?? 'none'}`,
     );
 
     return { sent: true, log_id: logRow.id };
@@ -244,38 +259,41 @@ export class InboxService {
     // Re-sort ascending after DESC-limited fetch so thread renders chronologically
     const replies = repliesDesc.reverse();
 
-    const numberMap = new Map<string, string>(numbers.map((n) => [n.id, n.phone]));
+    const numberMap = new Map<string, string>(
+      numbers.map((n) => [n.id, n.phone]),
+    );
 
     const inbound: ConversationMessage[] = replies.map((r) => ({
-      id:              r.id,
-      direction:       'INBOUND',
-      body:            r.message,
-      timestamp:       r.received_at,
-      number_id:       r.number_id,
-      number_phone:    r.number_id ? (numberMap.get(r.number_id) ?? null) : null,
+      id: r.id,
+      direction: 'INBOUND',
+      body: r.message,
+      timestamp: r.received_at,
+      number_id: r.number_id,
+      number_phone: r.number_id ? (numberMap.get(r.number_id) ?? null) : null,
       crm_lead_created: r.crm_lead_created,
-      crm_lead_id:     r.crm_lead_id,
-      is_read:         r.is_read,
+      crm_lead_id: r.crm_lead_id,
+      is_read: r.is_read,
     }));
 
     const outbound: ConversationMessage[] = logs
       .filter((l) => l.message_body && l.sent_at)
       .map((l) => ({
-        id:           l.id,
-        direction:    'OUTBOUND',
-        body:         l.message_body ?? '',
-        timestamp:    l.sent_at as Date,
-        number_id:    l.number_id,
+        id: l.id,
+        direction: 'OUTBOUND',
+        body: l.message_body ?? '',
+        timestamp: l.sent_at,
+        number_id: l.number_id,
         number_phone: l.number_id ? (numberMap.get(l.number_id) ?? null) : null,
       }));
 
     const result = [...inbound, ...outbound].sort(
-      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+      (a, b) =>
+        new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
     );
 
     this.logger.log(
       `[INBOX_THREAD] phone=${phone} message_count=${result.length} ` +
-      `inbound=${inbound.length} outbound=${outbound.length}`,
+        `inbound=${inbound.length} outbound=${outbound.length}`,
     );
 
     return result;
@@ -283,9 +301,11 @@ export class InboxService {
 
   // Priority: CRM customer → customer_phones → marketing_audience → leads → null
   // EXACT normalized equality only — no LIKE, no substring, no ILIKE.
-  private async resolveCustomerName(
-    phone: string,
-  ): Promise<{ name: string; source: string; matchedId: string | number } | null> {
+  private async resolveCustomerName(phone: string): Promise<{
+    name: string;
+    source: string;
+    matchedId: string | number;
+  } | null> {
     const normalized = canonicalPhone(phone);
     const digits = normalized.replace(/\D/g, '');
 
@@ -303,36 +323,44 @@ export class InboxService {
         const name = r.companyName || r.contactName || null;
         this.logger.log(
           `[CUSTOMER_LOOKUP] incomingPhone=${phone} normalizedPhone=${normalized} ` +
-          `source=customer.mobile1 matchedId=${r.id} matchedRecord="${name}" reason=exact_match`,
+            `source=customer.mobile1 matchedId=${r.id} matchedRecord="${name}" reason=exact_match`,
         );
         if (name) return { name, source: 'customer.mobile1', matchedId: r.id };
       }
     } catch (e: any) {
-      this.logger.warn(`[CUSTOMER_LOOKUP] customer.mobile1 query failed: ${e.message}`);
+      this.logger.warn(
+        `[CUSTOMER_LOOKUP] customer.mobile1 query failed: ${e.message}`,
+      );
     }
 
     // P1b: customer_phones (secondary phones)
     try {
-      const rows: { customer_id: number; companyName: string; contactName: string }[] =
-        await this.repo.manager.query(
-          `SELECT cp.customer_id, c."companyName", c."contactName"
+      const rows: {
+        customer_id: number;
+        companyName: string;
+        contactName: string;
+      }[] = await this.repo.manager.query(
+        `SELECT cp.customer_id, c."companyName", c."contactName"
            FROM customer_phones cp
            JOIN customer c ON c.id = cp.customer_id
            WHERE REGEXP_REPLACE(cp.phone, '[^0-9]', '', 'g') = $1
            LIMIT 1`,
-          [digits],
-        );
+        [digits],
+      );
       if (rows.length > 0) {
         const r = rows[0];
         const name = r.companyName || r.contactName || null;
         this.logger.log(
           `[CUSTOMER_LOOKUP] incomingPhone=${phone} normalizedPhone=${normalized} ` +
-          `source=customer_phones matchedId=${r.customer_id} matchedRecord="${name}" reason=exact_match`,
+            `source=customer_phones matchedId=${r.customer_id} matchedRecord="${name}" reason=exact_match`,
         );
-        if (name) return { name, source: 'customer_phones', matchedId: r.customer_id };
+        if (name)
+          return { name, source: 'customer_phones', matchedId: r.customer_id };
       }
     } catch (e: any) {
-      this.logger.warn(`[CUSTOMER_LOOKUP] customer_phones query failed: ${e.message}`);
+      this.logger.warn(
+        `[CUSTOMER_LOOKUP] customer_phones query failed: ${e.message}`,
+      );
     }
 
     // P2: marketing_audience
@@ -343,12 +371,18 @@ export class InboxService {
       if (audience?.name) {
         this.logger.log(
           `[CUSTOMER_LOOKUP] incomingPhone=${phone} normalizedPhone=${normalized} ` +
-          `source=marketing_audience matchedId=${audience.id} matchedRecord="${audience.name}" reason=exact_match`,
+            `source=marketing_audience matchedId=${audience.id} matchedRecord="${audience.name}" reason=exact_match`,
         );
-        return { name: audience.name, source: 'marketing_audience', matchedId: audience.id };
+        return {
+          name: audience.name,
+          source: 'marketing_audience',
+          matchedId: audience.id,
+        };
       }
     } catch (e: any) {
-      this.logger.warn(`[CUSTOMER_LOOKUP] marketing_audience query failed: ${e.message}`);
+      this.logger.warn(
+        `[CUSTOMER_LOOKUP] marketing_audience query failed: ${e.message}`,
+      );
     }
 
     // P3: leads
@@ -365,7 +399,7 @@ export class InboxService {
         const r = rows[0];
         this.logger.log(
           `[CUSTOMER_LOOKUP] incomingPhone=${phone} normalizedPhone=${normalized} ` +
-          `source=leads matchedId=${r.id} matchedRecord="${r.name}" reason=exact_match`,
+            `source=leads matchedId=${r.id} matchedRecord="${r.name}" reason=exact_match`,
         );
         return { name: r.name, source: 'leads', matchedId: r.id };
       }
@@ -375,7 +409,7 @@ export class InboxService {
 
     this.logger.log(
       `[CUSTOMER_LOOKUP] incomingPhone=${phone} normalizedPhone=${normalized} ` +
-      `source=none matchedId=null matchedRecord=null reason=no_match`,
+        `source=none matchedId=null matchedRecord=null reason=no_match`,
     );
     return null;
   }
@@ -384,7 +418,8 @@ export class InboxService {
   async saveReply(dto: Partial<WhatsappReply>): Promise<WhatsappReply> {
     const phone = dto.customer_phone ?? '';
     const digits = phone.replace(/\D/g, '');
-    const isValidE164 = phone.startsWith('+') &&
+    const isValidE164 =
+      phone.startsWith('+') &&
       digits.length >= 10 &&
       digits.length <= 15 &&
       /^\+[1-9]\d{9,14}$/.test(phone);
@@ -392,7 +427,7 @@ export class InboxService {
     if (!isValidE164) {
       this.logger.warn(
         `[MKT_REPLY_SAVE_BLOCKED] phone="${phone}" digits=${digits.length} — ` +
-        `failed E.164 validation; row not inserted`,
+          `failed E.164 validation; row not inserted`,
       );
       throw new Error(`[MKT_REPLY_SAVE_BLOCKED] Invalid phone: "${phone}"`);
     }
@@ -414,14 +449,16 @@ export class InboxService {
 
     this.logger.log(
       `[INBOX_RECEIVE] phone=${phone} conversation_key=${conversationKey} ` +
-      `number_id=${dto.number_id ?? 'n/a'} customer_name=${saved.customer_name ?? 'none'} ` +
-      `message="${(dto.message ?? '').slice(0, 60)}"`,
+        `number_id=${dto.number_id ?? 'n/a'} customer_name=${saved.customer_name ?? 'none'} ` +
+        `message="${(dto.message ?? '').slice(0, 60)}"`,
     );
 
     // Upsert marketing_audience: create with source=WHATSAPP_INBOX for unknown numbers,
     // or update reply_status on existing records.
     if (dto.customer_phone) {
-      const existing = await this.audienceRepo.findOne({ where: { phone: dto.customer_phone } });
+      const existing = await this.audienceRepo.findOne({
+        where: { phone: dto.customer_phone },
+      });
       if (existing) {
         await this.audienceRepo.update(existing.id, {
           reply_status: ReplyStatus.REPLIED,
@@ -429,20 +466,26 @@ export class InboxService {
         });
       } else {
         try {
-          await this.audienceRepo.save(this.audienceRepo.create({
-            phone:          dto.customer_phone,
-            name:           saved.customer_name ?? null,
-            customer_name:  saved.customer_name ?? null,
-            source:         'WHATSAPP_INBOX',
-            reply_status:   ReplyStatus.REPLIED,
-            last_reply_at:  new Date(),
-            is_whatsapp_valid: true,
-          }));
-          this.logger.log(`[INBOX_AUTO_AUDIENCE] phone=${dto.customer_phone} created source=WHATSAPP_INBOX`);
+          await this.audienceRepo.save(
+            this.audienceRepo.create({
+              phone: dto.customer_phone,
+              name: saved.customer_name ?? null,
+              customer_name: saved.customer_name ?? null,
+              source: 'WHATSAPP_INBOX',
+              reply_status: ReplyStatus.REPLIED,
+              last_reply_at: new Date(),
+              is_whatsapp_valid: true,
+            }),
+          );
+          this.logger.log(
+            `[INBOX_AUTO_AUDIENCE] phone=${dto.customer_phone} created source=WHATSAPP_INBOX`,
+          );
         } catch (e: any) {
           // 23505 = unique_violation — another message from the same number raced us
           if (e.code !== '23505') {
-            this.logger.warn(`[INBOX_AUTO_AUDIENCE] insert failed for phone=${dto.customer_phone}: ${e.message}`);
+            this.logger.warn(
+              `[INBOX_AUTO_AUDIENCE] insert failed for phone=${dto.customer_phone}: ${e.message}`,
+            );
           }
         }
       }
@@ -451,10 +494,16 @@ export class InboxService {
   }
 
   // Product search for telecaller use inside inbox — queries Shopify catalog only
-  async searchProducts(q: string): Promise<Array<{
-    id: number; itemName: string; sku: string;
-    retailPrice: number; image: string | null; handle: string | null;
-  }>> {
+  async searchProducts(q: string): Promise<
+    Array<{
+      id: number;
+      itemName: string;
+      sku: string;
+      retailPrice: number;
+      image: string | null;
+      handle: string | null;
+    }>
+  > {
     if (!q || q.trim().length < 1) return [];
     const like = `%${q.trim()}%`;
     return this.repo.manager.query(

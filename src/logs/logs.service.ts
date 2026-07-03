@@ -4,13 +4,13 @@ import { DataSource, Repository } from 'typeorm';
 import { Log } from './entities/log.entity';
 
 export enum LogAction {
-  LEAD_CREATED        = 'LEAD_CREATED',
-  LEAD_UPDATED        = 'LEAD_UPDATED',
-  LEAD_ASSIGNED       = 'LEAD_ASSIGNED',
-  PROMOTION_CAPTURED  = 'PROMOTION_CAPTURED',
-  PROMOTION_SKIPPED   = 'PROMOTION_SKIPPED',
-  ANALYTICS_TRACKED   = 'ANALYTICS_TRACKED',
-  ERROR               = 'ERROR',
+  LEAD_CREATED = 'LEAD_CREATED',
+  LEAD_UPDATED = 'LEAD_UPDATED',
+  LEAD_ASSIGNED = 'LEAD_ASSIGNED',
+  PROMOTION_CAPTURED = 'PROMOTION_CAPTURED',
+  PROMOTION_SKIPPED = 'PROMOTION_SKIPPED',
+  ANALYTICS_TRACKED = 'ANALYTICS_TRACKED',
+  ERROR = 'ERROR',
 }
 
 @Injectable()
@@ -56,20 +56,22 @@ export class LogsService {
       .save(
         this.repo.create({
           action,
-          payload:  payload  ?? null,
-          user_id:  userId   ?? null,
-          ip:       ip       ?? null,
+          payload: payload ?? null,
+          user_id: userId ?? null,
+          ip: ip ?? null,
         }),
       )
       .catch((err) =>
-        this.logger.error(`Failed to write log entry action=${action}: ${err?.message}`),
+        this.logger.error(
+          `Failed to write log entry action=${action}: ${err?.message}`,
+        ),
       );
   }
 
   async findAll(limit = 200): Promise<Log[]> {
     return this.repo.find({
       order: { created_at: 'DESC' },
-      take:  Math.min(limit, 1000),
+      take: Math.min(limit, 1000),
     });
   }
 
@@ -77,7 +79,7 @@ export class LogsService {
     return this.repo.find({
       where: { action },
       order: { created_at: 'DESC' },
-      take:  Math.min(limit, 1000),
+      take: Math.min(limit, 1000),
     });
   }
 }

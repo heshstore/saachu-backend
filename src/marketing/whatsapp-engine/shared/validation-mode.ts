@@ -6,6 +6,8 @@
  * NOT bypassed: opt_out, is_whatsapp_valid, daily caps, send windows,
  * telecaller ownership, product rotation, connected-number checks.
  */
-export function isValidationContact(contact: { is_test_contact?: boolean | null }): boolean {
+export function isValidationContact(contact: {
+  is_test_contact?: boolean | null;
+}): boolean {
   return contact.is_test_contact === true;
 }

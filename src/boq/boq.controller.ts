@@ -1,4 +1,12 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Body,
+  Param,
+} from '@nestjs/common';
 import { BoqService } from './boq.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
@@ -33,7 +41,7 @@ export class BoqController {
   @Patch(':boqId/lines/:lineId')
   @RequirePermission('production.update')
   updateLine(
-    @Param('boqId')  boqId:  string,
+    @Param('boqId') boqId: string,
     @Param('lineId') lineId: string,
     @Body() data: any,
   ) {
@@ -42,10 +50,7 @@ export class BoqController {
 
   @Delete(':boqId/lines/:lineId')
   @RequirePermission('production.update')
-  deleteLine(
-    @Param('boqId')  boqId:  string,
-    @Param('lineId') lineId: string,
-  ) {
+  deleteLine(@Param('boqId') boqId: string, @Param('lineId') lineId: string) {
     return this.svc.deleteLine(+boqId, +lineId);
   }
 }

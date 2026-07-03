@@ -1,6 +1,17 @@
 import {
-  Controller, Get, Post, Put, Patch, Delete, ForbiddenException, BadRequestException,
-  Param, Body, Query, Request, ParseIntPipe,
+  Controller,
+  Get,
+  Post,
+  Put,
+  Patch,
+  Delete,
+  ForbiddenException,
+  BadRequestException,
+  Param,
+  Body,
+  Query,
+  Request,
+  ParseIntPipe,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { LeadService } from './lead.service';
@@ -30,7 +41,10 @@ export class LeadController {
   @RequirePermission('lead.create')
   @Throttle({ default: { ttl: 60_000, limit: 10 } })
   async create(@Body() dto: CreateManualLeadDto, @Request() req) {
-    const result = await this.leadService.create(dto as unknown as CreateLeadDto, req.user);
+    const result = await this.leadService.create(
+      dto as unknown as CreateLeadDto,
+      req.user,
+    );
     if (result.analyticsOnly || !result.lead) {
       throw new BadRequestException(
         'A valid phone number or email is required to create a lead.',
@@ -55,7 +69,15 @@ export class LeadController {
   @RequirePermission('lead.edit')
   logAction(
     @Param('id', ParseIntPipe) id: number,
-    @Body() body: { note: string; noteType?: NoteType; newStatus?: string; outcomeType?: OutcomeType; objectionType?: string; callbackDate?: string },
+    @Body()
+    body: {
+      note: string;
+      noteType?: NoteType;
+      newStatus?: string;
+      outcomeType?: OutcomeType;
+      objectionType?: string;
+      callbackDate?: string;
+    },
     @Request() req,
   ) {
     return this.leadService.logAction(id, body, req.user, req.ip);
@@ -102,7 +124,8 @@ export class LeadController {
     @Body('userId') rawUserId: number | null,
     @Request() req,
   ) {
-    const userId = rawUserId === null || rawUserId === undefined ? null : Number(rawUserId);
+    const userId =
+      rawUserId === null || rawUserId === undefined ? null : Number(rawUserId);
     return this.leadService.assignLead(id, userId, req.user, req.ip);
   }
 
@@ -134,10 +157,7 @@ export class LeadController {
 
   @Patch(':id/followups/:fid/complete')
   @RequirePermission('lead.edit')
-  completeFollowUp(
-    @Param('fid', ParseIntPipe) fid: number,
-    @Request() req,
-  ) {
+  completeFollowUp(@Param('fid', ParseIntPipe) fid: number, @Request() req) {
     return this.leadService.completeFollowUp(fid, req.user, req.ip);
   }
 
@@ -186,7 +206,13 @@ export class LeadController {
     @Body() body: { customerId: number; quotationId: number },
     @Request() req,
   ) {
-    return this.leadService.markConverted(id, body.customerId, body.quotationId, req.user, req.ip);
+    return this.leadService.markConverted(
+      id,
+      body.customerId,
+      body.quotationId,
+      req.user,
+      req.ip,
+    );
   }
 
   // ── Lead lock ─────────────────────────────────────────────────────────────────
@@ -195,7 +221,12 @@ export class LeadController {
   @RequirePermission('lead.view')
   acquireLock(@Param('id', ParseIntPipe) id: number, @Request() req) {
     this.leadService.acquireLock(id, req.user);
-    return { locked: true, leadId: id, userId: req.user.id, userName: req.user.name };
+    return {
+      locked: true,
+      leadId: id,
+      userId: req.user.id,
+      userName: req.user.name,
+    };
   }
 
   @Delete(':id/lock')
@@ -218,7 +249,13 @@ export class LeadController {
     @Body('reason') reason: string,
     @Request() req,
   ) {
-    return this.leadService.setAutomationPaused(id, paused, reason, req.user, req.ip);
+    return this.leadService.setAutomationPaused(
+      id,
+      paused,
+      reason,
+      req.user,
+      req.ip,
+    );
   }
 
   @Post(':id/automation/snooze')
@@ -229,7 +266,13 @@ export class LeadController {
     @Body('reason') reason: string,
     @Request() req,
   ) {
-    return this.leadService.snoozeAutomation(id, durationMins, reason, req.user, req.ip);
+    return this.leadService.snoozeAutomation(
+      id,
+      durationMins,
+      reason,
+      req.user,
+      req.ip,
+    );
   }
 
   // ── Automation settings (Admin only) ─────────────────────────────────────────
@@ -242,9 +285,14 @@ export class LeadController {
 
   @Put('automation/settings')
   @RequirePermission('lead.view')
-  updateAutomationSettings(@Body() body: Record<string, boolean>, @Request() req) {
+  updateAutomationSettings(
+    @Body() body: Record<string, boolean>,
+    @Request() req,
+  ) {
     if (req.user?.role !== 'Admin' && req.user?.role !== 'COO') {
-      throw new ForbiddenException('Only Admin or COO can change automation settings');
+      throw new ForbiddenException(
+        'Only Admin or COO can change automation settings',
+      );
     }
     return this.leadService.updateAutomationSettings(body);
   }

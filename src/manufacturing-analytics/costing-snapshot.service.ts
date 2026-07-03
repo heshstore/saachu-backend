@@ -29,8 +29,12 @@ export class CostingSnapshotService {
   }
 
   /** Idempotent: inserts one row per production_job_id; never updates existing */
-  async ensureSnapshotForJob(jobId: number): Promise<ProductionCostSnapshot | null> {
-    const existing = await this.snapRepo.count({ where: { productionJobId: jobId } });
+  async ensureSnapshotForJob(
+    jobId: number,
+  ): Promise<ProductionCostSnapshot | null> {
+    const existing = await this.snapRepo.count({
+      where: { productionJobId: jobId },
+    });
     if (existing > 0) return null;
 
     const jobs: any[] = await this.dataSource.query(
@@ -50,15 +54,20 @@ export class CostingSnapshotService {
     const jobQty = Number(j.qty) || 0;
 
     if (producedQty <= EPS) {
-      this.logger.warn(`[CostingSnapshot] Job ${jobId}: skip snapshot — producedQty is 0`);
+      this.logger.warn(
+        `[CostingSnapshot] Job ${jobId}: skip snapshot — producedQty is 0`,
+      );
       return null;
     }
 
     const rawMaterialCost = await this.sumConsumptionValue(jobId);
     const productionCost = await this.sumLabourCostForJob(jobId);
-    const plannedMaterialAtJob = await this.plannedReservationMaterialValue(jobId);
+    const plannedMaterialAtJob =
+      await this.plannedReservationMaterialValue(jobId);
     const baselineGood =
-      jobQty > EPS ? plannedMaterialAtJob * (producedQty / jobQty) : plannedMaterialAtJob;
+      jobQty > EPS
+        ? plannedMaterialAtJob * (producedQty / jobQty)
+        : plannedMaterialAtJob;
     const wastageCost = Math.max(0, rawMaterialCost - baselineGood);
 
     const dispatchRows: any[] = await this.dataSource.query(
@@ -72,7 +81,8 @@ export class CostingSnapshotService {
     );
     const dispatchCost = Number(dispatchRows[0]?.s) || 0;
 
-    const totalCost = rawMaterialCost + productionCost + wastageCost + dispatchCost;
+    const totalCost =
+      rawMaterialCost + productionCost + wastageCost + dispatchCost;
     const costPerUnit = producedQty > EPS ? totalCost / producedQty : 0;
 
     const row = this.snapRepo.create({
@@ -98,7 +108,9 @@ export class CostingSnapshotService {
   }
 
   /** Backfill snapshots for completed jobs missing a row (read-only on ledger) */
-  async backfillMissingSnapshots(limit = 100): Promise<{ scanned: number; snapshotsCreated: number }> {
+  async backfillMissingSnapshots(
+    limit = 100,
+  ): Promise<{ scanned: number; snapshotsCreated: number }> {
     const lim = Math.min(500, Math.max(1, limit));
     const rows: { id: number }[] = await this.dataSource.query(
       `SELECT id FROM production_execution_jobs
@@ -146,7 +158,9 @@ export class CostingSnapshotService {
     return Number(rows[0]?.v) || 0;
   }
 
-  private async plannedReservationMaterialValue(jobId: number): Promise<number> {
+  private async plannedReservationMaterialValue(
+    jobId: number,
+  ): Promise<number> {
     const rows: any[] = await this.dataSource.query(
       `
       SELECT COALESCE(SUM(

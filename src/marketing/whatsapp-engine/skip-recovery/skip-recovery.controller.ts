@@ -1,6 +1,4 @@
-import {
-  Controller, Get, Post, Param, Query, Body, Res,
-} from '@nestjs/common';
+import { Controller, Get, Post, Param, Query, Body, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { SkipRecoveryService } from './skip-recovery.service';
 
@@ -17,17 +15,17 @@ export class SkipRecoveryController {
   /** Paginated, searchable list of all skip records */
   @Get('search')
   search(
-    @Query('q')           q?: string,
+    @Query('q') q?: string,
     @Query('reason_code') reason_code?: string,
-    @Query('recovered')   recovered?: string,
-    @Query('page')        page?: string,
-    @Query('limit')       limit?: string,
+    @Query('recovered') recovered?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
   ) {
     return this.svc.search({
       q,
       reason_code,
       recovered,
-      page:  page  ? parseInt(page,  10) : 1,
+      page: page ? parseInt(page, 10) : 1,
       limit: limit ? parseInt(limit, 10) : 50,
     });
   }
@@ -35,7 +33,7 @@ export class SkipRecoveryController {
   /** CSV export — query params: reason_code, recoverable_only */
   @Get('export')
   async exportCsv(
-    @Query('reason_code')      reason_code?: string,
+    @Query('reason_code') reason_code?: string,
     @Query('recoverable_only') recoverableOnly?: string,
     @Res() res?: Response,
   ) {
@@ -45,7 +43,10 @@ export class SkipRecoveryController {
     });
     if (res) {
       res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename="skipped_contacts.csv"');
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="skipped_contacts.csv"',
+      );
       res.send(csv);
     } else {
       return csv;
@@ -56,7 +57,8 @@ export class SkipRecoveryController {
   @Post(':id/recover')
   recover(
     @Param('id') id: string,
-    @Body() body: {
+    @Body()
+    body: {
       phone?: string;
       email?: string;
       company?: string;

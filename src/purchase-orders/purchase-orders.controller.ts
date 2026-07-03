@@ -1,5 +1,12 @@
 import {
-  Controller, Get, Post, Patch, Body, Param, Query, Req,
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Body,
+  Param,
+  Query,
+  Req,
 } from '@nestjs/common';
 import { Request } from 'express';
 import { PurchaseOrdersService } from './purchase-orders.service';
@@ -13,15 +20,15 @@ export class PurchaseOrdersController {
   @RequirePermission('inventory.manage')
   createFromRequirements(@Body() body: any, @Req() req: Request) {
     return this.svc.createFromRequirements({
-      vendorId:                  Number(body.vendorId),
-      purchaseRequirementIds:    Array.isArray(body.purchaseRequirementIds)
+      vendorId: Number(body.vendorId),
+      purchaseRequirementIds: Array.isArray(body.purchaseRequirementIds)
         ? body.purchaseRequirementIds.map(Number)
         : [],
-      warehouseId:               body.warehouseId != null ? Number(body.warehouseId) : null,
-      expectedDate:              body.expectedDate ?? null,
-      notes:                     body.notes ?? null,
-      status:                    body.status,
-      createdBy:                 (req as any).user?.id ?? null,
+      warehouseId: body.warehouseId != null ? Number(body.warehouseId) : null,
+      expectedDate: body.expectedDate ?? null,
+      notes: body.notes ?? null,
+      status: body.status,
+      createdBy: (req as any).user?.id ?? null,
     });
   }
 
@@ -29,7 +36,15 @@ export class PurchaseOrdersController {
   @RequirePermission('inventory.manage')
   receive(
     @Param('id') id: string,
-    @Body() body: { warehouseId?: number; lines: { purchaseOrderItemId: number; qty: number; warehouseId?: number }[] },
+    @Body()
+    body: {
+      warehouseId?: number;
+      lines: {
+        purchaseOrderItemId: number;
+        qty: number;
+        warehouseId?: number;
+      }[];
+    },
     @Req() req: Request,
   ) {
     return this.svc.receive(+id, body, (req as any).user?.id);

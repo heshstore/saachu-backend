@@ -44,7 +44,11 @@ export class OrderExplosionService {
           `SELECT id, main_category_type FROM service_items WHERE sku = $1 AND is_active = true LIMIT 1`,
           [oi.sku],
         );
-        if (!svcRows.length || svcRows[0].main_category_type !== 'MANUFACTURING') continue;
+        if (
+          !svcRows.length ||
+          svcRows[0].main_category_type !== 'MANUFACTURING'
+        )
+          continue;
 
         const svcItem = svcRows[0];
 
@@ -70,10 +74,10 @@ export class OrderExplosionService {
         const orderedQty = Number(oi.qty) || 1;
 
         for (const line of lines) {
-          const qtyPerUnit     = Number(line.qty_per_unit);
+          const qtyPerUnit = Number(line.qty_per_unit);
           const wastagePercent = Number(line.wastage_percent) || 0;
-          const requiredQty    = qtyPerUnit * orderedQty;
-          const calculatedQty  = requiredQty * (1 + wastagePercent / 100);
+          const requiredQty = qtyPerUnit * orderedQty;
+          const calculatedQty = requiredQty * (1 + wastagePercent / 100);
 
           await this.dataSource.query(
             `INSERT INTO order_material_requirements
@@ -81,8 +85,15 @@ export class OrderExplosionService {
                 required_qty, consumption_type, wastage_percent, calculated_qty, status, created_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'PENDING',now())`,
             [
-              orderId, oi.id, svcItem.id, line.raw_material_item_id, line.id,
-              requiredQty, line.consumption_type, wastagePercent, calculatedQty,
+              orderId,
+              oi.id,
+              svcItem.id,
+              line.raw_material_item_id,
+              line.id,
+              requiredQty,
+              line.consumption_type,
+              wastagePercent,
+              calculatedQty,
             ],
           );
 
@@ -91,7 +102,14 @@ export class OrderExplosionService {
                (order_id, order_item_id, department_id, boq_item_id,
                 workload_qty, workload_unit, status, created_at)
              VALUES ($1,$2,$3,$4,$5,$6,'PENDING',now())`,
-            [orderId, oi.id, line.department_id, line.id, calculatedQty, line.consumption_type],
+            [
+              orderId,
+              oi.id,
+              line.department_id,
+              line.id,
+              calculatedQty,
+              line.consumption_type,
+            ],
           );
         }
       }

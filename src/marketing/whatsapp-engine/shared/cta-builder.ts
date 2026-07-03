@@ -10,9 +10,15 @@
  */
 
 export type CtaConfig =
-  | { type: 'call';    phone: string;               callLabel?: string }
-  | { type: 'product'; url: string;                 viewLabel?: string }
-  | { type: 'both';    phone: string; url: string;  callLabel?: string; viewLabel?: string };
+  | { type: 'call'; phone: string; callLabel?: string }
+  | { type: 'product'; url: string; viewLabel?: string }
+  | {
+      type: 'both';
+      phone: string;
+      url: string;
+      callLabel?: string;
+      viewLabel?: string;
+    };
 
 const VIEW_LABELS = [
   '🛍 Click here to view product',
@@ -38,9 +44,12 @@ function pickViewLabel(override?: string): string {
  *   "📞 Call us: +919999999999\n🛍 Click here to view product\n\nhttps://..."
  */
 export function buildCta(config: CtaConfig): string {
-  const callLabel = ('callLabel' in config && config.callLabel) ? config.callLabel : 'Call / WhatsApp';
+  const callLabel =
+    'callLabel' in config && config.callLabel
+      ? config.callLabel
+      : 'Call / WhatsApp';
   const viewLabel = pickViewLabel(
-    ('viewLabel' in config && config.viewLabel) ? config.viewLabel : undefined,
+    'viewLabel' in config && config.viewLabel ? config.viewLabel : undefined,
   );
 
   switch (config.type) {

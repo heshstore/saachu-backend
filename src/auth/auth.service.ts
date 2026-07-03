@@ -6,7 +6,10 @@ import * as bcrypt from 'bcrypt';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { User } from '../users/entities/user.entity';
 import { RbacService } from '../rbac/rbac.service';
-import { normalizeUserMobile, normalizeUserRole } from '../users/user-normalization.util';
+import {
+  normalizeUserMobile,
+  normalizeUserRole,
+} from '../users/user-normalization.util';
 
 /** Last up to 10 digits of input (matches DB mobile with or without country code). */
 function mobileMatchKey(input: string): string {
@@ -30,7 +33,9 @@ export class AuthService {
   async login(loginId: string, password: string) {
     const trimmed = (loginId || '').trim();
     const loginType = trimmed.includes('@') ? 'email' : 'mobile';
-    console.log(`[Auth:Service] Login attempt | type=${loginType} | loginId="${trimmed}"`);
+    console.log(
+      `[Auth:Service] Login attempt | type=${loginType} | loginId="${trimmed}"`,
+    );
 
     if (!trimmed || !password) {
       console.warn('[Auth:Service] Rejected: empty credentials');
@@ -69,28 +74,40 @@ export class AuthService {
       throw new UnauthorizedException('Invalid mobile or password');
     }
 
-    console.log(`[Auth:Service] User found | id=${user.id} name="${user.name}" role="${user.role}" mobile="${user.mobile}" passwordHashPresent=${!!user.password_hash}`);
+    console.log(
+      `[Auth:Service] User found | id=${user.id} name="${user.name}" role="${user.role}" mobile="${user.mobile}" passwordHashPresent=${!!user.password_hash}`,
+    );
 
     const normalizedRole = normalizeUserRole(user.role);
     const normalizedMobile = normalizeUserMobile(user.mobile);
-    if (normalizedRole !== (user.role || '') || normalizedMobile !== (user.mobile || null)) {
+    if (
+      normalizedRole !== (user.role || '') ||
+      normalizedMobile !== (user.mobile || null)
+    ) {
       const patch: Partial<User> = {};
       if (normalizedRole !== (user.role || '')) patch.role = normalizedRole;
-      if (normalizedMobile !== (user.mobile || null)) patch.mobile = normalizedMobile;
+      if (normalizedMobile !== (user.mobile || null))
+        patch.mobile = normalizedMobile;
       await this.userRepo.update(user.id, patch);
       Object.assign(user, patch);
     }
 
     if (!user.password_hash) {
-      console.error(`[Auth:Service] No password_hash set for uid=${user.id} — account not configured`);
+      console.error(
+        `[Auth:Service] No password_hash set for uid=${user.id} — account not configured`,
+      );
       throw new UnauthorizedException('Account not set up. Contact admin.');
     }
 
     const isMatch = await bcrypt.compare(password, user.password_hash);
-    console.log(`[Auth:Service] bcrypt.compare result=${isMatch} for uid=${user.id}`);
+    console.log(
+      `[Auth:Service] bcrypt.compare result=${isMatch} for uid=${user.id}`,
+    );
 
     if (!isMatch) {
-      console.warn(`[Auth:Service] Password mismatch for uid=${user.id} loginId="${trimmed}"`);
+      console.warn(
+        `[Auth:Service] Password mismatch for uid=${user.id} loginId="${trimmed}"`,
+      );
       throw new UnauthorizedException('Invalid mobile or password');
     }
 
@@ -99,7 +116,8 @@ export class AuthService {
       throw new UnauthorizedException('Account is inactive');
     }
 
-    const permissions = await this.rbacService.getPermissionsForRole(normalizedRole);
+    const permissions =
+      await this.rbacService.getPermissionsForRole(normalizedRole);
 
     const payload = {
       sub: user.id,
@@ -110,8 +128,15 @@ export class AuthService {
       can_approve_order: user.can_approve_order,
     };
 
-    console.log(`[Auth:Service] Login SUCCESS | uid=${user.id} name="${user.name}" role=${normalizedRole}`);
-    this.eventEmitter.emit('auth.login', { user_id: user.id, name: user.name, role: normalizedRole, ip: null });
+    console.log(
+      `[Auth:Service] Login SUCCESS | uid=${user.id} name="${user.name}" role=${normalizedRole}`,
+    );
+    this.eventEmitter.emit('auth.login', {
+      user_id: user.id,
+      name: user.name,
+      role: normalizedRole,
+      ip: null,
+    });
     return {
       access_token: this.jwtService.sign(payload),
       user: {
@@ -126,7 +151,11 @@ export class AuthService {
     };
   }
 
-  async changePassword(userId: number, currentPassword: string, newPassword: string): Promise<void> {
+  async changePassword(
+    userId: number,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
     const user = await this.userRepo
       .createQueryBuilder('user')
       .addSelect('user.password_hash')
@@ -137,7 +166,8 @@ export class AuthService {
     if (!user.password_hash) throw new UnauthorizedException('No password set');
 
     const isMatch = await bcrypt.compare(currentPassword, user.password_hash);
-    if (!isMatch) throw new UnauthorizedException('Current password is incorrect');
+    if (!isMatch)
+      throw new UnauthorizedException('Current password is incorrect');
 
     const newHash = await bcrypt.hash(newPassword, 10);
     await this.userRepo.update(userId, { password_hash: newHash } as any);

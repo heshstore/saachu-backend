@@ -24,8 +24,13 @@ export class MessageAiService {
     private readonly logRepo: Repository<WhatsappMessageLog>,
   ) {}
 
-  async generateVariant(templateId: string, context: Record<string, string>): Promise<string> {
-    const template = await this.templateRepo.findOne({ where: { id: templateId } });
+  async generateVariant(
+    templateId: string,
+    context: Record<string, string>,
+  ): Promise<string> {
+    const template = await this.templateRepo.findOne({
+      where: { id: templateId },
+    });
     if (!template) return '';
 
     const greeting = GREETINGS[Math.floor(Math.random() * GREETINGS.length)];
@@ -37,7 +42,10 @@ export class MessageAiService {
       cta,
     };
 
-    return template.message_body.replace(/\{\{(\w+)\}\}/g, (_, key: string) => vars[key] ?? `{{${key}}}`);
+    return template.message_body.replace(
+      /\{\{(\w+)\}\}/g,
+      (_, key: string) => vars[key] ?? `{{${key}}}`,
+    );
   }
 
   // Pick a CTA not used in the last 3 messages to this phone
@@ -64,7 +72,9 @@ export class MessageAiService {
   }
 
   async selectBestTemplate(phone: string): Promise<string | null> {
-    const allActive = await this.templateRepo.find({ where: { is_active: true } });
+    const allActive = await this.templateRepo.find({
+      where: { is_active: true },
+    });
     if (!allActive.length) return null;
 
     // Exclude templates whose body prefix matches a send to this phone in the last 3 days
@@ -76,8 +86,12 @@ export class MessageAiService {
       .orderBy('l.sent_at', 'DESC')
       .getMany();
 
-    const usedPrefixes = new Set(recentLogs.map((l) => (l.message_body ?? '').slice(0, 50)));
-    const unused = allActive.filter((t) => !usedPrefixes.has(t.message_body.slice(0, 50)));
+    const usedPrefixes = new Set(
+      recentLogs.map((l) => (l.message_body ?? '').slice(0, 50)),
+    );
+    const unused = allActive.filter(
+      (t) => !usedPrefixes.has(t.message_body.slice(0, 50)),
+    );
 
     if (unused.length > 0) {
       return unused[Math.floor(Math.random() * unused.length)].id;

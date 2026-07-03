@@ -1,4 +1,8 @@
-import { normalizePhone, toSentenceCase, sentenceCaseWords } from './lead-normalizer';
+import {
+  normalizePhone,
+  toSentenceCase,
+  sentenceCaseWords,
+} from './lead-normalizer';
 import { LeadSource } from '../entities/lead.entity';
 import { LeadContext, contextToLabel } from '../enums/lead-context.enum';
 
@@ -6,17 +10,25 @@ export function normalizeIndiaMart(payload: any) {
   const rawPhone = payload.SENDER_MOBILE || payload.sender_mobile || '';
 
   return {
-    name:             sentenceCaseWords(payload.SENDER_NAME || payload.sender_name || 'Unknown Lead'),
-    phone:            normalizePhone(rawPhone),
-    email:            payload.SENDER_EMAIL || payload.sender_email || undefined,
-    source:           LeadSource.INDIAMART,
-    product_interest: payload.product || payload.product_title || payload.QUERY_PRODUCT_NAME || payload.SUBJECT || undefined,
-    notes:            toSentenceCase(payload.QUERY_MESSAGE || '') || undefined,
-    context:          contextToLabel(LeadContext.INDIAMART_QUERY),
+    name: sentenceCaseWords(
+      payload.SENDER_NAME || payload.sender_name || 'Unknown Lead',
+    ),
+    phone: normalizePhone(rawPhone),
+    email: payload.SENDER_EMAIL || payload.sender_email || undefined,
+    source: LeadSource.INDIAMART,
+    product_interest:
+      payload.product ||
+      payload.product_title ||
+      payload.QUERY_PRODUCT_NAME ||
+      payload.SUBJECT ||
+      undefined,
+    notes: toSentenceCase(payload.QUERY_MESSAGE || '') || undefined,
+    context: contextToLabel(LeadContext.INDIAMART_QUERY),
     lead_source_label: 'indiamart_query',
-    channel:          'FORM',
-    utm_source:       'indiamart',
-    external_id:      payload.UNIQUE_QUERY_ID || payload.unique_query_id || undefined,
-    raw_payload:      payload,
+    channel: 'FORM',
+    utm_source: 'indiamart',
+    external_id:
+      payload.UNIQUE_QUERY_ID || payload.unique_query_id || undefined,
+    raw_payload: payload,
   };
 }

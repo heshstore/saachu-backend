@@ -8,9 +8,9 @@ import { LogsController } from './logs.controller';
 
 @Global()
 @Module({
-  imports:     [TypeOrmModule.forFeature([Log, AuditLog])],
+  imports: [TypeOrmModule.forFeature([Log, AuditLog])],
   controllers: [LogsController],
-  providers:   [LogsService, AuditService],
-  exports:     [LogsService, AuditService],
+  providers: [LogsService, AuditService],
+  exports: [LogsService, AuditService],
 })
 export class LogsModule {}

@@ -1,10 +1,19 @@
-import { normalizePhone, toSentenceCase, sentenceCaseWords } from './lead-normalizer';
+import {
+  normalizePhone,
+  toSentenceCase,
+  sentenceCaseWords,
+} from './lead-normalizer';
 import { LeadSource } from '../entities/lead.entity';
 import { LeadContext, contextToLabel } from '../enums/lead-context.enum';
 
 // Google Ads standard column IDs — everything else is a custom question answer.
 const STANDARD_COLUMNS = new Set([
-  'FULL_NAME', 'PHONE_NUMBER', 'EMAIL', 'POSTAL_CODE', 'CITY', 'COUNTRY',
+  'FULL_NAME',
+  'PHONE_NUMBER',
+  'EMAIL',
+  'POSTAL_CODE',
+  'CITY',
+  'COUNTRY',
 ]);
 
 /**
@@ -48,37 +57,39 @@ export function normalizeGoogleLead(payload: any) {
 
   // Custom question answers → product_interest and notes
   const customAnswers = cols
-    .filter((c) => !STANDARD_COLUMNS.has(c.column_name) && c.string_value?.trim())
+    .filter(
+      (c) => !STANDARD_COLUMNS.has(c.column_name) && c.string_value?.trim(),
+    )
     .map((c) => `${c.column_name.replace(/_/g, ' ')}: ${c.string_value.trim()}`)
     .join('\n');
 
   return {
-    name:             sentenceCaseWords(get('FULL_NAME')) || 'Unknown Lead',
+    name: sentenceCaseWords(get('FULL_NAME')) || 'Unknown Lead',
     phone,
-    email:            get('EMAIL') || undefined,
-    city:             sentenceCaseWords(get('CITY', 'POSTAL_CODE')) || undefined,
-    source:           LeadSource.GOOGLE,
+    email: get('EMAIL') || undefined,
+    city: sentenceCaseWords(get('CITY', 'POSTAL_CODE')) || undefined,
+    source: LeadSource.GOOGLE,
     product_interest: customAnswers || undefined,
-    notes:            customAnswers ? toSentenceCase(customAnswers) : undefined,
-    context:          contextToLabel(LeadContext.GOOGLE_ADS),
+    notes: customAnswers ? toSentenceCase(customAnswers) : undefined,
+    context: contextToLabel(LeadContext.GOOGLE_ADS),
     lead_source_label: 'google_ads_lead_form',
-    channel:          'FORM',
-    utm_source:       'google',
-    utm_medium:       'cpc',
-    utm_campaign:     payload.campaign_name || undefined,
-    external_id:      payload.lead_id ? String(payload.lead_id) : undefined,
+    channel: 'FORM',
+    utm_source: 'google',
+    utm_medium: 'cpc',
+    utm_campaign: payload.campaign_name || undefined,
+    external_id: payload.lead_id ? String(payload.lead_id) : undefined,
     raw_payload: {
-      lead_id:              payload.lead_id,
-      form_id:              payload.form_id,
-      campaign_id:          payload.campaign_id,
-      campaign_name:        payload.campaign_name,
-      adgroup_id:           payload.adgroup_id,
-      adgroup_name:         payload.adgroup_name,
-      creative_id:          payload.creative_id,
-      gcl_id:               payload.gcl_id,
-      is_test:              payload.is_test,
+      lead_id: payload.lead_id,
+      form_id: payload.form_id,
+      campaign_id: payload.campaign_id,
+      campaign_name: payload.campaign_name,
+      adgroup_id: payload.adgroup_id,
+      adgroup_name: payload.adgroup_name,
+      creative_id: payload.creative_id,
+      gcl_id: payload.gcl_id,
+      is_test: payload.is_test,
       submission_timestamp: payload.submission_timestamp,
-      user_column_data:     cols,
+      user_column_data: cols,
     },
   };
 }

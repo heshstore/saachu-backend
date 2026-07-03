@@ -1,5 +1,9 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, Index,
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  Index,
 } from 'typeorm';
 
 export type FinancePaymentType = 'CUSTOMER_RECEIPT' | 'VENDOR_PAYMENT';
@@ -42,9 +46,39 @@ export class PaymentEntry {
   createdBy: number | null;
 
   /** When this row mirrors a row in `payments` (order receipt). */
-  @Column({ name: 'linked_payment_id', type: 'int', nullable: true, unique: true })
+  @Column({
+    name: 'linked_payment_id',
+    type: 'int',
+    nullable: true,
+    unique: true,
+  })
   linkedPaymentId: number | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
+
+  // Internal split allocation — never visible in customer-facing ledger
+  @Column({
+    name: 'production_amount',
+    type: 'decimal',
+    precision: 14,
+    scale: 2,
+    nullable: true,
+  })
+  productionAmount: string | null;
+
+  @Column({ name: 'production_bank', nullable: true })
+  productionBank: string | null;
+
+  @Column({
+    name: 'trading_amount',
+    type: 'decimal',
+    precision: 14,
+    scale: 2,
+    nullable: true,
+  })
+  tradingAmount: string | null;
+
+  @Column({ name: 'trading_bank', nullable: true })
+  tradingBank: string | null;
 }

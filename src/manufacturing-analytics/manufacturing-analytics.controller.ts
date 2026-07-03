@@ -1,5 +1,12 @@
 import {
-  Controller, Get, Post, Put, Param, Query, Body, ParseIntPipe,
+  Controller,
+  Get,
+  Post,
+  Put,
+  Param,
+  Query,
+  Body,
+  ParseIntPipe,
 } from '@nestjs/common';
 import { RequirePermission } from '../auth/require-permission.decorator';
 import { ManufacturingAnalyticsService } from './manufacturing-analytics.service';
@@ -89,7 +96,13 @@ export class ManufacturingAnalyticsController {
   @RequirePermission('production.update')
   putDeptCost(
     @Param('departmentId', ParseIntPipe) departmentId: number,
-    @Body() body: { costPerHour?: number; manpowerRate?: number; overheadRate?: number; active?: boolean },
+    @Body()
+    body: {
+      costPerHour?: number;
+      manpowerRate?: number;
+      overheadRate?: number;
+      active?: boolean;
+    },
   ) {
     return this.analytics.upsertDepartmentCost(departmentId, body);
   }

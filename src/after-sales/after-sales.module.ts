@@ -10,7 +10,12 @@ import { InventoryModule } from '../inventory/inventory.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([ServiceTicket, ServiceTicketUpdate, AmcContract, TechnicianProfile]),
+    TypeOrmModule.forFeature([
+      ServiceTicket,
+      ServiceTicketUpdate,
+      AmcContract,
+      TechnicianProfile,
+    ]),
     InventoryModule,
   ],
   controllers: [AfterSalesController],

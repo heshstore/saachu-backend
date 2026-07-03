@@ -25,16 +25,21 @@ export class ManufacturingAnalyticsService {
 
   async upsertDepartmentCost(
     departmentId: number,
-    body: { costPerHour?: number; manpowerRate?: number; overheadRate?: number; active?: boolean },
+    body: {
+      costPerHour?: number;
+      manpowerRate?: number;
+      overheadRate?: number;
+      active?: boolean;
+    },
   ): Promise<DepartmentCostMaster> {
     let row = await this.deptCostRepo.findOne({ where: { departmentId } });
     if (!row) {
       row = this.deptCostRepo.create({
         departmentId,
-        costPerHour:     body.costPerHour ?? 0,
-        manpowerRate:    body.manpowerRate ?? 0,
-        overheadRate:    body.overheadRate ?? 0,
-        active:          body.active ?? true,
+        costPerHour: body.costPerHour ?? 0,
+        manpowerRate: body.manpowerRate ?? 0,
+        overheadRate: body.overheadRate ?? 0,
+        active: body.active ?? true,
       });
     } else {
       if (body.costPerHour !== undefined) row.costPerHour = body.costPerHour;
@@ -93,7 +98,8 @@ export class ManufacturingAnalyticsService {
           WHERE pr.status IN ('PENDING','APPROVED')
             AND COALESCE(pr.shortage_qty, 0) > 0
         `),
-        this.dataSource.query(`
+        this.dataSource.query(
+          `
           WITH bal AS (
             SELECT t.item_id,
               SUM(CASE WHEN t.direction = 'IN' THEN t.qty WHEN t.direction = 'OUT' THEN -t.qty ELSE 0 END)::float AS q
@@ -104,7 +110,9 @@ export class ManufacturingAnalyticsService {
           SELECT COALESCE(SUM(bal.q * COALESCE(si.cost_price, 0)), 0)::float AS v
           FROM bal
           JOIN service_items si ON si.id = bal.item_id
-        `, [EPS]),
+        `,
+          [EPS],
+        ),
         this.dataSource.query(`
           SELECT COUNT(*)::int AS c FROM production_execution_jobs
           WHERE status IN ('PENDING','READY','IN_PROGRESS','HOLD')
@@ -146,20 +154,23 @@ export class ManufacturingAnalyticsService {
       `);
       const pm = Number(plannedMinutes[0]?.v) || 1;
       const wm = Number(workedMinutes[0]?.v) || 0;
-      const productionEfficiencyPct = pm > EPS ? Math.min(100, (wm / pm) * 100) : 0;
+      const productionEfficiencyPct =
+        pm > EPS ? Math.min(100, (wm / pm) * 100) : 0;
 
       return {
-        wip_order_value:           wipVal,
-        delayed_execution_hints:   Number(delayed[0]?.c) || 0,
-        pending_dispatch_value:    Number(pendingDispatch[0]?.v) || 0,
-        procurement_exposure:      Number(procurementExp[0]?.v) || 0,
-        fg_stock_value:            fgStockValue,
-        active_execution_jobs:     Number(execActive[0]?.c) || 0,
-        loss_making_orders:        Number(lossOrders[0]?.c) || 0,
+        wip_order_value: wipVal,
+        delayed_execution_hints: Number(delayed[0]?.c) || 0,
+        pending_dispatch_value: Number(pendingDispatch[0]?.v) || 0,
+        procurement_exposure: Number(procurementExp[0]?.v) || 0,
+        fg_stock_value: fgStockValue,
+        active_execution_jobs: Number(execActive[0]?.c) || 0,
+        loss_making_orders: Number(lossOrders[0]?.c) || 0,
         production_efficiency_pct: productionEfficiencyPct,
       };
     } catch (e: any) {
-      this.logger.warn(`[ManufacturingAnalytics] getIntelSummary: ${e?.message}`);
+      this.logger.warn(
+        `[ManufacturingAnalytics] getIntelSummary: ${e?.message}`,
+      );
       return {
         wip_order_value: 0,
         delayed_execution_hints: 0,
@@ -173,8 +184,13 @@ export class ManufacturingAnalyticsService {
     }
   }
 
-  async getOverview(fromIso?: string, toIso?: string): Promise<Record<string, unknown>> {
-    const from = fromIso ? new Date(fromIso) : new Date(Date.now() - 30 * 86400_000);
+  async getOverview(
+    fromIso?: string,
+    toIso?: string,
+  ): Promise<Record<string, unknown>> {
+    const from = fromIso
+      ? new Date(fromIso)
+      : new Date(Date.now() - 30 * 86400_000);
     const to = toIso ? new Date(toIso) : new Date();
 
     const snapAgg: any[] = await this.dataSource.query(
@@ -388,7 +404,9 @@ export class ManufacturingAnalyticsService {
     );
   }
 
-  async listSnapshotsForOrder(orderId: number): Promise<ProductionCostSnapshot[]> {
+  async listSnapshotsForOrder(
+    orderId: number,
+  ): Promise<ProductionCostSnapshot[]> {
     return this.snapRepo.find({
       where: { orderId },
       order: { createdAt: 'DESC' },
@@ -396,7 +414,9 @@ export class ManufacturingAnalyticsService {
   }
 
   async getSnapshotByJob(jobId: number): Promise<ProductionCostSnapshot> {
-    const s = await this.snapRepo.findOne({ where: { productionJobId: jobId } });
+    const s = await this.snapRepo.findOne({
+      where: { productionJobId: jobId },
+    });
     if (!s) throw new NotFoundException(`No cost snapshot for job ${jobId}`);
     return s;
   }

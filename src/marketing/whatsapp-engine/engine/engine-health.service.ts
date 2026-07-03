@@ -104,7 +104,9 @@ export class EngineHealthService {
         .where('l.status = :s', { s: QueueStatus.FAILED })
         .andWhere('l.sent_at >= :h', { h: oneHourAgo })
         .getCount(),
-      this.numberRepo.count({ where: { is_active: true, status: WhatsAppNumberStatus.ACTIVE } }),
+      this.numberRepo.count({
+        where: { is_active: true, status: WhatsAppNumberStatus.ACTIVE },
+      }),
       this.numberRepo.count({ where: { is_active: false } }),
       this.riskAi.getRiskyNumbers(),
       this.engineSettings.getAutoAiMode(),
@@ -122,15 +124,21 @@ export class EngineHealthService {
     const ai_generated_today = parseInt(aiGenRows[0]?.count ?? '0', 10);
 
     // Recent disconnect events from audit log (empty if none have been emitted yet)
-    type DisconnectRow = { number_id: string; phone: string | null; created_at: string };
-    const disconnectRows: DisconnectRow[] = await this.ds.query(
-      `SELECT e.number_id, n.phone, e.created_at
+    type DisconnectRow = {
+      number_id: string;
+      phone: string | null;
+      created_at: string;
+    };
+    const disconnectRows: DisconnectRow[] = await this.ds
+      .query(
+        `SELECT e.number_id, n.phone, e.created_at
        FROM engine_audit_logs e
        LEFT JOIN whatsapp_numbers n ON n.id::text = e.number_id
        WHERE e.event = 'NUMBER_DISCONNECTED'
        ORDER BY e.created_at DESC
        LIMIT 5`,
-    ).catch(() => []);
+      )
+      .catch(() => []);
 
     const recent_disconnects: RecentDisconnect[] = disconnectRows.map((r) => ({
       number_id: r.number_id,
@@ -150,7 +158,7 @@ export class EngineHealthService {
     }));
 
     const engine_enabled = process.env.WHATSAPP_ENGINE_ENABLED !== 'false';
-    const wa_connected   = this.whatsAppService.isAnyConnected();
+    const wa_connected = this.whatsAppService.isAnyConnected();
     const send_window_active = this.timingAi.isWithinSendWindow();
 
     const standby_reason = this._computeStandbyReason({
@@ -163,10 +171,11 @@ export class EngineHealthService {
 
     return {
       engine_enabled,
-      dry_run_mode:       process.env.WHATSAPP_ENGINE_DRY_RUN === 'true',
-      pilot_mode:         process.env.WHATSAPP_ENGINE_PILOT_MODE === 'true',
-      test_only_mode:     process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true',
-      max_daily_audience: process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE ?? 'unlimited',
+      dry_run_mode: process.env.WHATSAPP_ENGINE_DRY_RUN === 'true',
+      pilot_mode: process.env.WHATSAPP_ENGINE_PILOT_MODE === 'true',
+      test_only_mode: process.env.WHATSAPP_ENGINE_TEST_ONLY === 'true',
+      max_daily_audience:
+        process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE ?? 'unlimited',
       wa_connected,
       wa_state_breakdown: this.whatsAppService.getStateBreakdown(),
       send_window_active,
@@ -199,10 +208,11 @@ export class EngineHealthService {
     queue_pending: number;
     queue_deferred: number;
   }): string | null {
-    if (!flags.engine_enabled)    return 'Engine disabled';
-    if (!flags.wa_connected)      return 'No connected WhatsApp numbers';
+    if (!flags.engine_enabled) return 'Engine disabled';
+    if (!flags.wa_connected) return 'No connected WhatsApp numbers';
     if (!flags.send_window_active) return 'Outside sending window';
-    if (flags.queue_pending === 0 && flags.queue_deferred === 0) return 'Queue empty';
+    if (flags.queue_pending === 0 && flags.queue_deferred === 0)
+      return 'Queue empty';
     return null;
   }
 }

@@ -7,28 +7,28 @@ const HANDLE_PATTERN = /^[a-z0-9][a-z0-9-]*[a-z0-9]$/i;
 
 export interface PromotionUrlAuditResult {
   /** Total active (non-ignored) catalog products. */
-  totalProducts:        number;
+  totalProducts: number;
   /** Products with a valid Shopify handle → correct /products/{handle} URL. */
-  productsWithHandle:   number;
+  productsWithHandle: number;
   /** Products where handle is null/empty. */
-  missingHandles:       number;
+  missingHandles: number;
   /** Handle values shared by more than one product. */
-  duplicateHandles:     number;
+  duplicateHandles: number;
   /** Products with no valid handle but a SKU → search fallback URL. */
-  searchFallbackCount:  number;
+  searchFallbackCount: number;
   /** Products with neither handle nor SKU → cannot be linked safely. */
-  rejectedCount:        number;
+  rejectedCount: number;
   /** (productsWithHandle / totalProducts) × 100, rounded. */
-  coveragePct:          number;
+  coveragePct: number;
   /** (rejectedCount / totalProducts) × 100 — products that must be skipped. */
-  brokenPct:            number;
+  brokenPct: number;
   /** (missingHandles / totalProducts) × 100 — will degrade to search fallback. */
-  missingPct:           number;
+  missingPct: number;
   examples: {
-    missingHandles:   { sku: string | null; itemName: string | null }[];
+    missingHandles: { sku: string | null; itemName: string | null }[];
     duplicateHandles: { handle: string; count: number; skus: string[] }[];
-    rejected:         { sku: string | null; itemName: string | null }[];
-    searchFallback:   { sku: string | null; handle: string | null }[];
+    rejected: { sku: string | null; itemName: string | null }[];
+    searchFallback: { sku: string | null; handle: string | null }[];
   };
 }
 
@@ -62,13 +62,13 @@ export class PromotionUrlAuditService {
     }
 
     // ── Classify every product ────────────────────────────────────────────────
-    const withHandle:    ShopifyCatalogItem[] = [];
+    const withHandle: ShopifyCatalogItem[] = [];
     const missingHandle: ShopifyCatalogItem[] = [];
     const searchFallback: ShopifyCatalogItem[] = [];
-    const rejected:      ShopifyCatalogItem[] = [];
+    const rejected: ShopifyCatalogItem[] = [];
 
     for (const p of products) {
-      const h   = p.handle?.trim() ?? '';
+      const h = p.handle?.trim() ?? '';
       const sku = p.sku?.trim() ?? '';
 
       if (h && HANDLE_PATTERN.test(h)) {
@@ -86,38 +86,42 @@ export class PromotionUrlAuditService {
       .filter(([, v]) => v.count > 1)
       .map(([handle, v]) => ({ handle, count: v.count, skus: v.skus }));
 
-    const coveragePct = total ? Math.round((withHandle.length   / total) * 100) : 0;
-    const brokenPct   = total ? Math.round((rejected.length     / total) * 100) : 0;
-    const missingPct  = total ? Math.round((missingHandle.length / total) * 100) : 0;
+    const coveragePct = total
+      ? Math.round((withHandle.length / total) * 100)
+      : 0;
+    const brokenPct = total ? Math.round((rejected.length / total) * 100) : 0;
+    const missingPct = total
+      ? Math.round((missingHandle.length / total) * 100)
+      : 0;
 
     this.logger.log(
       `[PRODUCT_URL_AUDIT] total=${total} handle=${withHandle.length} (${coveragePct}%) ` +
-      `search=${searchFallback.length} rejected=${rejected.length} (${brokenPct}%) ` +
-      `missing_handle=${missingHandle.length} (${missingPct}%) dups=${dupHandles.length}`,
+        `search=${searchFallback.length} rejected=${rejected.length} (${brokenPct}%) ` +
+        `missing_handle=${missingHandle.length} (${missingPct}%) dups=${dupHandles.length}`,
     );
 
     return {
-      totalProducts:       total,
-      productsWithHandle:  withHandle.length,
-      missingHandles:      missingHandle.length,
-      duplicateHandles:    dupHandles.length,
+      totalProducts: total,
+      productsWithHandle: withHandle.length,
+      missingHandles: missingHandle.length,
+      duplicateHandles: dupHandles.length,
       searchFallbackCount: searchFallback.length,
-      rejectedCount:       rejected.length,
+      rejectedCount: rejected.length,
       coveragePct,
       brokenPct,
       missingPct,
       examples: {
-        missingHandles: missingHandle.slice(0, 10).map(p => ({
-          sku:      p.sku      ?? null,
+        missingHandles: missingHandle.slice(0, 10).map((p) => ({
+          sku: p.sku ?? null,
           itemName: p.itemName ?? null,
         })),
         duplicateHandles: dupHandles.slice(0, 10),
-        rejected: rejected.slice(0, 10).map(p => ({
-          sku:      p.sku      ?? null,
+        rejected: rejected.slice(0, 10).map((p) => ({
+          sku: p.sku ?? null,
           itemName: p.itemName ?? null,
         })),
-        searchFallback: searchFallback.slice(0, 10).map(p => ({
-          sku:    p.sku    ?? null,
+        searchFallback: searchFallback.slice(0, 10).map((p) => ({
+          sku: p.sku ?? null,
           handle: p.handle ?? null,
         })),
       },

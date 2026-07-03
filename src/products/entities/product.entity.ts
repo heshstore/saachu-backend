@@ -25,5 +25,4 @@ export class Product {
 
   @Column({ default: 0 })
   inventory: number;
-
 }

@@ -6,6 +6,16 @@ import { Repository } from 'typeorm';
 import { appConfig } from '../config/config';
 import { User } from '../users/entities/user.entity';
 
+const JWT_CACHE_TTL = 30_000;
+const _jwtCache = new Map<
+  number,
+  { user: ReturnType<JwtStrategy['buildPayload']>; ts: number }
+>();
+
+export function clearJwtCacheForUser(userId: number): void {
+  _jwtCache.delete(userId);
+}
+
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
@@ -22,21 +32,32 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: any) {
-    // Re-read from DB on every request so role changes and deactivations take effect immediately
-    const user = await this.userRepo.findOne({ where: { id: payload.sub } });
-
-    if (!user || !user.is_active) {
-      throw new UnauthorizedException('Account not found or inactive');
-    }
-
+  buildPayload(user: User) {
     return {
       id: user.id,
       name: user.name,
       email: user.email,
       mobile: user.mobile,
-      role: user.role,                           // always fresh from DB, never stale
+      role: user.role,
       can_approve_order: user.can_approve_order,
     };
+  }
+
+  async validate(payload: any) {
+    const cached = _jwtCache.get(payload.sub);
+    if (cached && Date.now() - cached.ts < JWT_CACHE_TTL) {
+      return cached.user;
+    }
+
+    const user = await this.userRepo.findOne({ where: { id: payload.sub } });
+
+    if (!user || !user.is_active) {
+      _jwtCache.delete(payload.sub);
+      throw new UnauthorizedException('Account not found or inactive');
+    }
+
+    const result = this.buildPayload(user);
+    _jwtCache.set(payload.sub, { user: result, ts: Date.now() });
+    return result;
   }
 }

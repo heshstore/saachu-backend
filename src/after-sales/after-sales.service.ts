@@ -1,9 +1,15 @@
 import {
-  Injectable, BadRequestException, NotFoundException, Logger,
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+  Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, In } from 'typeorm';
-import { ServiceTicket, ServiceTicketStatus } from './entities/service-ticket.entity';
+import {
+  ServiceTicket,
+  ServiceTicketStatus,
+} from './entities/service-ticket.entity';
 import { ServiceTicketUpdate } from './entities/service-ticket-update.entity';
 import { AmcContract } from './entities/amc-contract.entity';
 import { TechnicianProfile } from './entities/technician-profile.entity';
@@ -14,13 +20,13 @@ const EPS = 1e-6;
 const DEFAULT_WARRANTY_MONTHS = 12;
 
 const STATUS_FLOW: Record<ServiceTicketStatus, ServiceTicketStatus[]> = {
-  OPEN:           ['ASSIGNED', 'CANCELLED'],
-  ASSIGNED:       ['IN_PROGRESS', 'OPEN', 'CANCELLED'],
-  IN_PROGRESS:    ['WAITING_PARTS', 'RESOLVED', 'CANCELLED'],
-  WAITING_PARTS:  ['IN_PROGRESS', 'RESOLVED', 'CANCELLED'],
-  RESOLVED:       ['CLOSED', 'IN_PROGRESS'],
-  CLOSED:         [],
-  CANCELLED:      [],
+  OPEN: ['ASSIGNED', 'CANCELLED'],
+  ASSIGNED: ['IN_PROGRESS', 'OPEN', 'CANCELLED'],
+  IN_PROGRESS: ['WAITING_PARTS', 'RESOLVED', 'CANCELLED'],
+  WAITING_PARTS: ['IN_PROGRESS', 'RESOLVED', 'CANCELLED'],
+  RESOLVED: ['CLOSED', 'IN_PROGRESS'],
+  CLOSED: [],
+  CANCELLED: [],
 };
 
 @Injectable()
@@ -52,7 +58,10 @@ export class AfterSalesService {
 
   async assertTechnicianActive(userId: number): Promise<void> {
     const t = await this.techRepo.findOne({ where: { userId, active: true } });
-    if (!t) throw new BadRequestException(`User ${userId} is not an active technician`);
+    if (!t)
+      throw new BadRequestException(
+        `User ${userId} is not an active technician`,
+      );
   }
 
   /** Operational hint — not legal warranty certification */
@@ -96,7 +105,9 @@ export class AfterSalesService {
     );
     let amcCoversItem = false;
     for (const row of amcRows) {
-      const arr: number[] = Array.isArray(row.covered_items) ? row.covered_items : [];
+      const arr: number[] = Array.isArray(row.covered_items)
+        ? row.covered_items
+        : [];
       if (!arr.length) continue;
       if (arr.includes(params.itemId)) amcCoversItem = true;
     }
@@ -138,17 +149,20 @@ export class AfterSalesService {
     };
   }
 
-  async createTicket(body: {
-    customerId: number;
-    orderId?: number | null;
-    dispatchOrderId?: number | null;
-    itemId: number;
-    issueType?: string;
-    issueDescription?: string;
-    priority?: string;
-    serviceType: string;
-    assignedTo?: number | null;
-  }, userId?: number): Promise<ServiceTicket> {
+  async createTicket(
+    body: {
+      customerId: number;
+      orderId?: number | null;
+      dispatchOrderId?: number | null;
+      itemId: number;
+      issueType?: string;
+      issueDescription?: string;
+      priority?: string;
+      serviceType: string;
+      assignedTo?: number | null;
+    },
+    userId?: number,
+  ): Promise<ServiceTicket> {
     const hint = await this.computeWarrantyHint({
       customerId: body.customerId,
       orderId: body.orderId ?? null,
@@ -163,38 +177,42 @@ export class AfterSalesService {
     }
 
     const ticket = this.ticketRepo.create({
-      ticketNumber:      await this.nextTicketNumber(),
-      customerId:        body.customerId,
-      orderId:           body.orderId ?? null,
-      dispatchOrderId:   body.dispatchOrderId ?? null,
-      itemId:            body.itemId,
-      issueType:         body.issueType ?? null,
-      issueDescription:  body.issueDescription ?? null,
-      priority:          (body.priority as any) || 'MEDIUM',
+      ticketNumber: await this.nextTicketNumber(),
+      customerId: body.customerId,
+      orderId: body.orderId ?? null,
+      dispatchOrderId: body.dispatchOrderId ?? null,
+      itemId: body.itemId,
+      issueType: body.issueType ?? null,
+      issueDescription: body.issueDescription ?? null,
+      priority: (body.priority as any) || 'MEDIUM',
       status,
-      assignedTo:        body.assignedTo ?? null,
-      serviceType:       body.serviceType as any,
-      warrantyStatus:    hint.warrantyStatus,
-      createdBy:         userId ?? null,
+      assignedTo: body.assignedTo ?? null,
+      serviceType: body.serviceType as any,
+      warrantyStatus: hint.warrantyStatus,
+      createdBy: userId ?? null,
     });
     const saved = await this.ticketRepo.save(ticket);
 
-    await this.updateRepo.save(this.updateRepo.create({
-      serviceTicketId: saved.id,
-      technicianId:    body.assignedTo ?? null,
-      visitNotes:      `Ticket opened. ${hint.notes}`,
-      createdBy:       userId ?? null,
-    }));
+    await this.updateRepo.save(
+      this.updateRepo.create({
+        serviceTicketId: saved.id,
+        technicianId: body.assignedTo ?? null,
+        visitNotes: `Ticket opened. ${hint.notes}`,
+        createdBy: userId ?? null,
+      }),
+    );
 
     return this.getTicket(saved.id);
   }
 
-  async listTickets(filters: {
-    status?: string;
-    customerId?: number;
-    assignedTo?: number;
-    limit?: number;
-  } = {}): Promise<any[]> {
+  async listTickets(
+    filters: {
+      status?: string;
+      customerId?: number;
+      assignedTo?: number;
+      limit?: number;
+    } = {},
+  ): Promise<any[]> {
     const params: unknown[] = [];
     const cond: string[] = ['1=1'];
     if (filters.status) {
@@ -271,18 +289,23 @@ export class AfterSalesService {
     if (!t) throw new NotFoundException(`Ticket ${id} not found`);
 
     if (body.assignedTo !== undefined) {
-      if (body.assignedTo != null) await this.assertTechnicianActive(body.assignedTo);
+      if (body.assignedTo != null)
+        await this.assertTechnicianActive(body.assignedTo);
       t.assignedTo = body.assignedTo;
       if (body.assignedTo != null && t.status === 'OPEN') t.status = 'ASSIGNED';
     }
     if (body.priority) t.priority = body.priority as any;
-    if (body.issueDescription !== undefined) t.issueDescription = body.issueDescription;
-    if (body.resolutionNotes !== undefined) t.resolutionNotes = body.resolutionNotes;
+    if (body.issueDescription !== undefined)
+      t.issueDescription = body.issueDescription;
+    if (body.resolutionNotes !== undefined)
+      t.resolutionNotes = body.resolutionNotes;
 
     if (body.status && body.status !== t.status) {
       const allowed = STATUS_FLOW[t.status] || [];
       if (!allowed.includes(body.status)) {
-        throw new BadRequestException(`Cannot move from ${t.status} to ${body.status}`);
+        throw new BadRequestException(
+          `Cannot move from ${t.status} to ${body.status}`,
+        );
       }
       t.status = body.status;
       if (body.status === 'RESOLVED' && !t.resolvedAt) {
@@ -306,7 +329,10 @@ export class AfterSalesService {
     if (body.status === 'CLOSED') {
       let userName: string | null = null;
       if (userId) {
-        const [u] = await this.dataSource.query(`SELECT name FROM "user" WHERE id = $1`, [userId]);
+        const [u] = await this.dataSource.query(
+          `SELECT name FROM "user" WHERE id = $1`,
+          [userId],
+        );
         userName = u?.name ?? null;
       }
       this.eventEmitter.emit('service.ticket.closed', {
@@ -331,23 +357,30 @@ export class AfterSalesService {
     userId?: number,
   ): Promise<ServiceTicketUpdate> {
     await this.getTicket(ticketId);
-    if (body.technicianId != null) await this.assertTechnicianActive(body.technicianId);
+    if (body.technicianId != null)
+      await this.assertTechnicianActive(body.technicianId);
 
     const u = this.updateRepo.create({
       serviceTicketId: ticketId,
-      technicianId:    body.technicianId ?? userId ?? null,
-      visitNotes:      body.visitNotes ?? null,
-      issueFindings:   body.issueFindings ?? null,
+      technicianId: body.technicianId ?? userId ?? null,
+      visitNotes: body.visitNotes ?? null,
+      issueFindings: body.issueFindings ?? null,
       resolutionNotes: body.resolutionNotes ?? null,
-      nextAction:      body.nextAction ?? null,
-      createdBy:       userId ?? null,
+      nextAction: body.nextAction ?? null,
+      createdBy: userId ?? null,
     });
     return this.updateRepo.save(u);
   }
 
   async consumeSpare(
     ticketId: number,
-    body: { itemId: number; warehouseId: number; qty: number; rate?: number | null; notes?: string },
+    body: {
+      itemId: number;
+      warehouseId: number;
+      qty: number;
+      rate?: number | null;
+      notes?: string;
+    },
     userId?: number,
   ): Promise<{ transaction: unknown; ticket: ServiceTicket }> {
     await this.getTicket(ticketId);
@@ -361,21 +394,26 @@ export class AfterSalesService {
     );
     const bal = Number(balRows[0]?.q) || 0;
     if (bal + EPS < qty) {
-      throw new BadRequestException(`Insufficient stock: have ${bal}, need ${qty}`);
+      throw new BadRequestException(
+        `Insufficient stock: have ${bal}, need ${qty}`,
+      );
     }
 
-    const tx = await this.inventoryService.createTransaction({
-      itemId: body.itemId,
-      warehouseId: body.warehouseId,
-      transactionType: 'SERVICE_SPARE_USE',
-      direction: 'OUT',
-      qty,
-      unit: 'PCS',
-      rate: body.rate ?? null,
-      referenceType: 'SERVICE_TICKET',
-      referenceId: ticketId,
-      notes: body.notes ?? `Service ticket ${ticketId}`,
-    }, userId);
+    const tx = await this.inventoryService.createTransaction(
+      {
+        itemId: body.itemId,
+        warehouseId: body.warehouseId,
+        transactionType: 'SERVICE_SPARE_USE',
+        direction: 'OUT',
+        qty,
+        unit: 'PCS',
+        rate: body.rate ?? null,
+        referenceType: 'SERVICE_TICKET',
+        referenceId: ticketId,
+        notes: body.notes ?? `Service ticket ${ticketId}`,
+      },
+      userId,
+    );
 
     const t = await this.ticketRepo.findOne({ where: { id: ticketId } });
     if (t && t.status === 'OPEN') {
@@ -407,21 +445,28 @@ export class AfterSalesService {
     notes?: string;
   }): Promise<AmcContract> {
     const row = this.amcRepo.create({
-      customerId:     body.customerId,
-      orderId:        body.orderId ?? null,
-      startDate:      body.startDate,
-      endDate:        body.endDate,
+      customerId: body.customerId,
+      orderId: body.orderId ?? null,
+      startDate: body.startDate,
+      endDate: body.endDate,
       visitFrequency: body.visitFrequency ?? null,
-      coveredItems:   body.coveredItems ?? [],
-      status:         'ACTIVE',
-      notes:          body.notes ?? null,
+      coveredItems: body.coveredItems ?? [],
+      status: 'ACTIVE',
+      notes: body.notes ?? null,
     });
     return this.amcRepo.save(row);
   }
 
-  async patchAmc(id: number, body: Partial<{
-    status: string; notes: string; visitFrequency: string; coveredItems: number[]; endDate: string;
-  }>): Promise<AmcContract> {
+  async patchAmc(
+    id: number,
+    body: Partial<{
+      status: string;
+      notes: string;
+      visitFrequency: string;
+      coveredItems: number[];
+      endDate: string;
+    }>,
+  ): Promise<AmcContract> {
     const a = await this.amcRepo.findOne({ where: { id } });
     if (!a) throw new NotFoundException(`AMC ${id} not found`);
     Object.assign(a, body);
@@ -457,7 +502,8 @@ export class AfterSalesService {
       });
     } else {
       if (body.department !== undefined) row.department = body.department;
-      if (body.specialization !== undefined) row.specialization = body.specialization;
+      if (body.specialization !== undefined)
+        row.specialization = body.specialization;
       if (body.active !== undefined) row.active = body.active;
       if (body.remarks !== undefined) row.remarks = body.remarks;
     }
@@ -466,7 +512,10 @@ export class AfterSalesService {
 
   async deactivateTechnician(userId: number): Promise<TechnicianProfile> {
     const row = await this.techRepo.findOne({ where: { userId } });
-    if (!row) throw new NotFoundException(`Technician profile for user ${userId} not found`);
+    if (!row)
+      throw new NotFoundException(
+        `Technician profile for user ${userId} not found`,
+      );
     row.active = false;
     return this.techRepo.save(row);
   }
@@ -474,15 +523,20 @@ export class AfterSalesService {
   // ── Dashboard ───────────────────────────────────────────────────────────────
 
   async getDashboard(): Promise<Record<string, unknown>> {
-    const [open, waitingParts, overdue, workload, renewals, repeat] = await Promise.all([
-      this.ticketRepo.count({ where: { status: In(['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_PARTS']) } }),
-      this.ticketRepo.count({ where: { status: 'WAITING_PARTS' } }),
-      this.dataSource.query(`
+    const [open, waitingParts, overdue, workload, renewals, repeat] =
+      await Promise.all([
+        this.ticketRepo.count({
+          where: {
+            status: In(['OPEN', 'ASSIGNED', 'IN_PROGRESS', 'WAITING_PARTS']),
+          },
+        }),
+        this.ticketRepo.count({ where: { status: 'WAITING_PARTS' } }),
+        this.dataSource.query(`
         SELECT COUNT(*)::int AS c FROM service_tickets
         WHERE status IN ('OPEN','ASSIGNED','IN_PROGRESS','WAITING_PARTS')
           AND created_at < now() - interval '7 days'
       `),
-      this.dataSource.query(`
+        this.dataSource.query(`
         SELECT t.assigned_to AS "userId", u.name AS "userName", COUNT(*)::int AS cnt
         FROM service_tickets t
         LEFT JOIN "user" u ON u.id = t.assigned_to
@@ -491,14 +545,14 @@ export class AfterSalesService {
         ORDER BY cnt DESC
         LIMIT 12
       `),
-      this.dataSource.query(`
+        this.dataSource.query(`
         SELECT id, customer_id AS "customerId", end_date AS "endDate", visit_frequency AS "visitFrequency"
         FROM amc_contracts
         WHERE status = 'ACTIVE' AND end_date BETWEEN CURRENT_DATE AND CURRENT_DATE + interval '30 days'
         ORDER BY end_date ASC
         LIMIT 20
       `),
-      this.dataSource.query(`
+        this.dataSource.query(`
         SELECT customer_id AS "customerId", item_id AS "itemId", COUNT(*)::int AS cnt
         FROM service_tickets
         WHERE service_type = 'COMPLAINT'
@@ -507,7 +561,7 @@ export class AfterSalesService {
         ORDER BY cnt DESC
         LIMIT 15
       `),
-    ]);
+      ]);
 
     return {
       openTickets: open,
@@ -526,7 +580,9 @@ export class AfterSalesService {
     return this.inventoryService.findAllWarehouses(false);
   }
 
-  async getCustomerLifecycle(customerId: number): Promise<Record<string, unknown>> {
+  async getCustomerLifecycle(
+    customerId: number,
+  ): Promise<Record<string, unknown>> {
     const [orders, dispatches, tickets, amcs] = await Promise.all([
       this.dataSource.query(
         `SELECT id, order_no, status, total_amount, created_at
@@ -544,7 +600,7 @@ export class AfterSalesService {
       this.ticketRepo.find({
         where: { customerId },
         order: { createdAt: 'DESC' },
-        take:  50,
+        take: 50,
       }),
       this.amcRepo.find({ where: { customerId }, order: { endDate: 'ASC' } }),
     ]);

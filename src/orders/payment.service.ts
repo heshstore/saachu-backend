@@ -1,25 +1,29 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository }       from 'typeorm';
-import { EventEmitter2 }    from '@nestjs/event-emitter';
+import { Repository } from 'typeorm';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { Payment, PaymentMode } from './entities/payment.entity';
-import { Order }                from './entities/order.entity';
+import { Order } from './entities/order.entity';
 
 export interface AddPaymentDto {
-  amount:             number;
-  payment_mode:       PaymentMode;
+  amount: number;
+  payment_mode: PaymentMode;
   payment_reference?: string;
-  idempotency_key?:   string;
-  notes?:             string;
+  idempotency_key?: string;
+  notes?: string;
 }
 
 export interface PaymentSummary {
-  order_id:       number;
-  total_amount:   number;
-  paid_amount:    number;
+  order_id: number;
+  total_amount: number;
+  paid_amount: number;
   pending_amount: number;
-  is_fully_paid:  boolean;
-  payments:       Payment[];
+  is_fully_paid: boolean;
+  payments: Payment[];
 }
 
 const VALID_MODES: PaymentMode[] = ['cash', 'upi', 'bank'];
@@ -43,21 +47,32 @@ export class PaymentService {
    * concurrent calls cannot both pass the overpayment check and then
    * both commit — only one succeeds, the other sees the updated paid sum.
    */
-  async addPayment(orderId: number, dto: AddPaymentDto, userId?: number): Promise<PaymentSummary> {
+  async addPayment(
+    orderId: number,
+    dto: AddPaymentDto,
+    userId?: number,
+  ): Promise<PaymentSummary> {
     if (dto.amount <= 0)
       throw new BadRequestException('Payment amount must be greater than zero');
 
     if (!VALID_MODES.includes(dto.payment_mode))
-      throw new BadRequestException(`Invalid payment_mode. Allowed: ${VALID_MODES.join(', ')}`);
+      throw new BadRequestException(
+        `Invalid payment_mode. Allowed: ${VALID_MODES.join(', ')}`,
+      );
 
-    if (['upi', 'bank'].includes(dto.payment_mode) && !dto.payment_reference?.trim())
+    if (
+      ['upi', 'bank'].includes(dto.payment_mode) &&
+      !dto.payment_reference?.trim()
+    )
       throw new BadRequestException(
         `Payment reference (UTR/transaction ID) is required for ${dto.payment_mode.toUpperCase()} payments`,
       );
 
     // Idempotency: if the caller retries with the same key, return the existing result.
     if (dto.idempotency_key) {
-      const existing = await this.paymentRepo.findOne({ where: { idempotency_key: dto.idempotency_key } });
+      const existing = await this.paymentRepo.findOne({
+        where: { idempotency_key: dto.idempotency_key },
+      });
       if (existing) return this.getSummary(existing.order_id);
     }
 
@@ -66,7 +81,7 @@ export class PaymentService {
       // passing the overpayment check and both committing.
       const order = await tx.findOne(Order, {
         where: { id: orderId },
-        lock:  { mode: 'pessimistic_write' },
+        lock: { mode: 'pessimistic_write' },
       });
       if (!order) throw new NotFoundException('Order not found');
 
@@ -76,7 +91,7 @@ export class PaymentService {
         [orderId],
       );
       const currentPaid = Number(total);
-      const pending     = Math.max(0, Number(order.total_amount) - currentPaid);
+      const pending = Math.max(0, Number(order.total_amount) - currentPaid);
 
       if (pending === 0)
         throw new BadRequestException('Order is already fully paid');
@@ -98,21 +113,21 @@ export class PaymentService {
       }
 
       const payment = tx.create(Payment, {
-        order_id:          orderId,
-        amount:            dto.amount,
-        payment_mode:      dto.payment_mode,
+        order_id: orderId,
+        amount: dto.amount,
+        payment_mode: dto.payment_mode,
         payment_reference: dto.payment_reference ?? null,
-        idempotency_key:   dto.idempotency_key   ?? null,
-        notes:             dto.notes             ?? null,
-        created_by:        userId               ?? null,
+        idempotency_key: dto.idempotency_key ?? null,
+        notes: dto.notes ?? null,
+        created_by: userId ?? null,
       });
       await tx.save(payment);
 
       // Sync cached columns on the order row
-      const newPaid    = currentPaid + dto.amount;
+      const newPaid = currentPaid + dto.amount;
       const newPending = Math.max(0, Number(order.total_amount) - newPaid);
       await tx.update(Order, { id: orderId }, {
-        paid_amount:    newPaid,
+        paid_amount: newPaid,
         pending_amount: newPending,
       } as any);
     });
@@ -157,16 +172,16 @@ export class PaymentService {
       order: { created_at: 'ASC' },
     });
 
-    const paid    = payments.reduce((sum, p) => sum + Number(p.amount), 0);
-    const total   = Number(order.total_amount);
+    const paid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
+    const total = Number(order.total_amount);
     const pending = Math.max(0, total - paid);
 
     return {
-      order_id:       orderId,
-      total_amount:   total,
-      paid_amount:    paid,
+      order_id: orderId,
+      total_amount: total,
+      paid_amount: paid,
       pending_amount: pending,
-      is_fully_paid:  pending === 0,
+      is_fully_paid: pending === 0,
       payments,
     };
   }

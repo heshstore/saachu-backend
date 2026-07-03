@@ -10,10 +10,10 @@ export class SlaController {
   @Get()
   @RequirePermission('staff.view')
   listAll(
-    @Query('status')   status?: string,
-    @Query('module')   module?: string,
+    @Query('status') status?: string,
+    @Query('module') module?: string,
     @Query('priority') priority?: string,
-    @Query('page')     page?: string,
+    @Query('page') page?: string,
   ) {
     return this.slaEngine.listAll({
       status,

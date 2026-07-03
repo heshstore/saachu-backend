@@ -1,5 +1,14 @@
 import {
-  Controller, Post, Get, Body, Headers, Query, Res, HttpCode, Logger, Req,
+  Controller,
+  Post,
+  Get,
+  Body,
+  Headers,
+  Query,
+  Res,
+  HttpCode,
+  Logger,
+  Req,
 } from '@nestjs/common';
 import { Response, Request } from 'express';
 import * as crypto from 'crypto';
@@ -42,10 +51,18 @@ export class WebhookController {
   @Public()
   @Post('indiamart')
   @HttpCode(200)
-  async indiaMart(@Body() body: any, @Headers('x-indiamart-secret') secret: string) {
+  async indiaMart(
+    @Body() body: any,
+    @Headers('x-indiamart-secret') secret: string,
+  ) {
     // Fail closed: require the secret to be configured AND match
-    if (!appConfig.indiaMartSecretKey || secret !== appConfig.indiaMartSecretKey) {
-      this.logger.warn('IndiaMart webhook: missing or invalid secret — ignoring');
+    if (
+      !appConfig.indiaMartSecretKey ||
+      secret !== appConfig.indiaMartSecretKey
+    ) {
+      this.logger.warn(
+        'IndiaMart webhook: missing or invalid secret — ignoring',
+      );
       return { ok: true };
     }
 
@@ -55,7 +72,10 @@ export class WebhookController {
       try {
         const dto = normalizeIndiaMart(body);
         if (!dto.phone || dto.phone === 'unknown') return;
-        const created = await this.leadService.create(dto as any, { id: null, role: 'Admin' });
+        const created = await this.leadService.create(dto as any, {
+          id: null,
+          role: 'Admin',
+        });
         if (created.analyticsOnly) return;
       } catch (e) {
         this.logger.error('[IndiaMart] processing failed', e?.message);
@@ -76,7 +96,9 @@ export class WebhookController {
   ) {
     // Fail closed: require the verify token to be configured — rejects if env var is missing
     if (!appConfig.metaVerifyToken) {
-      this.logger.warn('Meta webhook: META_VERIFY_TOKEN not configured — rejecting verification');
+      this.logger.warn(
+        'Meta webhook: META_VERIFY_TOKEN not configured — rejecting verification',
+      );
       return res.status(403).send('Forbidden');
     }
     if (mode === 'subscribe' && token === appConfig.metaVerifyToken) {
@@ -100,7 +122,9 @@ export class WebhookController {
 
     // Fail closed: require App Secret to be configured; verify HMAC always
     if (!appConfig.metaAppSecret) {
-      this.logger.warn('Meta webhook: metaAppSecret not configured — rejecting all requests');
+      this.logger.warn(
+        'Meta webhook: metaAppSecret not configured — rejecting all requests',
+      );
       return { ok: true };
     }
 
@@ -134,13 +158,17 @@ export class WebhookController {
             // Idempotency — skip if already imported
             const existing = await this.leadService.findByExternalId(leadgenId);
             if (existing) {
-              this.logger.log(`Meta: leadgen_id=${leadgenId} already exists (id=${existing.id}) — skipping`);
+              this.logger.log(
+                `Meta: leadgen_id=${leadgenId} already exists (id=${existing.id}) — skipping`,
+              );
               continue;
             }
 
             // Fetch full lead data from Meta Graph API
             if (!appConfig.metaAccessToken) {
-              this.logger.warn(`Meta: META_ACCESS_TOKEN not configured — cannot fetch lead data for ${leadgenId}`);
+              this.logger.warn(
+                `Meta: META_ACCESS_TOKEN not configured — cannot fetch lead data for ${leadgenId}`,
+              );
             }
             let graphData: MetaLeadResponse = {};
             try {
@@ -149,35 +177,54 @@ export class WebhookController {
                 {
                   params: {
                     access_token: appConfig.metaAccessToken,
-                    fields: 'field_data,ad_id,adset_id,campaign_id,ad_name,adset_name,campaign_name',
+                    fields:
+                      'field_data,ad_id,adset_id,campaign_id,ad_name,adset_name,campaign_name',
                   },
                 },
               );
               graphData = resp.data;
-              this.logger.log(`Meta: Graph API returned ${graphData.field_data?.length ?? 0} fields for ${leadgenId}`);
+              this.logger.log(
+                `Meta: Graph API returned ${graphData.field_data?.length ?? 0} fields for ${leadgenId}`,
+              );
             } catch (err: any) {
-              this.logger.error(`Meta: Graph API error for ${leadgenId}: ${err?.message}`);
+              this.logger.error(
+                `Meta: Graph API error for ${leadgenId}: ${err?.message}`,
+              );
             }
 
             const dto = normalizeMetaLead(graphData, leadgenId);
-            this.logger.log(`Meta: normalized — name="${dto.name}" phone="${dto.phone}" email="${dto.email ?? ''}"`);
+            this.logger.log(
+              `Meta: normalized — name="${dto.name}" phone="${dto.phone}" email="${dto.email ?? ''}"`,
+            );
 
             if (!dto.phone || dto.phone === 'unknown') {
-              this.logger.warn(`Meta: leadgen_id=${leadgenId} has no phone — skipping`);
+              this.logger.warn(
+                `Meta: leadgen_id=${leadgenId} has no phone — skipping`,
+              );
               continue;
             }
 
-            const created = await this.leadService.create(dto as any, { id: null, role: 'Admin' });
+            const created = await this.leadService.create(dto as any, {
+              id: null,
+              role: 'Admin',
+            });
             if (created.analyticsOnly || !created.lead) {
-              this.logger.warn(`Meta: leadgen_id=${leadgenId} blocked — no valid identity`);
+              this.logger.warn(
+                `Meta: leadgen_id=${leadgenId} blocked — no valid identity`,
+              );
               continue;
             }
-            this.logger.log(`Meta: lead created id=${created.lead.id} for leadgen_id=${leadgenId}`);
+            this.logger.log(
+              `Meta: lead created id=${created.lead.id} for leadgen_id=${leadgenId}`,
+            );
             this.notifyNewLead(created.lead);
           }
         }
       } catch (e: any) {
-        this.logger.error(`Meta: webhook processing failed — ${e?.message}`, e?.stack);
+        this.logger.error(
+          `Meta: webhook processing failed — ${e?.message}`,
+          e?.stack,
+        );
       }
     });
 
@@ -193,7 +240,9 @@ export class WebhookController {
 
     // Fail closed: require the webhook key to be configured AND match
     if (!appConfig.googleAdsWebhookKey) {
-      this.logger.warn('Google Ads webhook: GOOGLE_ADS_WEBHOOK_KEY not configured — rejecting all requests');
+      this.logger.warn(
+        'Google Ads webhook: GOOGLE_ADS_WEBHOOK_KEY not configured — rejecting all requests',
+      );
       return { ok: true };
     }
     if (body?.google_key !== appConfig.googleAdsWebhookKey) {
@@ -203,7 +252,9 @@ export class WebhookController {
 
     // Skip test submissions from Google's "Test" button in the UI
     if (body?.is_test === true) {
-      this.logger.log(`Google Ads webhook: test submission lead_id=${body?.lead_id} — skipping`);
+      this.logger.log(
+        `Google Ads webhook: test submission lead_id=${body?.lead_id} — skipping`,
+      );
       return { ok: true };
     }
 
@@ -220,26 +271,42 @@ export class WebhookController {
         // Idempotency — skip if already imported
         const existing = await this.leadService.findByExternalId(leadId);
         if (existing) {
-          this.logger.log(`Google Ads: lead_id=${leadId} already exists (id=${existing.id}) — skipping`);
+          this.logger.log(
+            `Google Ads: lead_id=${leadId} already exists (id=${existing.id}) — skipping`,
+          );
           return;
         }
 
         const dto = normalizeGoogleLead(body);
-        this.logger.log(`Google Ads: normalized — name="${dto.name}" phone="${dto.phone}" campaign="${dto.utm_campaign ?? ''}"`);
+        this.logger.log(
+          `Google Ads: normalized — name="${dto.name}" phone="${dto.phone}" campaign="${dto.utm_campaign ?? ''}"`,
+        );
 
         if (!dto.phone || dto.phone === 'unknown') {
-          this.logger.warn(`Google Ads: lead_id=${leadId} has no phone — skipping`);
+          this.logger.warn(
+            `Google Ads: lead_id=${leadId} has no phone — skipping`,
+          );
           return;
         }
 
-        const created = await this.leadService.create(dto as any, { id: null, role: 'Admin' });
+        const created = await this.leadService.create(dto as any, {
+          id: null,
+          role: 'Admin',
+        });
         if (created.analyticsOnly || !created.lead) {
-          this.logger.warn(`Google Ads: lead_id=${leadId} blocked by identity gate`);
+          this.logger.warn(
+            `Google Ads: lead_id=${leadId} blocked by identity gate`,
+          );
           return;
         }
-        this.logger.log(`Google Ads: lead created id=${created.lead.id} for lead_id=${leadId}`);
+        this.logger.log(
+          `Google Ads: lead created id=${created.lead.id} for lead_id=${leadId}`,
+        );
       } catch (e: any) {
-        this.logger.error(`Google Ads: webhook processing failed — ${e?.message}`, e?.stack);
+        this.logger.error(
+          `Google Ads: webhook processing failed — ${e?.message}`,
+          e?.stack,
+        );
       }
     });
 
@@ -264,7 +331,9 @@ export class WebhookController {
 
     // Fail closed: require webhook secret configured; Shopify signs with base64, not hex.
     if (!appConfig.shopifyWebhookSecret) {
-      this.logger.warn('Shopify webhook: shopifyWebhookSecret not configured — rejecting all requests');
+      this.logger.warn(
+        'Shopify webhook: shopifyWebhookSecret not configured — rejecting all requests',
+      );
       return { ok: true };
     }
 
@@ -297,10 +366,15 @@ export class WebhookController {
           lead_type: body.lead_type,
         });
         if (result.leadId) {
-          this.logger.log(`Shopify webhook (deprecated): lead id=${result.leadId}`);
+          this.logger.log(
+            `Shopify webhook (deprecated): lead id=${result.leadId}`,
+          );
         }
       } catch (e: any) {
-        this.logger.error(`Shopify webhook processing failed: ${e?.message}`, e?.stack);
+        this.logger.error(
+          `Shopify webhook processing failed: ${e?.message}`,
+          e?.stack,
+        );
       }
     });
 
@@ -314,21 +388,28 @@ export class WebhookController {
     const SOURCES = ['META', 'GOOGLE', 'INDIAMART', 'SHOPIFY'] as const;
     const now = Date.now();
 
-    return SOURCES.reduce<Record<string, { last_received_at: string | null; minutes_ago: number | null; healthy: boolean }>>(
-      (acc, src) => {
-        const ts = this.lastReceived[src];
-        const minutesAgo = ts ? Math.floor((now - ts.getTime()) / 60_000) : null;
-        acc[src] = {
-          last_received_at: ts ? ts.toISOString() : null,
-          minutes_ago: minutesAgo,
-          // healthy = received at least once AND within the threshold.
-          // null (never received this session) is shown as unknown, not unhealthy.
-          healthy: minutesAgo !== null && minutesAgo < HEALTHY_THRESHOLD_HOURS * 60,
-        };
-        return acc;
-      },
-      {},
-    );
+    return SOURCES.reduce<
+      Record<
+        string,
+        {
+          last_received_at: string | null;
+          minutes_ago: number | null;
+          healthy: boolean;
+        }
+      >
+    >((acc, src) => {
+      const ts = this.lastReceived[src];
+      const minutesAgo = ts ? Math.floor((now - ts.getTime()) / 60_000) : null;
+      acc[src] = {
+        last_received_at: ts ? ts.toISOString() : null,
+        minutes_ago: minutesAgo,
+        // healthy = received at least once AND within the threshold.
+        // null (never received this session) is shown as unknown, not unhealthy.
+        healthy:
+          minutesAgo !== null && minutesAgo < HEALTHY_THRESHOLD_HOURS * 60,
+      };
+      return acc;
+    }, {});
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────────

@@ -9,7 +9,9 @@ export class PromotionCaptureDto {
   @IsString()
   whatsapp_number?: string;
 
-  @ValidateIf(o => o.email !== '' && o.email !== undefined && o.email !== null)
+  @ValidateIf(
+    (o) => o.email !== '' && o.email !== undefined && o.email !== null,
+  )
   @IsEmail()
   @IsOptional()
   email?: string;

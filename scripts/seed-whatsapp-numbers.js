@@ -7,8 +7,9 @@
  * Run: node scripts/seed-whatsapp-numbers.js
  */
 
+const { resolveScriptDb } = require('./lib/script-db');
+const { url: DB_URL, ssl: DB_SSL } = resolveScriptDb();
 const { Client } = require('pg');
-require('dotenv').config();
 
 const NUMBERS = [
   { name: 'Telecaller 1', phone: '9176052555' },
@@ -17,7 +18,7 @@ const NUMBERS = [
 ];
 
 async function run() {
-  const client = new Client({ connectionString: process.env.DATABASE_URL });
+  const client = new Client({ connectionString: DB_URL, ssl: DB_SSL });
   await client.connect();
   console.log('Connected to database\n');
 

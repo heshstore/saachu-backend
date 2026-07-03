@@ -23,18 +23,26 @@ export class PromotionProductSelectionService {
    */
   async getEligibleProductForTelecaller(
     telecallerNumberId: string,
-    options?: { category?: string; campaignId?: string; excludeSkus?: string[] },
+    options?: {
+      category?: string;
+      campaignId?: string;
+      excludeSkus?: string[];
+    },
   ): Promise<ShopifyCatalogItem | null> {
     const allProducts = await this._loadCatalog(options?.category);
     if (!allProducts.length) {
-      this.logger.warn(`[PROMO_PRODUCT_SELECT] telecaller=${telecallerNumberId} no_catalog_products`);
+      this.logger.warn(
+        `[PROMO_PRODUCT_SELECT] telecaller=${telecallerNumberId} no_catalog_products`,
+      );
       return null;
     }
 
-    const sentSkus   = await this._getSentSkus(telecallerNumberId);
+    const sentSkus = await this._getSentSkus(telecallerNumberId);
     const excludeSet = new Set(options?.excludeSkus ?? []);
 
-    let eligible = allProducts.filter((p) => !sentSkus.has(p.sku) && !excludeSet.has(p.sku ?? ''));
+    let eligible = allProducts.filter(
+      (p) => !sentSkus.has(p.sku) && !excludeSet.has(p.sku ?? ''),
+    );
 
     if (!eligible.length) {
       this.logger.log(
@@ -48,15 +56,19 @@ export class PromotionProductSelectionService {
     const selected = eligible[Math.floor(Math.random() * eligible.length)];
     this.logger.log(
       `[PROMO_PRODUCT_SELECT] telecaller=${telecallerNumberId} ` +
-      `total=${allProducts.length} sent_24h=${sentSkus.size} eligible=${eligible.length} ` +
-      `selected_sku=${selected.sku} selected_id=${selected.id}`,
+        `total=${allProducts.length} sent_24h=${sentSkus.size} eligible=${eligible.length} ` +
+        `selected_sku=${selected.sku} selected_id=${selected.id}`,
     );
     return selected;
   }
 
   /** Returns a specific catalog product by id, or null if not found / ignored. */
   async findById(productId: number): Promise<ShopifyCatalogItem | null> {
-    return this.catalogRepo.findOne({ where: { id: productId, syncIgnored: false } }) ?? null;
+    return (
+      this.catalogRepo.findOne({
+        where: { id: productId, syncIgnored: false },
+      }) ?? null
+    );
   }
 
   /** Records that a telecaller sent this product; call after message is queued or sent. */

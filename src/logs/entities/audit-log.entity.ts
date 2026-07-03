@@ -8,8 +8,8 @@ import {
 
 @Entity('audit_logs')
 @Index('idx_audit_entity', ['entity', 'entity_id'])
-@Index('idx_audit_user',   ['user_id'])
-@Index('idx_audit_time',   ['created_at'])
+@Index('idx_audit_user', ['user_id'])
+@Index('idx_audit_time', ['created_at'])
 export class AuditLog {
   @PrimaryGeneratedColumn('uuid')
   id: string;

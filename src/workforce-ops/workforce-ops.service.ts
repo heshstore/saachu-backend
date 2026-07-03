@@ -1,5 +1,8 @@
 import {
-  Injectable, BadRequestException, ForbiddenException, NotFoundException,
+  Injectable,
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -22,7 +25,9 @@ export class WorkforceOpsService {
   }
 
   /** Resolve expected working hours from profile + shift_master. */
-  private async getExpectedDailyHours(userId: number): Promise<{ hours: number; breakMins: number }> {
+  private async getExpectedDailyHours(
+    userId: number,
+  ): Promise<{ hours: number; breakMins: number }> {
     const [p] = await this.ds.query(
       `SELECT ewp.daily_working_hours, ewp.shift_master_id,
               sm.start_time, sm.end_time, sm.break_minutes
@@ -37,7 +42,10 @@ export class WorkforceOpsService {
     if (override > 0 && !p.start_time) return { hours: override, breakMins: 0 };
 
     if (p.start_time && p.end_time) {
-      const mins = this.shiftSpanMinutes(String(p.start_time), String(p.end_time));
+      const mins = this.shiftSpanMinutes(
+        String(p.start_time),
+        String(p.end_time),
+      );
       const br = Math.max(0, Math.round(this.num(p.break_minutes)));
       const h = Math.max(0.5, (mins - br) / 60);
       return { hours: h, breakMins: br };
@@ -92,13 +100,30 @@ export class WorkforceOpsService {
       `INSERT INTO shift_master (shift_name, start_time, end_time, break_minutes)
        VALUES ($1, $2::time, $3::time, $4)
        RETURNING *`,
-      [body.shiftName.trim(), body.startTime, body.endTime, body.breakMinutes ?? 0],
+      [
+        body.shiftName.trim(),
+        body.startTime,
+        body.endTime,
+        body.breakMinutes ?? 0,
+      ],
     );
     return r[0];
   }
 
-  async updateShift(id: number, body: Partial<{ shiftName: string; startTime: string; endTime: string; breakMinutes: number; active: boolean }>) {
-    const [cur] = await this.ds.query(`SELECT * FROM shift_master WHERE id = $1`, [id]);
+  async updateShift(
+    id: number,
+    body: Partial<{
+      shiftName: string;
+      startTime: string;
+      endTime: string;
+      breakMinutes: number;
+      active: boolean;
+    }>,
+  ) {
+    const [cur] = await this.ds.query(
+      `SELECT * FROM shift_master WHERE id = $1`,
+      [id],
+    );
     if (!cur) throw new NotFoundException('Shift not found');
     await this.ds.query(
       `UPDATE shift_master SET
@@ -118,7 +143,10 @@ export class WorkforceOpsService {
         body.active ?? null,
       ],
     );
-    const [u] = await this.ds.query(`SELECT * FROM shift_master WHERE id = $1`, [id]);
+    const [u] = await this.ds.query(
+      `SELECT * FROM shift_master WHERE id = $1`,
+      [id],
+    );
     return u;
   }
 
@@ -147,8 +175,14 @@ export class WorkforceOpsService {
     dailyWorkingHours?: number;
     overtimeEligible?: boolean;
   }) {
-    const [exists] = await this.ds.query(`SELECT 1 FROM employee_workforce_profiles WHERE user_id = $1`, [body.userId]);
-    if (exists) throw new BadRequestException('Workforce profile already exists for this user');
+    const [exists] = await this.ds.query(
+      `SELECT 1 FROM employee_workforce_profiles WHERE user_id = $1`,
+      [body.userId],
+    );
+    if (exists)
+      throw new BadRequestException(
+        'Workforce profile already exists for this user',
+      );
     const r = await this.ds.query(
       `INSERT INTO employee_workforce_profiles
         (user_id, employee_code, department_id, designation, joining_date, shift_master_id, shift_type, daily_working_hours, overtime_eligible)
@@ -169,26 +203,39 @@ export class WorkforceOpsService {
     return r[0];
   }
 
-  async updateProfile(id: number, body: Partial<{
-    employeeCode: string;
-    departmentId: number | null;
-    designation: string | null;
-    joiningDate: string | null;
-    shiftMasterId: number | null;
-    shiftType: string | null;
-    dailyWorkingHours: number;
-    overtimeEligible: boolean;
-    active: boolean;
-  }>) {
-    const [cur] = await this.ds.query(`SELECT * FROM employee_workforce_profiles WHERE id = $1`, [id]);
+  async updateProfile(
+    id: number,
+    body: Partial<{
+      employeeCode: string;
+      departmentId: number | null;
+      designation: string | null;
+      joiningDate: string | null;
+      shiftMasterId: number | null;
+      shiftType: string | null;
+      dailyWorkingHours: number;
+      overtimeEligible: boolean;
+      active: boolean;
+    }>,
+  ) {
+    const [cur] = await this.ds.query(
+      `SELECT * FROM employee_workforce_profiles WHERE id = $1`,
+      [id],
+    );
     if (!cur) throw new NotFoundException('Profile not found');
     const m = {
       employee_code: body.employeeCode ?? cur.employee_code,
-      department_id: body.departmentId !== undefined ? body.departmentId : cur.department_id,
-      designation: body.designation !== undefined ? body.designation : cur.designation,
-      joining_date: body.joiningDate !== undefined ? body.joiningDate : cur.joining_date,
-      shift_master_id: body.shiftMasterId !== undefined ? body.shiftMasterId : cur.shift_master_id,
-      shift_type: body.shiftType !== undefined ? body.shiftType : cur.shift_type,
+      department_id:
+        body.departmentId !== undefined ? body.departmentId : cur.department_id,
+      designation:
+        body.designation !== undefined ? body.designation : cur.designation,
+      joining_date:
+        body.joiningDate !== undefined ? body.joiningDate : cur.joining_date,
+      shift_master_id:
+        body.shiftMasterId !== undefined
+          ? body.shiftMasterId
+          : cur.shift_master_id,
+      shift_type:
+        body.shiftType !== undefined ? body.shiftType : cur.shift_type,
       daily_working_hours: body.dailyWorkingHours ?? cur.daily_working_hours,
       overtime_eligible: body.overtimeEligible ?? cur.overtime_eligible,
       active: body.active ?? cur.active,
@@ -219,7 +266,10 @@ export class WorkforceOpsService {
         m.active,
       ],
     );
-    const [u] = await this.ds.query(`SELECT * FROM employee_workforce_profiles WHERE id = $1`, [id]);
+    const [u] = await this.ds.query(
+      `SELECT * FROM employee_workforce_profiles WHERE id = $1`,
+      [id],
+    );
     return u;
   }
 
@@ -298,7 +348,8 @@ export class WorkforceOpsService {
       [uid, d],
     );
     if (!row?.check_in_time) throw new BadRequestException('Check in first');
-    if (row.check_out_time) throw new BadRequestException('Already checked out');
+    if (row.check_out_time)
+      throw new BadRequestException('Already checked out');
 
     const { hours: expected } = await this.getExpectedDailyHours(uid);
     const [p] = await this.ds.query(
@@ -397,7 +448,15 @@ export class WorkforceOpsService {
     );
   }
 
-  async createLeave(actorId: number, body: { leaveType: LeaveType; fromDate: string; toDate: string; reason?: string }) {
+  async createLeave(
+    actorId: number,
+    body: {
+      leaveType: LeaveType;
+      fromDate: string;
+      toDate: string;
+      reason?: string;
+    },
+  ) {
     if (new Date(body.toDate) < new Date(body.fromDate)) {
       throw new BadRequestException('toDate must be on or after fromDate');
     }
@@ -405,12 +464,22 @@ export class WorkforceOpsService {
       `INSERT INTO leave_requests (user_id, leave_type, from_date, to_date, reason, status)
        VALUES ($1, $2, $3::date, $4::date, $5, 'PENDING')
        RETURNING *`,
-      [actorId, body.leaveType, body.fromDate, body.toDate, body.reason ?? null],
+      [
+        actorId,
+        body.leaveType,
+        body.fromDate,
+        body.toDate,
+        body.reason ?? null,
+      ],
     );
     return r[0];
   }
 
-  private async applyLeaveToAttendance(userId: number, fromD: string, toD: string): Promise<void> {
+  private async applyLeaveToAttendance(
+    userId: number,
+    fromD: string,
+    toD: string,
+  ): Promise<void> {
     const start = new Date(fromD + 'T12:00:00');
     const end = new Date(toD + 'T12:00:00');
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
@@ -429,40 +498,63 @@ export class WorkforceOpsService {
     }
   }
 
-  async setLeaveStatus(id: number, status: 'APPROVED' | 'REJECTED', approverId: number | null, role: string | undefined) {
+  async setLeaveStatus(
+    id: number,
+    status: 'APPROVED' | 'REJECTED',
+    approverId: number | null,
+    role: string | undefined,
+  ) {
     await this.assertStaffEdit(role);
-    const [lr] = await this.ds.query(`SELECT * FROM leave_requests WHERE id = $1`, [id]);
+    const [lr] = await this.ds.query(
+      `SELECT * FROM leave_requests WHERE id = $1`,
+      [id],
+    );
     if (!lr) throw new NotFoundException('Leave request not found');
     if (lr.status !== 'PENDING') {
-      throw new BadRequestException('Only pending requests can be approved or rejected');
+      throw new BadRequestException(
+        'Only pending requests can be approved or rejected',
+      );
     }
     await this.ds.query(
       `UPDATE leave_requests SET status = $2, approved_by = $3, updated_at = now() WHERE id = $1`,
       [id, status, approverId],
     );
     if (status === 'APPROVED') {
-      const fromStr = lr.from_date instanceof Date
-        ? lr.from_date.toISOString().slice(0, 10)
-        : String(lr.from_date).slice(0, 10);
-      const toStr = lr.to_date instanceof Date
-        ? lr.to_date.toISOString().slice(0, 10)
-        : String(lr.to_date).slice(0, 10);
+      const fromStr =
+        lr.from_date instanceof Date
+          ? lr.from_date.toISOString().slice(0, 10)
+          : String(lr.from_date).slice(0, 10);
+      const toStr =
+        lr.to_date instanceof Date
+          ? lr.to_date.toISOString().slice(0, 10)
+          : String(lr.to_date).slice(0, 10);
       await this.applyLeaveToAttendance(lr.user_id, fromStr, toStr);
     }
-    const [u] = await this.ds.query(`SELECT * FROM leave_requests WHERE id = $1`, [id]);
+    const [u] = await this.ds.query(
+      `SELECT * FROM leave_requests WHERE id = $1`,
+      [id],
+    );
     return u;
   }
 
   async cancelOwnLeave(id: number, userId: number) {
-    const [lr] = await this.ds.query(`SELECT * FROM leave_requests WHERE id = $1`, [id]);
+    const [lr] = await this.ds.query(
+      `SELECT * FROM leave_requests WHERE id = $1`,
+      [id],
+    );
     if (!lr) throw new NotFoundException('Leave request not found');
-    if (lr.user_id !== userId) throw new ForbiddenException('Not your leave request');
-    if (lr.status !== 'PENDING') throw new BadRequestException('Only pending can be cancelled');
+    if (lr.user_id !== userId)
+      throw new ForbiddenException('Not your leave request');
+    if (lr.status !== 'PENDING')
+      throw new BadRequestException('Only pending can be cancelled');
     await this.ds.query(
       `UPDATE leave_requests SET status = 'CANCELLED', updated_at = now() WHERE id = $1`,
       [id],
     );
-    const [u] = await this.ds.query(`SELECT * FROM leave_requests WHERE id = $1`, [id]);
+    const [u] = await this.ds.query(
+      `SELECT * FROM leave_requests WHERE id = $1`,
+      [id],
+    );
     return u;
   }
 
@@ -498,7 +590,8 @@ export class WorkforceOpsService {
        FROM attendance_records WHERE attendance_date = $1::date`,
       [today],
     );
-    const deptRows = await this.ds.query(`
+    const deptRows = await this.ds.query(
+      `
       SELECT d.id, d.name, d.code, d.manpower_capacity,
         (SELECT COUNT(DISTINCT ewp.user_id)
          FROM employee_workforce_profiles ewp
@@ -508,7 +601,9 @@ export class WorkforceOpsService {
       FROM departments d
       WHERE d.active = true
       ORDER BY d.name
-    `, [today]);
+    `,
+      [today],
+    );
 
     const overload = await this.ds.query(`
       SELECT d.id, d.name, d.manpower_capacity,
@@ -532,7 +627,11 @@ export class WorkforceOpsService {
       overtimeHoursToday: this.num(ot?.h),
       workforceUtilizationPct:
         this.num(absent?.c) + this.num(present?.c) > 0
-          ? Math.round((this.num(present?.c) / (this.num(present?.c) + this.num(absent?.c))) * 1000) / 10
+          ? Math.round(
+              (this.num(present?.c) /
+                (this.num(present?.c) + this.num(absent?.c))) *
+                1000,
+            ) / 10
           : 0,
       departmentsToday: deptRows,
       overloadedDepartments: overload,
@@ -556,7 +655,9 @@ export class WorkforceOpsService {
   }
 
   async getProductivity(filters: { from?: string; to?: string } = {}) {
-    const from = filters.from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const from =
+      filters.from ||
+      new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
     const to = filters.to || this.todayStr();
 
     const [stages] = await this.ds.query(
@@ -590,7 +691,8 @@ export class WorkforceOpsService {
     const totalA = this.num(att?.total_rows);
     const attPct = totalA > 0 ? Math.round((present / totalA) * 1000) / 10 : 0;
     const otH = this.num(att?.overtime_hours);
-    const otPct = present > 0 ? Math.round((otH / (present * 8 + 0.001)) * 1000) / 10 : 0;
+    const otPct =
+      present > 0 ? Math.round((otH / (present * 8 + 0.001)) * 1000) / 10 : 0;
 
     return {
       from,
@@ -607,7 +709,10 @@ export class WorkforceOpsService {
 
   async getPayrollInputSummary(userId: number, year: number, month: number) {
     const start = `${year}-${String(month).padStart(2, '0')}-01`;
-    const next = month === 12 ? `${year + 1}-01-01` : `${year}-${String(month + 1).padStart(2, '0')}-01`;
+    const next =
+      month === 12
+        ? `${year + 1}-01-01`
+        : `${year}-${String(month + 1).padStart(2, '0')}-01`;
 
     const [a] = await this.ds.query(
       `SELECT
@@ -630,15 +735,25 @@ export class WorkforceOpsService {
     monthEnd.setDate(monthEnd.getDate() - 1);
     const leaveDaysSet = new Set<string>();
     for (const lr of leaves) {
-      const fromStr = lr.from_date instanceof Date
-        ? lr.from_date.toISOString().slice(0, 10)
-        : String(lr.from_date).slice(0, 10);
-      const toStr = lr.to_date instanceof Date
-        ? lr.to_date.toISOString().slice(0, 10)
-        : String(lr.to_date).slice(0, 10);
-      const segStart = new Date(Math.max(new Date(fromStr).getTime(), new Date(start).getTime()));
-      const segEnd = new Date(Math.min(new Date(toStr).getTime(), monthEnd.getTime()));
-      for (let d = new Date(segStart); d <= segEnd; d.setDate(d.getDate() + 1)) {
+      const fromStr =
+        lr.from_date instanceof Date
+          ? lr.from_date.toISOString().slice(0, 10)
+          : String(lr.from_date).slice(0, 10);
+      const toStr =
+        lr.to_date instanceof Date
+          ? lr.to_date.toISOString().slice(0, 10)
+          : String(lr.to_date).slice(0, 10);
+      const segStart = new Date(
+        Math.max(new Date(fromStr).getTime(), new Date(start).getTime()),
+      );
+      const segEnd = new Date(
+        Math.min(new Date(toStr).getTime(), monthEnd.getTime()),
+      );
+      for (
+        let d = new Date(segStart);
+        d <= segEnd;
+        d.setDate(d.getDate() + 1)
+      ) {
         leaveDaysSet.add(d.toISOString().slice(0, 10));
       }
     }
@@ -646,8 +761,13 @@ export class WorkforceOpsService {
 
     const workingRows = this.num(a?.working_day_rows);
     const half = this.num(a?.half_days);
-    const calendarDays = Math.round((new Date(next).getTime() - new Date(start).getTime()) / 86400000);
-    const attendancePct = calendarDays > 0 ? Math.round((workingRows / calendarDays) * 1000) / 10 : 0;
+    const calendarDays = Math.round(
+      (new Date(next).getTime() - new Date(start).getTime()) / 86400000,
+    );
+    const attendancePct =
+      calendarDays > 0
+        ? Math.round((workingRows / calendarDays) * 1000) / 10
+        : 0;
     const payableDays = Math.max(0, workingRows - half * 0.5);
 
     return {

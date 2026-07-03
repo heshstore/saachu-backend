@@ -1,4 +1,11 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, OneToMany } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  OneToMany,
+} from 'typeorm';
 import { ManufacturingBoqItem } from './manufacturing-boq-item.entity';
 
 @Entity('manufacturing_boqs')
@@ -27,6 +34,9 @@ export class ManufacturingBoq {
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 
-  @OneToMany(() => ManufacturingBoqItem, (line) => line.boq, { eager: true, cascade: true })
+  @OneToMany(() => ManufacturingBoqItem, (line) => line.boq, {
+    eager: true,
+    cascade: true,
+  })
   lines: ManufacturingBoqItem[];
 }

@@ -35,7 +35,9 @@ export class NumberRecoveryService {
   async recoverNumbers(): Promise<void> {
     if (process.env.WHATSAPP_ENGINE_ENABLED === 'false') return;
     if (this._running) {
-      this.logger.warn('[NumberRecovery] Previous run still in progress — skipping cron tick');
+      this.logger.warn(
+        '[NumberRecovery] Previous run still in progress — skipping cron tick',
+      );
       return;
     }
     this._running = true;
@@ -62,7 +64,9 @@ export class NumberRecoveryService {
 
     if (!candidates.length) return;
 
-    this.logger.log(`[NumberRecovery] Checking ${candidates.length} inactive number(s) for recovery`);
+    this.logger.log(
+      `[NumberRecovery] Checking ${candidates.length} inactive number(s) for recovery`,
+    );
 
     for (const number of candidates) {
       await this._evaluateAndRecover(number);
@@ -88,7 +92,9 @@ export class NumberRecoveryService {
     }
 
     if (total < MIN_HISTORY_SENDS) {
-      this.logger.log(`[NumberRecovery] ${number.phone}: insufficient history (${total} sends) — skipping`);
+      this.logger.log(
+        `[NumberRecovery] ${number.phone}: insufficient history (${total} sends) — skipping`,
+      );
       return;
     }
 

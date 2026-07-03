@@ -11,12 +11,21 @@ interface MetaGraphResponse {
 }
 
 const STANDARD_FIELDS = new Set([
-  'full_name', 'first_name', 'last_name',
-  'phone_number', 'phone', 'mobile',
-  'email', 'city', 'location',
+  'full_name',
+  'first_name',
+  'last_name',
+  'phone_number',
+  'phone',
+  'mobile',
+  'email',
+  'city',
+  'location',
 ]);
 
-export function normalizeMetaLead(graphData: MetaGraphResponse, leadgenId: string) {
+export function normalizeMetaLead(
+  graphData: MetaGraphResponse,
+  leadgenId: string,
+) {
   const fields = graphData.field_data ?? [];
 
   const get = (...names: string[]) => {
@@ -35,34 +44,35 @@ export function normalizeMetaLead(graphData: MetaGraphResponse, leadgenId: strin
     .map((f) => `${f.name.replace(/_/g, ' ')}: ${f.values[0]}`)
     .join('\n');
 
-  const productInterest = get('product_interest', 'product', 'message', 'products_interested')
-    || customAnswers
-    || undefined;
+  const productInterest =
+    get('product_interest', 'product', 'message', 'products_interested') ||
+    customAnswers ||
+    undefined;
 
-  const notes = toSentenceCase(
-    get('message', 'requirement', 'notes') || customAnswers,
-  ) || undefined;
+  const notes =
+    toSentenceCase(get('message', 'requirement', 'notes') || customAnswers) ||
+    undefined;
 
   return {
-    name:             get('full_name', 'first_name') || 'Unknown Lead',
+    name: get('full_name', 'first_name') || 'Unknown Lead',
     phone,
-    email:            get('email') || undefined,
-    city:             get('city', 'location') || undefined,
-    source:           LeadSource.META,
+    email: get('email') || undefined,
+    city: get('city', 'location') || undefined,
+    source: LeadSource.META,
     product_interest: productInterest,
     notes,
-    context:          contextToLabel(LeadContext.META_LEAD_FORM),
+    context: contextToLabel(LeadContext.META_LEAD_FORM),
     lead_source_label: 'meta_lead_form',
-    channel:          'FORM',
-    utm_source:       'meta',
-    utm_campaign:     graphData.campaign_name || undefined,
-    landing_page:     undefined,
-    external_id:      leadgenId,
+    channel: 'FORM',
+    utm_source: 'meta',
+    utm_campaign: graphData.campaign_name || undefined,
+    landing_page: undefined,
+    external_id: leadgenId,
     raw_payload: {
-      leadgen_id:    leadgenId,
-      field_data:    fields,
-      ad_name:       graphData.ad_name,
-      adset_name:    graphData.adset_name,
+      leadgen_id: leadgenId,
+      field_data: fields,
+      ad_name: graphData.ad_name,
+      adset_name: graphData.adset_name,
       campaign_name: graphData.campaign_name,
     },
   };

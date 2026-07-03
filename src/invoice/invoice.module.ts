@@ -8,7 +8,10 @@ import { Order } from '../orders/entities/order.entity';
 import { TransactionalEmailModule } from '../email-transactional/transactional-email.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Invoice, Order]), TransactionalEmailModule],
+  imports: [
+    TypeOrmModule.forFeature([Invoice, Order]),
+    TransactionalEmailModule,
+  ],
   controllers: [InvoiceController],
   providers: [InvoiceService],
   exports: [InvoiceService],

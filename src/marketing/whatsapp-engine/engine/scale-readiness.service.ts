@@ -8,14 +8,14 @@ import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 import { EngineAuditService, AuditEvent } from './engine-audit.service';
 
 // Step 8 thresholds from Phase 10 spec
-const STABILITY_DAYS       = 14;   // must be running without ban for this many days
-const MIN_DELIVERY_RATE    = 60;   // %
-const MIN_READ_RATE        = 20;   // %
-const MIN_REPLY_RATE       = 5;    // %
-const MAX_FAIL_RATE        = 20;   // %
-const MAX_FATIGUE_PCT      = 20;   // % of audience with fatigue_score >= 50
-const MAX_COOLDOWN_PCT     = 30;   // % of audience in cooldown
-const MIN_SENDS_FOR_RATES  = 20;   // minimum historical sends required to evaluate rates
+const STABILITY_DAYS = 14; // must be running without ban for this many days
+const MIN_DELIVERY_RATE = 60; // %
+const MIN_READ_RATE = 20; // %
+const MIN_REPLY_RATE = 5; // %
+const MAX_FAIL_RATE = 20; // %
+const MAX_FATIGUE_PCT = 20; // % of audience with fatigue_score >= 50
+const MAX_COOLDOWN_PCT = 30; // % of audience in cooldown
+const MIN_SENDS_FOR_RATES = 20; // minimum historical sends required to evaluate rates
 
 // Controlled scale stages (MAX_DAILY_AUDIENCE)
 const SCALE_STAGES = [25, 40, 60] as const;
@@ -55,7 +55,10 @@ export class ScaleReadinessService {
   ) {}
 
   async checkReadiness(): Promise<ReadinessReport> {
-    const current = parseInt(process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE ?? '25', 10);
+    const current = parseInt(
+      process.env.WHATSAPP_ENGINE_MAX_DAILY_AUDIENCE ?? '25',
+      10,
+    );
     const nextStage = this._nextStage(current);
 
     const since14 = new Date(Date.now() - STABILITY_DAYS * 86_400_000);
@@ -67,28 +70,33 @@ export class ScaleReadinessService {
       this._getAudienceStats(),
     ]);
 
-    const rates        = this._computeRates(logRows);
+    const rates = this._computeRates(logRows);
     const warningCount = parseInt(warningRows[0]?.count ?? '0', 10);
-    const banned       = numbers.some((n) => n.status === WhatsAppNumberStatus.BANNED);
-    const waUp         = this.whatsAppService.isAnyConnected();
+    const banned = numbers.some(
+      (n) => n.status === WhatsAppNumberStatus.BANNED,
+    );
+    const waUp = this.whatsAppService.isAnyConnected();
 
     const aud = (audienceRows[0] ?? {}) as {
-      total?: string; in_cooldown?: string; high_fatigue?: string;
+      total?: string;
+      in_cooldown?: string;
+      high_fatigue?: string;
     };
-    const audTotal    = parseInt(aud.total        ?? '0', 10);
-    const inCooldown  = parseInt(aud.in_cooldown  ?? '0', 10);
+    const audTotal = parseInt(aud.total ?? '0', 10);
+    const inCooldown = parseInt(aud.in_cooldown ?? '0', 10);
     const highFatigue = parseInt(aud.high_fatigue ?? '0', 10);
-    const cooldownPct  = audTotal > 0 ? (inCooldown  / audTotal) * 100 : 0;
-    const fatiguePct   = audTotal > 0 ? (highFatigue / audTotal) * 100 : 0;
+    const cooldownPct = audTotal > 0 ? (inCooldown / audTotal) * 100 : 0;
+    const fatiguePct = audTotal > 0 ? (highFatigue / audTotal) * 100 : 0;
 
     const hasEnoughData = rates.attempted >= MIN_SENDS_FOR_RATES;
 
     const conditions: Record<string, ConditionResult> = {
       stable_14_days: {
         pass: true,
-        detail: warningCount === 0
-          ? `No delivery/read warning events in last ${STABILITY_DAYS} days`
-          : `${warningCount} delivery/read warning event(s) in last ${STABILITY_DAYS} days — warning only, no automatic pause`,
+        detail:
+          warningCount === 0
+            ? `No delivery/read warning events in last ${STABILITY_DAYS} days`
+            : `${warningCount} delivery/read warning event(s) in last ${STABILITY_DAYS} days — warning only, no automatic pause`,
       },
       no_bans: {
         pass: !banned,
@@ -114,7 +122,9 @@ export class ScaleReadinessService {
       },
       stable_session: {
         pass: waUp,
-        detail: waUp ? 'WhatsApp session connected' : 'WhatsApp is not connected',
+        detail: waUp
+          ? 'WhatsApp session connected'
+          : 'WhatsApp is not connected',
       },
       low_fail_rate: {
         pass: !hasEnoughData || rates.fail_rate_pct <= MAX_FAIL_RATE,
@@ -135,17 +145,21 @@ export class ScaleReadinessService {
     const ready = Object.values(conditions).every((c) => c.pass);
 
     return {
-      verdict:          ready ? 'GO' : 'NO_GO',
+      verdict: ready ? 'GO' : 'NO_GO',
       ready,
       current_max_daily: current,
-      next_stage:        nextStage,
+      next_stage: nextStage,
       conditions,
-      checked_at:        new Date().toISOString(),
+      checked_at: new Date().toISOString(),
     };
   }
 
   // Only scales up if all conditions pass. Returns the new limit or a reason for refusal.
-  async scaleUp(): Promise<{ success: boolean; message: string; new_limit?: number }> {
+  async scaleUp(): Promise<{
+    success: boolean;
+    message: string;
+    new_limit?: number;
+  }> {
     const report = await this.checkReadiness();
 
     if (!report.ready) {
@@ -165,7 +179,8 @@ export class ScaleReadinessService {
     if (next === 'SECOND_NUMBER') {
       return {
         success: false,
-        message: 'Already at 60/day — next step is activating a second number. This is a manual action: add a new WhatsAppNumber record in admin panel.',
+        message:
+          'Already at 60/day — next step is activating a second number. This is a manual action: add a new WhatsAppNumber record in admin panel.',
       };
     }
 
@@ -175,7 +190,11 @@ export class ScaleReadinessService {
     await this.auditService.log({
       event: AuditEvent.SCALE_UP,
       reason: `Controlled scale-up: ${current}/day → ${next}/day. All ${Object.keys(report.conditions).length} readiness conditions passed.`,
-      metadata: { previous: current, next, stage_label: SCALE_STAGE_LABELS[current] ?? '' },
+      metadata: {
+        previous: current,
+        next,
+        stage_label: SCALE_STAGE_LABELS[current] ?? '',
+      },
     });
 
     return {
@@ -204,18 +223,25 @@ export class ScaleReadinessService {
   private _computeRates(rows: { status: string; count: string }[]) {
     const c: Record<string, number> = {};
     for (const r of rows) c[r.status] = parseInt(r.count, 10);
-    const sent      = c[QueueStatus.SENT]      ?? 0;
+    const sent = c[QueueStatus.SENT] ?? 0;
     const delivered = c[QueueStatus.DELIVERED] ?? 0;
-    const read      = (c[QueueStatus.READ]     ?? 0) + (c[QueueStatus.REPLIED] ?? 0);
-    const replied   = c[QueueStatus.REPLIED]   ?? 0;
-    const failed    = c[QueueStatus.FAILED]    ?? 0;
+    const read = (c[QueueStatus.READ] ?? 0) + (c[QueueStatus.REPLIED] ?? 0);
+    const replied = c[QueueStatus.REPLIED] ?? 0;
+    const failed = c[QueueStatus.FAILED] ?? 0;
     const attempted = sent + delivered + failed;
     return {
       attempted,
-      delivery_rate_pct: attempted > 0 ? Math.round((delivered / attempted) * 100) : 0,
-      read_rate_pct:     (sent + delivered) > 0 ? Math.round((read / (sent + delivered)) * 100) : 0,
-      reply_rate_pct:    (sent + delivered) > 0 ? Math.round((replied / (sent + delivered)) * 100) : 0,
-      fail_rate_pct:     attempted > 0 ? Math.round((failed / attempted) * 100) : 0,
+      delivery_rate_pct:
+        attempted > 0 ? Math.round((delivered / attempted) * 100) : 0,
+      read_rate_pct:
+        sent + delivered > 0
+          ? Math.round((read / (sent + delivered)) * 100)
+          : 0,
+      reply_rate_pct:
+        sent + delivered > 0
+          ? Math.round((replied / (sent + delivered)) * 100)
+          : 0,
+      fail_rate_pct: attempted > 0 ? Math.round((failed / attempted) * 100) : 0,
     };
   }
 
@@ -228,11 +254,15 @@ export class ScaleReadinessService {
            AND created_at >= $1`,
         [since],
       );
-    } catch { return [{ count: '0' }]; }
+    } catch {
+      return [{ count: '0' }];
+    }
   }
 
   private async _getAudienceStats() {
-    return this.ds.query<{ total: string; in_cooldown: string; high_fatigue: string }[]>(`
+    return this.ds.query<
+      { total: string; in_cooldown: string; high_fatigue: string }[]
+    >(`
       SELECT
         COUNT(*)                                                                       AS total,
         COUNT(*) FILTER (WHERE cooldown_until IS NOT NULL AND cooldown_until > NOW())  AS in_cooldown,

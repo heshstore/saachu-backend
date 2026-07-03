@@ -34,31 +34,33 @@ export interface DailyHealthRow {
   isHealthyDay: boolean;
 }
 
-export function countsFromStatusMap(counts: Record<string, number>): MessageStatusCounts {
-  const sent      = counts['sent']      ?? 0;
+export function countsFromStatusMap(
+  counts: Record<string, number>,
+): MessageStatusCounts {
+  const sent = counts['sent'] ?? 0;
   const delivered = counts['delivered'] ?? 0;
-  const read      = counts['read']      ?? 0;
-  const replied   = counts['replied']   ?? 0;
-  const failed    = counts['failed']    ?? 0;
-  const total     = Object.values(counts).reduce((s, n) => s + n, 0);
+  const read = counts['read'] ?? 0;
+  const replied = counts['replied'] ?? 0;
+  const failed = counts['failed'] ?? 0;
+  const total = Object.values(counts).reduce((s, n) => s + n, 0);
   return { sent, delivered, read, replied, failed, total };
 }
 
-export function computeHealthMetrics(counts: MessageStatusCounts): HealthMetrics {
+export function computeHealthMetrics(
+  counts: MessageStatusCounts,
+): HealthMetrics {
   const attemptTotal = counts.sent + counts.delivered + counts.failed;
-  const deliveryRatePct = attemptTotal > 0
-    ? ((counts.delivered + counts.read + counts.replied) / attemptTotal) * 100
-    : 100;
+  const deliveryRatePct =
+    attemptTotal > 0
+      ? ((counts.delivered + counts.read + counts.replied) / attemptTotal) * 100
+      : 100;
   const readBase = counts.delivered + counts.read + counts.replied;
-  const readRatePct = readBase > 0
-    ? ((counts.read + counts.replied) / readBase) * 100
-    : 0;
-  const replyRatePct = counts.total > 0
-    ? (counts.replied / counts.total) * 100
-    : 0;
-  const failRatePct = counts.total > 0
-    ? (counts.failed / counts.total) * 100
-    : 0;
+  const readRatePct =
+    readBase > 0 ? ((counts.read + counts.replied) / readBase) * 100 : 0;
+  const replyRatePct =
+    counts.total > 0 ? (counts.replied / counts.total) * 100 : 0;
+  const failRatePct =
+    counts.total > 0 ? (counts.failed / counts.total) * 100 : 0;
   const blockRatePct = failRatePct;
 
   // Promotion depends only on delivery health and failure rate — NOT on customer
@@ -70,31 +72,38 @@ export function computeHealthMetrics(counts: MessageStatusCounts): HealthMetrics
     blockRatePct <= HEALTH_THRESHOLDS.maxBlockRatePct;
 
   const healthScore = Math.round(
-    Math.min(100, Math.max(0,
-      (deliveryRatePct * 0.35) +
-      (readRatePct * 0.25) +
-      (replyRatePct * 10) +
-      (100 - failRatePct) * 0.25 +
-      (counts.total >= HEALTH_MIN_SENDS_WINDOW ? 10 : 0),
-    )),
+    Math.min(
+      100,
+      Math.max(
+        0,
+        deliveryRatePct * 0.35 +
+          readRatePct * 0.25 +
+          replyRatePct * 10 +
+          (100 - failRatePct) * 0.25 +
+          (counts.total >= HEALTH_MIN_SENDS_WINDOW ? 10 : 0),
+      ),
+    ),
   );
 
   return {
     ...counts,
     deliveryRatePct: Math.round(deliveryRatePct),
-    readRatePct:     Math.round(readRatePct),
-    replyRatePct:    Math.round(replyRatePct * 10) / 10,
-    failRatePct:     Math.round(failRatePct),
-    blockRatePct:    Math.round(blockRatePct),
+    readRatePct: Math.round(readRatePct),
+    replyRatePct: Math.round(replyRatePct * 10) / 10,
+    failRatePct: Math.round(failRatePct),
+    blockRatePct: Math.round(blockRatePct),
     healthScore,
     isHealthy,
   };
 }
 
-export function isHealthyDay(row: Omit<DailyHealthRow, 'isHealthyDay'>): boolean {
+export function isHealthyDay(
+  row: Omit<DailyHealthRow, 'isHealthyDay'>,
+): boolean {
   const attemptTotal = row.sent + row.delivered + row.failed;
   if (attemptTotal < PROMOTION_RULES.minSendsPerHealthyDay) return false;
-  const deliveryRate = ((row.delivered + row.read + row.replied) / attemptTotal) * 100;
+  const deliveryRate =
+    ((row.delivered + row.read + row.replied) / attemptTotal) * 100;
   const failRate = attemptTotal > 0 ? (row.failed / attemptTotal) * 100 : 0;
   return (
     deliveryRate >= PROMOTION_RULES.dailyDeliveryRateMinPct &&

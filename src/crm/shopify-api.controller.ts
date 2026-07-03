@@ -1,4 +1,13 @@
-import { Controller, Get, Post, Body, HttpCode, Logger, Query, Request } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  HttpCode,
+  Logger,
+  Query,
+  Request,
+} from '@nestjs/common';
 import { IsOptional, IsString } from 'class-validator';
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../auth/public.decorator';
@@ -41,7 +50,11 @@ export class ShopifyApiController {
 
   @Get()
   @RequirePermission('lead.view')
-  getLeads(@Query('status') status?: string, @Query('source') source?: string, @Request() req?: any) {
+  getLeads(
+    @Query('status') status?: string,
+    @Query('source') source?: string,
+    @Request() req?: any,
+  ) {
     return this.leadService.findAll({ status, source }, req.user);
   }
 
@@ -53,6 +66,10 @@ export class ShopifyApiController {
     console.log('📥 INCOMING BODY:', JSON.stringify(body));
     this.logger.log(`Shopify lead received: ${JSON.stringify(body)}`);
     const result = await this.leadService.createFromShopifyClick(body);
-    return { success: result.ok, leadId: result.leadId, error: result.error ?? undefined };
+    return {
+      success: result.ok,
+      leadId: result.leadId,
+      error: result.error ?? undefined,
+    };
   }
 }

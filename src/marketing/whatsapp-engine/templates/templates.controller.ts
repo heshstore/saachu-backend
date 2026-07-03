@@ -84,7 +84,7 @@ export class TemplatesController {
       ? await this.promotionProductService.findById(dto.product_id)
       : await this.promotionProductService.getEligibleProductForTelecaller(
           dto.telecaller_number_id,
-          { campaignId: dto.campaign_id, category: dto.category},
+          { campaignId: dto.campaign_id, category: dto.category },
         );
 
     if (!product) {

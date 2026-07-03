@@ -6,13 +6,13 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
-import { EventEmitter2 }    from '@nestjs/event-emitter';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 
 import { Dispatch, DispatchStatus } from './entities/dispatch.entity';
-import { CreateDispatchDto }         from './dto/create-dispatch.dto';
-import { MarkDeliveredDto }          from './dto/mark-delivered.dto';
-import { Order, OrderStatus }        from '../orders/entities/order.entity';
-import { AuditService }              from '../logs/audit.service';
+import { CreateDispatchDto } from './dto/create-dispatch.dto';
+import { MarkDeliveredDto } from './dto/mark-delivered.dto';
+import { Order, OrderStatus } from '../orders/entities/order.entity';
+import { AuditService } from '../logs/audit.service';
 
 @Injectable()
 export class DispatchService {
@@ -38,7 +38,7 @@ export class DispatchService {
           OrderStatus.PARTIAL_DELIVERED,
         ]),
       },
-      order:  { created_at: 'ASC' },
+      order: { created_at: 'ASC' },
     });
   }
 
@@ -64,47 +64,60 @@ export class DispatchService {
    * creating a duplicate. The unique constraint on order_id provides a DB-level
    * safety net for parallel calls that slip past the application-level check.
    */
-  async createDispatch(dto: CreateDispatchDto, userId?: number): Promise<Dispatch> {
+  async createDispatch(
+    dto: CreateDispatchDto,
+    userId?: number,
+  ): Promise<Dispatch> {
     return this.dispatchRepo.manager.transaction(async (tx) => {
       // Lock order row so a concurrent cancel cannot slip past this status check
       const order = await tx.findOne(Order, {
         where: { id: dto.order_id },
-        lock:  { mode: 'pessimistic_write' },
+        lock: { mode: 'pessimistic_write' },
       });
-      if (!order) throw new NotFoundException(`Order ${dto.order_id} not found`);
+      if (!order)
+        throw new NotFoundException(`Order ${dto.order_id} not found`);
 
       if (order.status === OrderStatus.DISPATCHED) {
         // Already dispatched — return existing record (idempotent).
-        const existing = await tx.findOne(Dispatch, { where: { order_id: dto.order_id } });
+        const existing = await tx.findOne(Dispatch, {
+          where: { order_id: dto.order_id },
+        });
         if (existing) return existing;
       }
 
-      if (order.status !== OrderStatus.READY && order.status !== OrderStatus.READY_FOR_DISPATCH) {
+      if (
+        order.status !== OrderStatus.READY &&
+        order.status !== OrderStatus.READY_FOR_DISPATCH
+      ) {
         throw new BadRequestException(
           `Order must be READY to create a dispatch (current: ${order.status})`,
         );
       }
 
       // Check for existing dispatch (app-level guard before hitting unique constraint)
-      const existing = await tx.findOne(Dispatch, { where: { order_id: dto.order_id } });
+      const existing = await tx.findOne(Dispatch, {
+        where: { order_id: dto.order_id },
+      });
       if (existing) return existing;
 
       // Create dispatch
       let dispatch: Dispatch;
       try {
         dispatch = tx.create(Dispatch, {
-          order_id:        dto.order_id,
+          order_id: dto.order_id,
           dispatch_status: DispatchStatus.DISPATCHED,
-          dispatch_date:   new Date(),
-          transport_type:  dto.transport_type,
-          tracking_number: dto.tracking_number  ?? null,
-          notes:           dto.notes            ?? null,
+          dispatch_date: new Date(),
+          transport_type: dto.transport_type,
+          tracking_number: dto.tracking_number ?? null,
+          notes: dto.notes ?? null,
         });
         dispatch = await tx.save(dispatch);
       } catch (e: any) {
         if (e?.code === '23505') {
           // Lost the race — another request created it first; return what's there.
-          const fallback = await tx.findOne(Dispatch, { where: { order_id: dto.order_id } });
+          const fallback = await tx.findOne(Dispatch, {
+            where: { order_id: dto.order_id },
+          });
           if (fallback) return fallback;
           throw new ConflictException('Dispatch already exists for this order');
         }
@@ -112,17 +125,25 @@ export class DispatchService {
       }
 
       // Advance order status
-      await tx.update(Order, { id: dto.order_id }, { status: OrderStatus.DISPATCHED });
+      await tx.update(
+        Order,
+        { id: dto.order_id },
+        { status: OrderStatus.DISPATCHED },
+      );
 
       this.audit.log({
-        entity:    'dispatch',
+        entity: 'dispatch',
         entity_id: dispatch.id,
-        action:    'CREATED',
-        user_id:   userId,
-        meta:      { order_id: dto.order_id, transport_type: dto.transport_type },
+        action: 'CREATED',
+        user_id: userId,
+        meta: { order_id: dto.order_id, transport_type: dto.transport_type },
       });
 
-      this.eventEmitter.emit('dispatch.created', { id: dispatch.id, order_id: dto.order_id, user_id: userId ?? null });
+      this.eventEmitter.emit('dispatch.created', {
+        id: dispatch.id,
+        order_id: dto.order_id,
+        user_id: userId ?? null,
+      });
       return dispatch;
     });
   }
@@ -141,34 +162,43 @@ export class DispatchService {
     const dispatch = await this.dispatchRepo.manager.transaction(async (tx) => {
       const d = await tx.findOne(Dispatch, {
         where: { id: dto.dispatch_id },
-        lock:  { mode: 'pessimistic_write' },
+        lock: { mode: 'pessimistic_write' },
       });
-      if (!d) throw new NotFoundException(`Dispatch ${dto.dispatch_id} not found`);
+      if (!d)
+        throw new NotFoundException(`Dispatch ${dto.dispatch_id} not found`);
 
       // Idempotent: already delivered
       if (d.dispatch_status === DispatchStatus.DELIVERED) return d;
 
       d.dispatch_status = DispatchStatus.DELIVERED;
-      d.delivery_date   = new Date();
+      d.delivery_date = new Date();
       await tx.save(d);
 
       // Only advance to COMPLETED if the order is still DISPATCHED — a concurrent
       // cancellation must win; we must not silently overwrite CANCELLED with COMPLETED.
       const order = await tx.findOne(Order, { where: { id: d.order_id } });
       if (order?.status === OrderStatus.DISPATCHED) {
-        await tx.update(Order, { id: d.order_id }, { status: OrderStatus.COMPLETED });
+        await tx.update(
+          Order,
+          { id: d.order_id },
+          { status: OrderStatus.COMPLETED },
+        );
         orderUpdated = true;
       }
 
       this.audit.log({
-        entity:    'dispatch',
+        entity: 'dispatch',
         entity_id: d.id,
-        action:    'DELIVERED',
-        user_id:   userId,
-        meta:      { order_id: d.order_id, order_updated: orderUpdated },
+        action: 'DELIVERED',
+        user_id: userId,
+        meta: { order_id: d.order_id, order_updated: orderUpdated },
       });
 
-      this.eventEmitter.emit('dispatch.delivered', { id: d.id, order_id: d.order_id, user_id: userId ?? null });
+      this.eventEmitter.emit('dispatch.delivered', {
+        id: d.id,
+        order_id: d.order_id,
+        user_id: userId ?? null,
+      });
       return d;
     });
 

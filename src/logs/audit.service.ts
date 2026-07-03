@@ -4,12 +4,12 @@ import { Repository } from 'typeorm';
 import { AuditLog } from './entities/audit-log.entity';
 
 export interface AuditInput {
-  entity:      string;
-  entity_id:   number;
-  action:      string;
-  user_id?:    number;
+  entity: string;
+  entity_id: number;
+  action: string;
+  user_id?: number;
   actor_type?: 'USER' | 'SYSTEM';
-  meta?:       Record<string, any>;
+  meta?: Record<string, any>;
 }
 
 @Injectable()
@@ -29,15 +29,17 @@ export class AuditService {
           actor_type: input.actor_type ?? 'USER',
         }),
       )
-      .catch(err =>
-        this.logger.error(`Audit write failed action=${input.action}: ${err?.message}`),
+      .catch((err) =>
+        this.logger.error(
+          `Audit write failed action=${input.action}: ${err?.message}`,
+        ),
       );
   }
 
   async getByEntity(entity: string, entityId: number): Promise<AuditLog[]> {
     return this.repo.find({
-      where:  { entity, entity_id: entityId },
-      order:  { created_at: 'DESC' },
+      where: { entity, entity_id: entityId },
+      order: { created_at: 'DESC' },
     });
   }
 }

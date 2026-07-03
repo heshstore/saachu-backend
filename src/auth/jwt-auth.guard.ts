@@ -1,4 +1,8 @@
-import { Injectable, ExecutionContext, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  ExecutionContext,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
 import { IS_PUBLIC_KEY } from './public.decorator';
@@ -22,8 +26,12 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     if (isDev) {
       const req = context.switchToHttp().getRequest();
       const authHeader = req.headers?.authorization ?? null;
-      const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-      console.log(`[Auth] ${req.method} ${req.url} | header: ${authHeader ? 'present' : 'MISSING'} | token: ${token ? `${token.slice(0, 20)}...` : 'NONE'}`);
+      const token = authHeader?.startsWith('Bearer ')
+        ? authHeader.slice(7)
+        : null;
+      console.log(
+        `[Auth] ${req.method} ${req.url} | header: ${authHeader ? 'present' : 'MISSING'} | token: ${token ? `${token.slice(0, 20)}...` : 'NONE'}`,
+      );
     }
 
     return super.canActivate(context);
@@ -31,7 +39,8 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
 
   handleRequest(err: any, user: any, info: any) {
     if (err || !user) {
-      const reason = err?.message ?? info?.message ?? info?.name ?? 'Unknown reason';
+      const reason =
+        err?.message ?? info?.message ?? info?.name ?? 'Unknown reason';
       if (isDev) console.warn(`[Auth] JWT rejected — ${reason}`);
       throw err ?? new UnauthorizedException(reason);
     }

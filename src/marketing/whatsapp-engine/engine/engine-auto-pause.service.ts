@@ -24,7 +24,9 @@ export class EngineAutoPauseService {
 
   // Disconnect tracking for operational logs only — does not affect sending.
   recordDisconnect(numberId: string): void {
-    this.logger.log(`[HealthWarning] Disconnect recorded numberId=${numberId} (informational only)`);
+    this.logger.log(
+      `[HealthWarning] Disconnect recorded numberId=${numberId} (informational only)`,
+    );
   }
 
   @Interval(CHECK_INTERVAL_MS)
@@ -50,12 +52,23 @@ export class EngineAutoPauseService {
     for (const kind of warnings) {
       const event = kind as AuditEvent;
       const reason = this._warningReason(number.phone, kind, metrics);
-      this.logger.warn(`[RISK_NUMBER_WARNING] ${JSON.stringify({ numberId: number.id, phone: number.phone, event, reason })}`);
-      await this.auditService.log({ event, number_id: number.id, reason, metadata: { ...metrics, window_days: 7 } });
+      this.logger.warn(
+        `[RISK_NUMBER_WARNING] ${JSON.stringify({ numberId: number.id, phone: number.phone, event, reason })}`,
+      );
+      await this.auditService.log({
+        event,
+        number_id: number.id,
+        reason,
+        metadata: { ...metrics, window_days: 7 },
+      });
     }
   }
 
-  private _warningReason(phone: string, kind: string, m: { deliveryRatePct: number; failRatePct: number; total: number }): string {
+  private _warningReason(
+    phone: string,
+    kind: string,
+    m: { deliveryRatePct: number; failRatePct: number; total: number },
+  ): string {
     switch (kind) {
       case 'LOW_DELIVERY_WARNING':
         return `Number ${phone} 7d delivery ${m.deliveryRatePct}% or fail ${m.failRatePct}% (${m.total} sends)`;

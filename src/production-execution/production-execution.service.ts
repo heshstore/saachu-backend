@@ -1,5 +1,8 @@
 import {
-  Injectable, Logger, NotFoundException, BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, EntityManager } from 'typeorm';
@@ -28,7 +31,9 @@ export class ProductionExecutionService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  private async userLabel(userId?: number | null): Promise<{ id: number | null; name: string | null }> {
+  private async userLabel(
+    userId?: number | null,
+  ): Promise<{ id: number | null; name: string | null }> {
     if (!userId) return { id: null, name: null };
     const [u] = await this.dataSource.query(
       `SELECT id, name FROM "user" WHERE id = $1`,
@@ -58,11 +63,15 @@ export class ProductionExecutionService {
    * Stages are derived from BOQ lines in insertion order (sequence_no = row order).
    */
   async generateForOrder(orderId: number): Promise<void> {
-    this.logger.log(`[ProdExec] Generating execution jobs for order ${orderId}…`);
+    this.logger.log(
+      `[ProdExec] Generating execution jobs for order ${orderId}…`,
+    );
 
     const existing = await this.jobRepo.findOne({ where: { orderId } });
     if (existing) {
-      this.logger.debug(`[ProdExec] Order ${orderId}: execution jobs already exist — skipping`);
+      this.logger.debug(
+        `[ProdExec] Order ${orderId}: execution jobs already exist — skipping`,
+      );
       return;
     }
 
@@ -87,23 +96,14 @@ export class ProductionExecutionService {
     );
 
     if (!eligibleItems.length) {
-      this.logger.debug(`[ProdExec] Order ${orderId}: no MANUFACTURING items with active BOQ`);
+      this.logger.debug(
+        `[ProdExec] Order ${orderId}: no MANUFACTURING items with active BOQ`,
+      );
       return;
     }
 
     for (const item of eligibleItems) {
       const qty = Number(item.qty) || 1;
-
-      const job = this.jobRepo.create({
-        orderId,
-        orderItemId: item.orderItemId,
-        itemId:      item.itemId,
-        boqId:       item.boqId,
-        qty,
-        status:      'PENDING',
-        priority:    'MEDIUM',
-      });
-      const savedJob = await this.jobRepo.save(job);
 
       const boqLines: any[] = await this.dataSource.query(
         `SELECT id, department_id, qty_per_unit, consumption_type
@@ -112,6 +112,17 @@ export class ProductionExecutionService {
          ORDER BY id ASC`,
         [item.boqId],
       );
+
+      const job = this.jobRepo.create({
+        orderId,
+        orderItemId: item.orderItemId,
+        itemId: item.itemId,
+        boqId: item.boqId,
+        qty,
+        status: boqLines.length > 0 ? 'READY' : 'PENDING',
+        priority: 'MEDIUM',
+      });
+      const savedJob = await this.jobRepo.save(job);
 
       const seen = new Set<number>();
       const stages: ProductionJobStage[] = [];
@@ -124,10 +135,10 @@ export class ProductionExecutionService {
 
         const stage = this.stageRepo.create({
           productionJobId: savedJob.id,
-          departmentId:    deptId,
-          sequenceNo:      seq,
-          status:          seq === 1 ? 'READY' : 'PENDING',
-          plannedQty:      qty,
+          departmentId: deptId,
+          sequenceNo: seq,
+          status: seq === 1 ? 'READY' : 'PENDING',
+          plannedQty: qty,
         });
         stages.push(stage);
         seq++;
@@ -135,12 +146,11 @@ export class ProductionExecutionService {
 
       if (stages.length) {
         await this.stageRepo.save(stages);
-        await this.jobRepo.update(savedJob.id, { status: 'READY' });
       }
 
       this.logger.log(
         `[ProdExec] Order ${orderId}: job #${savedJob.id} created for item ${item.itemName} ` +
-        `with ${stages.length} stage(s)`,
+          `with ${stages.length} stage(s)`,
       );
     }
   }
@@ -152,11 +162,17 @@ export class ProductionExecutionService {
     const rows: any[] = await q(
       `SELECT id FROM warehouses WHERE active IS NOT FALSE ORDER BY id ASC LIMIT 1`,
     );
-    if (!rows.length) throw new BadRequestException('No warehouse configured — cannot run production inventory');
+    if (!rows.length)
+      throw new BadRequestException(
+        'No warehouse configured — cannot run production inventory',
+      );
     return Number(rows[0].id);
   }
 
-  private async stockByWarehouse(itemId: number, m?: EntityManager): Promise<{ warehouseId: number; qty: number }[]> {
+  private async stockByWarehouse(
+    itemId: number,
+    m?: EntityManager,
+  ): Promise<{ warehouseId: number; qty: number }[]> {
     const q = m?.query.bind(m) ?? this.dataSource.query.bind(this.dataSource);
     const rows: any[] = await q(
       `SELECT
@@ -173,10 +189,16 @@ export class ProductionExecutionService {
        ORDER BY qty DESC, t.warehouse_id ASC`,
       [itemId, EPS],
     );
-    return rows.map((r) => ({ warehouseId: Number(r.warehouseId), qty: Number(r.qty) }));
+    return rows.map((r) => ({
+      warehouseId: Number(r.warehouseId),
+      qty: Number(r.qty),
+    }));
   }
 
-  private async itemCostPrice(itemId: number, m?: EntityManager): Promise<number | null> {
+  private async itemCostPrice(
+    itemId: number,
+    m?: EntityManager,
+  ): Promise<number | null> {
     const q = m?.query.bind(m) ?? this.dataSource.query.bind(this.dataSource);
     const rows: any[] = await q(
       `SELECT cost_price::float AS cp FROM service_items WHERE id = $1`,
@@ -187,9 +209,15 @@ export class ProductionExecutionService {
     return Number.isFinite(v) && v > 0 ? v : null;
   }
 
-  private async orderItemQty(orderItemId: number, m?: EntityManager): Promise<number> {
+  private async orderItemQty(
+    orderItemId: number,
+    m?: EntityManager,
+  ): Promise<number> {
     const q = m?.query.bind(m) ?? this.dataSource.query.bind(this.dataSource);
-    const rows: any[] = await q(`SELECT qty::float AS q FROM order_item WHERE id = $1`, [orderItemId]);
+    const rows: any[] = await q(
+      `SELECT qty::float AS q FROM order_item WHERE id = $1`,
+      [orderItemId],
+    );
     if (!rows.length) return 1;
     const qn = Number(rows[0].q);
     return qn > 0 ? qn : 1;
@@ -243,7 +271,9 @@ export class ProductionExecutionService {
     return map;
   }
 
-  private async materialGateForNeedMap(needMap: Map<number, number>): Promise<MaterialGate> {
+  private async materialGateForNeedMap(
+    needMap: Map<number, number>,
+  ): Promise<MaterialGate> {
     let anyNeed = false;
     let anyShort = false;
     let anyPartial = false;
@@ -261,7 +291,10 @@ export class ProductionExecutionService {
     return 'OK';
   }
 
-  private async assertReservationGateAllowsStart(jobId: number, m?: EntityManager): Promise<void> {
+  private async assertReservationGateAllowsStart(
+    jobId: number,
+    m?: EntityManager,
+  ): Promise<void> {
     const q = m?.query.bind(m) ?? this.dataSource.query.bind(this.dataSource);
     const rows: any[] = await q(
       `SELECT raw_material_item_id AS "rawId",
@@ -277,7 +310,10 @@ export class ProductionExecutionService {
       const rq = Number(r.rq);
       const rs = Number(r.rs);
       if (rq > EPS && rs <= EPS) {
-        const nm: any[] = await q(`SELECT item_name FROM service_items WHERE id = $1`, [r.rawId]);
+        const nm: any[] = await q(
+          `SELECT item_name FROM service_items WHERE id = $1`,
+          [r.rawId],
+        );
         shorts.push(nm[0]?.item_name ?? `Item #${r.rawId}`);
       }
     }
@@ -301,9 +337,10 @@ export class ProductionExecutionService {
       const balances = await this.stockByWarehouse(rawId, m);
       const totalAvail = balances.reduce((s, b) => s + b.qty, 0);
       const reserved = Math.min(required, totalAvail);
-      const warehouseId = reserved > EPS
-        ? (balances.sort((a, b) => b.qty - a.qty)[0]?.warehouseId ?? wh0)
-        : wh0;
+      const warehouseId =
+        reserved > EPS
+          ? (balances.sort((a, b) => b.qty - a.qty)[0]?.warehouseId ?? wh0)
+          : wh0;
       let st = 'RESERVED';
       if (reserved <= EPS) st = 'PARTIAL';
       else if (reserved + EPS < required) st = 'PARTIAL';
@@ -372,18 +409,19 @@ export class ProductionExecutionService {
           const lineValue = actualRate != null ? outQty * actualRate : null;
 
           const tx = m.create(InventoryTransaction, {
-            itemId:          rawId,
-            warehouseId:     wh,
+            itemId: rawId,
+            warehouseId: wh,
             transactionType: 'PRODUCTION_CONSUMPTION',
-            direction:       'OUT',
-            qty:             outQty,
-            unit:            'PCS',
-            rate:            actualRate,
-            referenceType:   'PRODUCTION_JOB',
-            referenceId:     job.id,
-            notes:           `Stage ${stage.id}; planned BOQ ${theory.toFixed(4)}; with wastage ${withW.toFixed(4)}` +
+            direction: 'OUT',
+            qty: outQty,
+            unit: 'PCS',
+            rate: actualRate,
+            referenceType: 'PRODUCTION_JOB',
+            referenceId: job.id,
+            notes:
+              `Stage ${stage.id}; planned BOQ ${theory.toFixed(4)}; with wastage ${withW.toFixed(4)}` +
               (wastageRemarks ? `; ${wastageRemarks}` : ''),
-            createdBy:       userId ?? null,
+            createdBy: userId ?? null,
           });
           await m.save(tx);
 
@@ -417,19 +455,21 @@ export class ProductionExecutionService {
         }
         const outQty = Math.min(remaining, pick.qty);
         const actualRate = plannedRate ?? null;
-        await m.save(m.create(InventoryTransaction, {
-          itemId:          rawId,
-          warehouseId:     pick.warehouseId,
-          transactionType: 'PRODUCTION_CONSUMPTION',
-          direction:       'OUT',
-          qty:             outQty,
-          unit:            'PCS',
-          rate:            actualRate,
-          referenceType:   'PRODUCTION_JOB',
-          referenceId:     job.id,
-          notes:           `Stage ${stage.id} (beyond reservation); planned ${theory.toFixed(4)}`,
-          createdBy:       userId ?? null,
-        }));
+        await m.save(
+          m.create(InventoryTransaction, {
+            itemId: rawId,
+            warehouseId: pick.warehouseId,
+            transactionType: 'PRODUCTION_CONSUMPTION',
+            direction: 'OUT',
+            qty: outQty,
+            unit: 'PCS',
+            rate: actualRate,
+            referenceType: 'PRODUCTION_JOB',
+            referenceId: job.id,
+            notes: `Stage ${stage.id} (beyond reservation); planned ${theory.toFixed(4)}`,
+            createdBy: userId ?? null,
+          }),
+        );
       }
     }
   }
@@ -451,24 +491,31 @@ export class ProductionExecutionService {
        LIMIT 1`,
       [job.id],
     );
-    const warehouseId = whRows.length ? Number(whRows[0].wid) : await this.defaultWarehouseId(m);
+    const warehouseId = whRows.length
+      ? Number(whRows[0].wid)
+      : await this.defaultWarehouseId(m);
     const rate = await this.itemCostPrice(job.itemId, m);
-    await m.save(m.create(InventoryTransaction, {
-      itemId:          job.itemId,
-      warehouseId,
-      transactionType: 'FG_PRODUCTION_IN',
-      direction:       'IN',
-      qty,
-      unit:            'PCS',
-      rate,
-      referenceType:   'PRODUCTION_JOB',
-      referenceId:     job.id,
-      notes:           `Final stage ${stage.id} FG receipt`,
-      createdBy:       userId ?? null,
-    }));
+    await m.save(
+      m.create(InventoryTransaction, {
+        itemId: job.itemId,
+        warehouseId,
+        transactionType: 'FG_PRODUCTION_IN',
+        direction: 'IN',
+        qty,
+        unit: 'PCS',
+        rate,
+        referenceType: 'PRODUCTION_JOB',
+        referenceId: job.id,
+        notes: `Final stage ${stage.id} FG receipt`,
+        createdBy: userId ?? null,
+      }),
+    );
   }
 
-  private async cancelUnusedReservations(jobId: number, m: EntityManager): Promise<void> {
+  private async cancelUnusedReservations(
+    jobId: number,
+    m: EntityManager,
+  ): Promise<void> {
     await m.query(
       `UPDATE production_material_reservations
        SET status = 'CANCELLED'
@@ -491,7 +538,10 @@ export class ProductionExecutionService {
     return r?.name ?? null;
   }
 
-  async startStage(stageId: number, userId?: number): Promise<ProductionJobStage> {
+  async startStage(
+    stageId: number,
+    userId?: number,
+  ): Promise<ProductionJobStage> {
     const stage = await this.dataSource.transaction(async (m) => {
       const stage = await m.findOne(ProductionJobStage, {
         where: { id: stageId },
@@ -505,7 +555,9 @@ export class ProductionExecutionService {
         );
       }
       if (stage.job.status === 'CANCELLED') {
-        throw new BadRequestException('Cannot start a stage on a cancelled job');
+        throw new BadRequestException(
+          'Cannot start a stage on a cancelled job',
+        );
       }
 
       const orderLineQty = await this.orderItemQty(stage.job.orderItemId, m);
@@ -521,7 +573,7 @@ export class ProductionExecutionService {
         await this.assertReservationGateAllowsStart(stage.job.id, m);
       }
 
-      stage.status    = 'WORKING';
+      stage.status = 'WORKING';
       stage.startedAt = stage.startedAt ?? new Date();
       if (userId) stage.assignedUserId = userId;
       await m.save(stage);
@@ -529,7 +581,7 @@ export class ProductionExecutionService {
       const js = stage.job.status as string;
       if (js !== 'CANCELLED' && js !== 'COMPLETED') {
         await m.update(ProductionExecutionJob, stage.productionJobId, {
-          status:    'IN_PROGRESS' as any,
+          status: 'IN_PROGRESS' as any,
           startedAt: stage.job.startedAt ?? new Date(),
         });
       }
@@ -549,16 +601,22 @@ export class ProductionExecutionService {
   }
 
   /** WORKING → ON_HOLD. Records hold start time and reason. */
-  async holdStage(stageId: number, reason?: string, remarks?: string): Promise<ProductionJobStage> {
+  async holdStage(
+    stageId: number,
+    reason?: string,
+    remarks?: string,
+  ): Promise<ProductionJobStage> {
     const stage = await this.stageRepo.findOne({ where: { id: stageId } });
     if (!stage) throw new NotFoundException(`Stage ${stageId} not found`);
     if (stage.status !== 'WORKING') {
-      throw new BadRequestException(`Only WORKING stages can be put on hold. Current: ${stage.status}`);
+      throw new BadRequestException(
+        `Only WORKING stages can be put on hold. Current: ${stage.status}`,
+      );
     }
-    stage.status       = 'ON_HOLD';
+    stage.status = 'ON_HOLD';
     stage.holdStartedAt = new Date();
-    if (reason)  stage.holdReason = reason;
-    if (remarks) stage.remarks    = remarks;
+    if (reason) stage.holdReason = reason;
+    if (remarks) stage.remarks = remarks;
     return this.stageRepo.save(stage);
   }
 
@@ -567,13 +625,16 @@ export class ProductionExecutionService {
     const stage = await this.stageRepo.findOne({ where: { id: stageId } });
     if (!stage) throw new NotFoundException(`Stage ${stageId} not found`);
     if (stage.status !== 'ON_HOLD') {
-      throw new BadRequestException(`Only ON_HOLD stages can be resumed. Current: ${stage.status}`);
+      throw new BadRequestException(
+        `Only ON_HOLD stages can be resumed. Current: ${stage.status}`,
+      );
     }
 
     if (stage.holdStartedAt) {
-      const holdMins = (Date.now() - new Date(stage.holdStartedAt).getTime()) / 60_000;
+      const holdMins =
+        (Date.now() - new Date(stage.holdStartedAt).getTime()) / 60_000;
       stage.totalHoldMinutes = (stage.totalHoldMinutes ?? 0) + holdMins;
-      stage.holdStartedAt    = null;
+      stage.holdStartedAt = null;
     }
     stage.status = 'WORKING';
     return this.stageRepo.save(stage);
@@ -587,7 +648,7 @@ export class ProductionExecutionService {
   async stopStage(
     stageId: number,
     completedQty: number,
-    rejectedQty  = 0,
+    rejectedQty = 0,
     remarks?: string,
     userId?: number,
     wastageRemarks?: string,
@@ -599,9 +660,12 @@ export class ProductionExecutionService {
       });
       if (!stage) throw new NotFoundException(`Stage ${stageId} not found`);
       if (stage.status !== 'WORKING') {
-        throw new BadRequestException(`Only WORKING stages can be stopped. Current: ${stage.status}`);
+        throw new BadRequestException(
+          `Only WORKING stages can be stopped. Current: ${stage.status}`,
+        );
       }
-      if (completedQty <= 0) throw new BadRequestException('completedQty must be > 0');
+      if (completedQty <= 0)
+        throw new BadRequestException('completedQty must be > 0');
       if (completedQty + rejectedQty > stage.plannedQty + EPS) {
         throw new BadRequestException(
           `completedQty + rejectedQty (${completedQty + rejectedQty}) exceeds plannedQty (${stage.plannedQty})`,
@@ -610,19 +674,30 @@ export class ProductionExecutionService {
 
       const throughput = completedQty + rejectedQty;
 
-      await this.consumeDepartmentMaterials(m, stage.job, stage, throughput, userId, wastageRemarks);
+      await this.consumeDepartmentMaterials(
+        m,
+        stage.job,
+        stage,
+        throughput,
+        userId,
+        wastageRemarks,
+      );
 
       const now = new Date();
-      stage.status       = 'STOPPED';
+      stage.status = 'STOPPED';
       stage.completedQty = completedQty;
-      stage.rejectedQty  = rejectedQty;
-      stage.stoppedAt    = now;
+      stage.rejectedQty = rejectedQty;
+      stage.stoppedAt = now;
       if (remarks) stage.remarks = remarks;
       if (wastageRemarks) stage.wastageRemarks = wastageRemarks;
 
       if (stage.startedAt) {
-        const elapsed = (now.getTime() - new Date(stage.startedAt).getTime()) / 60_000;
-        stage.actualWorkingMinutes = Math.max(0, elapsed - (stage.totalHoldMinutes ?? 0));
+        const elapsed =
+          (now.getTime() - new Date(stage.startedAt).getTime()) / 60_000;
+        stage.actualWorkingMinutes = Math.max(
+          0,
+          elapsed - (stage.totalHoldMinutes ?? 0),
+        );
       }
 
       return m.save(stage);
@@ -644,7 +719,10 @@ export class ProductionExecutionService {
    * Advances the next stage to READY, or marks the job COMPLETED if this was the last stage.
    * Final hand-off creates FG stock IN (inventory_transactions).
    */
-  async moveNext(stageId: number, userId?: number): Promise<ProductionJobStage> {
+  async moveNext(
+    stageId: number,
+    userId?: number,
+  ): Promise<ProductionJobStage> {
     let completedJobId: number | null = null;
     const stage = await this.dataSource.transaction(async (m) => {
       const stage = await m.findOne(ProductionJobStage, {
@@ -653,42 +731,50 @@ export class ProductionExecutionService {
       });
       if (!stage) throw new NotFoundException(`Stage ${stageId} not found`);
       if (stage.status !== 'STOPPED') {
-        throw new BadRequestException(`Only STOPPED stages can be moved to the next department. Current: ${stage.status}`);
+        throw new BadRequestException(
+          `Only STOPPED stages can be moved to the next department. Current: ${stage.status}`,
+        );
       }
 
       const now = new Date();
-      stage.status      = 'COMPLETED';
+      stage.status = 'COMPLETED';
       stage.completedAt = now;
-      stage.movedAt     = now;
+      stage.movedAt = now;
       if (userId) stage.movedBy = userId;
       await m.save(stage);
 
       const nextStage = await m.findOne(ProductionJobStage, {
         where: {
           productionJobId: stage.productionJobId,
-          sequenceNo:      stage.sequenceNo + 1,
+          sequenceNo: stage.sequenceNo + 1,
         },
       });
 
       if (nextStage) {
         await m.update(ProductionJobStage, nextStage.id, { status: 'READY' });
-        this.logger.log(`[ProdExec] Stage ${stageId} moved — dept ${nextStage.departmentId} is now READY`);
+        this.logger.log(
+          `[ProdExec] Stage ${stageId} moved — dept ${nextStage.departmentId} is now READY`,
+        );
       } else {
         await this.insertFgProductionIn(m, stage.job, stage, userId);
         await m.update(ProductionExecutionJob, stage.productionJobId, {
-          status:       'COMPLETED' as any,
-          completedAt:  now,
+          status: 'COMPLETED' as any,
+          completedAt: now,
           completedQty: stage.completedQty,
-          rejectedQty:  stage.rejectedQty,
+          rejectedQty: stage.rejectedQty,
         });
-        this.logger.log(`[ProdExec] Job ${stage.productionJobId} fully COMPLETED`);
+        this.logger.log(
+          `[ProdExec] Job ${stage.productionJobId} fully COMPLETED`,
+        );
         completedJobId = stage.productionJobId;
       }
 
       return stage;
     });
     if (completedJobId != null) {
-      this.eventEmitter.emit('production.job.completed', { jobId: completedJobId });
+      this.eventEmitter.emit('production.job.completed', {
+        jobId: completedJobId,
+      });
     }
     const u = await this.userLabel(userId);
     const dept = await this.deptNameForStage(stageId);
@@ -725,7 +811,8 @@ export class ProductionExecutionService {
           `Only WORKING stages can be completed. Current status: ${stage.status}`,
         );
       }
-      if (completedQty <= 0) throw new BadRequestException('completedQty must be > 0');
+      if (completedQty <= 0)
+        throw new BadRequestException('completedQty must be > 0');
       if (completedQty + rejectedQty > stage.plannedQty + EPS) {
         throw new BadRequestException(
           `completedQty + rejectedQty (${completedQty + rejectedQty}) exceeds plannedQty (${stage.plannedQty})`,
@@ -738,33 +825,45 @@ export class ProductionExecutionService {
           `SELECT COUNT(*)::int AS c FROM production_material_reservations WHERE production_job_id = $1`,
           [stage.job.id],
         );
-        if (!Number(cnt[0]?.c)) await this.createReservationsForJob(stage.job, orderLineQty, m);
+        if (!Number(cnt[0]?.c))
+          await this.createReservationsForJob(stage.job, orderLineQty, m);
         await this.assertReservationGateAllowsStart(stage.job.id, m);
       }
 
       const throughput = completedQty + rejectedQty;
-      await this.consumeDepartmentMaterials(m, stage.job, stage, throughput, userId, wastageRemarks);
+      await this.consumeDepartmentMaterials(
+        m,
+        stage.job,
+        stage,
+        throughput,
+        userId,
+        wastageRemarks,
+      );
 
       const now = new Date();
-      stage.status       = 'COMPLETED';
+      stage.status = 'COMPLETED';
       stage.completedQty = completedQty;
-      stage.rejectedQty  = rejectedQty;
-      stage.completedAt  = now;
-      stage.stoppedAt    = now;
+      stage.rejectedQty = rejectedQty;
+      stage.completedAt = now;
+      stage.stoppedAt = now;
       if (userId) stage.movedBy = userId;
       stage.movedAt = now;
       if (remarks) stage.remarks = remarks;
       if (wastageRemarks) stage.wastageRemarks = wastageRemarks;
       if (stage.startedAt) {
-        const elapsed = (now.getTime() - new Date(stage.startedAt).getTime()) / 60_000;
-        stage.actualWorkingMinutes = Math.max(0, elapsed - (stage.totalHoldMinutes ?? 0));
+        const elapsed =
+          (now.getTime() - new Date(stage.startedAt).getTime()) / 60_000;
+        stage.actualWorkingMinutes = Math.max(
+          0,
+          elapsed - (stage.totalHoldMinutes ?? 0),
+        );
       }
       await m.save(stage);
 
       const nextStage = await m.findOne(ProductionJobStage, {
         where: {
           productionJobId: stage.productionJobId,
-          sequenceNo:      stage.sequenceNo + 1,
+          sequenceNo: stage.sequenceNo + 1,
         },
       });
 
@@ -773,24 +872,31 @@ export class ProductionExecutionService {
       } else {
         await this.insertFgProductionIn(m, stage.job, stage, userId);
         await m.update(ProductionExecutionJob, stage.productionJobId, {
-          status:       'COMPLETED' as any,
-          completedAt:  now,
+          status: 'COMPLETED' as any,
+          completedAt: now,
           completedQty: completedQty,
-          rejectedQty:  rejectedQty,
+          rejectedQty: rejectedQty,
         });
-        this.logger.log(`[ProdExec] Job ${stage.productionJobId} fully COMPLETED`);
+        this.logger.log(
+          `[ProdExec] Job ${stage.productionJobId} fully COMPLETED`,
+        );
         completedJobId = stage.productionJobId;
       }
 
       return stage;
     });
     if (completedJobId != null) {
-      this.eventEmitter.emit('production.job.completed', { jobId: completedJobId });
+      this.eventEmitter.emit('production.job.completed', {
+        jobId: completedJobId,
+      });
     }
     return stage;
   }
 
-  async cancelStage(stageId: number, remarks?: string): Promise<ProductionJobStage> {
+  async cancelStage(
+    stageId: number,
+    remarks?: string,
+  ): Promise<ProductionJobStage> {
     return this.dataSource.transaction(async (m) => {
       const stage = await m.findOne(ProductionJobStage, {
         where: { id: stageId },
@@ -810,21 +916,26 @@ export class ProductionExecutionService {
 
       const activeStages = await m.count(ProductionJobStage, {
         where: [
-          { productionJobId: stage.productionJobId, status: 'PENDING'  },
-          { productionJobId: stage.productionJobId, status: 'READY'    },
-          { productionJobId: stage.productionJobId, status: 'WORKING'  },
-          { productionJobId: stage.productionJobId, status: 'ON_HOLD'  },
-          { productionJobId: stage.productionJobId, status: 'STOPPED'  },
+          { productionJobId: stage.productionJobId, status: 'PENDING' },
+          { productionJobId: stage.productionJobId, status: 'READY' },
+          { productionJobId: stage.productionJobId, status: 'WORKING' },
+          { productionJobId: stage.productionJobId, status: 'ON_HOLD' },
+          { productionJobId: stage.productionJobId, status: 'STOPPED' },
         ],
       });
       if (activeStages === 0) {
-        await m.update(ProductionExecutionJob, stage.productionJobId, { status: 'CANCELLED' as any });
+        await m.update(ProductionExecutionJob, stage.productionJobId, {
+          status: 'CANCELLED' as any,
+        });
       }
       return stage;
     });
   }
 
-  async assignStage(stageId: number, userId: number): Promise<ProductionJobStage> {
+  async assignStage(
+    stageId: number,
+    userId: number,
+  ): Promise<ProductionJobStage> {
     const stage = await this.stageRepo.findOne({ where: { id: stageId } });
     if (!stage) throw new NotFoundException(`Stage ${stageId} not found`);
     stage.assignedUserId = userId;
@@ -833,19 +944,35 @@ export class ProductionExecutionService {
 
   // ── Query APIs ────────────────────────────────────────────────────────────────
 
-  async findJobs(filters: {
-    status?:       string;
-    priority?:     string;
-    departmentId?: number;
-    orderId?:      number;
-  } = {}): Promise<any[]> {
+  async findJobs(
+    filters: {
+      status?: string;
+      priority?: string;
+      departmentId?: number;
+      orderId?: number;
+    } = {},
+  ): Promise<any[]> {
     const conds: string[] = [];
-    const params: any[]   = [];
+    const params: any[] = [];
 
-    if (filters.status)       { params.push(filters.status);       conds.push(`ej.status   = $${params.length}`); }
-    if (filters.priority)     { params.push(filters.priority);     conds.push(`ej.priority = $${params.length}`); }
-    if (filters.orderId)      { params.push(filters.orderId);      conds.push(`ej.order_id = $${params.length}`); }
-    if (filters.departmentId) { params.push(filters.departmentId); conds.push(`EXISTS (SELECT 1 FROM production_job_stages pjs WHERE pjs.production_job_id = ej.id AND pjs.department_id = $${params.length})`); }
+    if (filters.status) {
+      params.push(filters.status);
+      conds.push(`ej.status   = $${params.length}`);
+    }
+    if (filters.priority) {
+      params.push(filters.priority);
+      conds.push(`ej.priority = $${params.length}`);
+    }
+    if (filters.orderId) {
+      params.push(filters.orderId);
+      conds.push(`ej.order_id = $${params.length}`);
+    }
+    if (filters.departmentId) {
+      params.push(filters.departmentId);
+      conds.push(
+        `EXISTS (SELECT 1 FROM production_job_stages pjs WHERE pjs.production_job_id = ej.id AND pjs.department_id = $${params.length})`,
+      );
+    }
 
     const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
 
@@ -898,42 +1025,49 @@ export class ProductionExecutionService {
       if (!byRaw.has(rid)) {
         byRaw.set(rid, {
           rawMaterialItemId: rid,
-          rawItemName:       r.rawItemName,
-          rawItemCode:       r.rawItemCode,
-          requiredQty:       0,
-          reservedQty:       0,
-          consumedQty:       0,
-          remainingQty:      0,
-          status:            r.status,
-          warehouseName:     r.warehouseName,
+          rawItemName: r.rawItemName,
+          rawItemCode: r.rawItemCode,
+          requiredQty: 0,
+          reservedQty: 0,
+          consumedQty: 0,
+          remainingQty: 0,
+          status: r.status,
+          warehouseName: r.warehouseName,
         });
       }
       const agg = byRaw.get(rid)!;
-      agg.requiredQty  = Math.max(agg.requiredQty, Number(r.required_qty));
+      agg.requiredQty = Math.max(agg.requiredQty, Number(r.required_qty));
       agg.reservedQty += Number(r.reserved_qty);
       agg.consumedQty += Number(r.consumed_qty);
     }
     for (const agg of byRaw.values()) {
-      agg.remainingQty = Math.max(0, Number(agg.requiredQty) - Number(agg.consumedQty));
+      agg.remainingQty = Math.max(
+        0,
+        Number(agg.requiredQty) - Number(agg.consumedQty),
+      );
     }
 
     let gate: MaterialGate = 'OK';
     if (byRaw.size) {
       for (const agg of byRaw.values()) {
         if (agg.requiredQty > EPS && agg.reservedQty <= EPS) gate = 'SHORTAGE';
-        else if (agg.reservedQty + EPS < agg.requiredQty && gate !== 'SHORTAGE') gate = 'PARTIAL';
+        else if (agg.reservedQty + EPS < agg.requiredQty && gate !== 'SHORTAGE')
+          gate = 'PARTIAL';
       }
     } else {
       const pseudoJob = {
         id: jobId,
-        orderId:      jobRow.order_id,
-        orderItemId:  jobRow.order_item_id,
-        itemId:       jobRow.item_id,
-        boqId:        jobRow.boq_id,
-        qty:          Number(jobRow.qty),
+        orderId: jobRow.order_id,
+        orderItemId: jobRow.order_item_id,
+        itemId: jobRow.item_id,
+        boqId: jobRow.boq_id,
+        qty: Number(jobRow.qty),
       } as ProductionExecutionJob;
       gate = await this.materialGateForNeedMap(
-        await this.jobMaterialRequirements(pseudoJob, await this.orderItemQty(jobRow.order_item_id)),
+        await this.jobMaterialRequirements(
+          pseudoJob,
+          await this.orderItemQty(jobRow.order_item_id),
+        ),
       );
     }
 
@@ -942,7 +1076,7 @@ export class ProductionExecutionService {
     return {
       gate,
       reservations,
-      byRaw:         [...byRaw.values()],
+      byRaw: [...byRaw.values()],
       fgProducedQty: fgProduced,
     };
   }
@@ -968,7 +1102,8 @@ export class ProductionExecutionService {
        WHERE ej.id = $1`,
       [id],
     );
-    if (!rows.length) throw new NotFoundException(`Execution job ${id} not found`);
+    if (!rows.length)
+      throw new NotFoundException(`Execution job ${id} not found`);
 
     const job = rows[0];
 
@@ -994,7 +1129,9 @@ export class ProductionExecutionService {
   private async applyMaterialGateToQueueRows(rows: any[]): Promise<void> {
     for (const row of rows) {
       if (row.status === 'READY') {
-        const orderLineQty = await this.orderItemQty(Number(row.orderItemId ?? row.order_item_id));
+        const orderLineQty = await this.orderItemQty(
+          Number(row.orderItemId ?? row.order_item_id),
+        );
         const need = await this.deptMaterialNeedMap(
           Number(row.boqId ?? row.boq_id),
           Number(row.department_id),
@@ -1072,7 +1209,8 @@ export class ProductionExecutionService {
 
   async updateJobPriority(jobId: number, priority: string): Promise<any> {
     const valid = ['LOW', 'MEDIUM', 'HIGH', 'URGENT'];
-    if (!valid.includes(priority)) throw new BadRequestException(`Invalid priority: ${priority}`);
+    if (!valid.includes(priority))
+      throw new BadRequestException(`Invalid priority: ${priority}`);
     const job = await this.jobRepo.findOne({ where: { id: jobId } });
     if (!job) throw new NotFoundException(`Job ${jobId} not found`);
     await this.jobRepo.update(jobId, { priority: priority as any });

@@ -28,15 +28,18 @@ export type AuthoritativeMetrics = {
 };
 
 export const METRIC_SOURCES = {
-  SENT:            'whatsapp_message_logs — status IN (sent,delivered,read,replied), sent_at >= since',
-  DELIVERED:       'whatsapp_message_logs — status IN (delivered,read,replied), sent_at >= since',
-  READ:            'whatsapp_message_logs — status IN (read,replied), sent_at >= since',
-  REPLIED:         'whatsapp_replies — received_at >= since',
-  LEADS:           'leads — source=WHATSAPP, created_at >= since',
-  FAILED:          'whatsapp_message_logs — status=failed, created_at >= since',
-  SKIPPED:         'whatsapp_message_logs — status=skipped, NOT INVALID_WA_NUMBER, created_at >= since',
-  NOT_ON_WHATSAPP: 'whatsapp_message_logs — status=skipped, INVALID_WA_NUMBER, created_at >= since',
-  QUEUE_PENDING:   'whatsapp_message_queue — status=pending',
+  SENT: 'whatsapp_message_logs — status IN (sent,delivered,read,replied), sent_at >= since',
+  DELIVERED:
+    'whatsapp_message_logs — status IN (delivered,read,replied), sent_at >= since',
+  READ: 'whatsapp_message_logs — status IN (read,replied), sent_at >= since',
+  REPLIED: 'whatsapp_replies — received_at >= since',
+  LEADS: 'leads — source=WHATSAPP, created_at >= since',
+  FAILED: 'whatsapp_message_logs — status=failed, created_at >= since',
+  SKIPPED:
+    'whatsapp_message_logs — status=skipped, NOT INVALID_WA_NUMBER, created_at >= since',
+  NOT_ON_WHATSAPP:
+    'whatsapp_message_logs — status=skipped, INVALID_WA_NUMBER, created_at >= since',
+  QUEUE_PENDING: 'whatsapp_message_queue — status=pending',
 } as const;
 
 export function startOfToday(): Date {
@@ -72,14 +75,18 @@ export async function fetchAuthoritativeMetrics(
   const params: unknown[] = [since];
   const logScope = scopeClause(scope, 'l', params);
 
-  const row = await ds.query<{
-    sent: string;
-    delivered: string;
-    read: string;
-    failed: string;
-    skipped_raw: string;
-    not_on_whatsapp: string;
-  }[]>(`
+  const row = await ds
+    .query<
+      {
+        sent: string;
+        delivered: string;
+        read: string;
+        failed: string;
+        skipped_raw: string;
+        not_on_whatsapp: string;
+      }[]
+    >(
+      `
     SELECT
       (SELECT COUNT(*)::int FROM whatsapp_message_logs l
         WHERE l.sent_at >= $1
@@ -105,9 +112,20 @@ export async function fetchAuthoritativeMetrics(
             COALESCE(l.message_body, '') ILIKE '%INVALID_WA_NUMBER%'
             OR COALESCE(l.message_body, '') ILIKE '%NOT_ON_WHATSAPP%'
           )${logScope}) AS not_on_whatsapp
-  `, params).then(r => r[0] ?? {
-    sent: '0', delivered: '0', read: '0', failed: '0', skipped_raw: '0', not_on_whatsapp: '0',
-  });
+  `,
+      params,
+    )
+    .then(
+      (r) =>
+        r[0] ?? {
+          sent: '0',
+          delivered: '0',
+          read: '0',
+          failed: '0',
+          skipped_raw: '0',
+          not_on_whatsapp: '0',
+        },
+    );
 
   const replyParams: unknown[] = [since];
   let replyScope = '';
@@ -188,15 +206,15 @@ export async function fetchAuthoritativeMetrics(
 
   return {
     sent,
-    delivered:       parseInt(row.delivered ?? '0', 10),
-    read:            parseInt(row.read ?? '0', 10),
-    replied:         parseInt(repliedRows[0]?.cnt ?? '0', 10),
-    leads:           parseInt(leadRows[0]?.cnt ?? '0', 10),
+    delivered: parseInt(row.delivered ?? '0', 10),
+    read: parseInt(row.read ?? '0', 10),
+    replied: parseInt(repliedRows[0]?.cnt ?? '0', 10),
+    leads: parseInt(leadRows[0]?.cnt ?? '0', 10),
     failed,
     skipped,
     not_on_whatsapp: notOnWhatsapp,
-    queue_pending:   queuePending,
-    total:           sent + failed + skipped + notOnWhatsapp,
+    queue_pending: queuePending,
+    total: sent + failed + skipped + notOnWhatsapp,
   };
 }
 
@@ -206,17 +224,20 @@ export async function fetchAuthoritativeMetrics(
  */
 export function rollupCumulativeFromStatusRows(
   raw: Record<string, number>,
-): Pick<AuthoritativeMetrics, 'sent' | 'delivered' | 'read' | 'replied' | 'failed' | 'skipped'> {
-  const replied   = raw['replied']   ?? 0;
-  const read      = (raw['read']     ?? 0) + replied;
+): Pick<
+  AuthoritativeMetrics,
+  'sent' | 'delivered' | 'read' | 'replied' | 'failed' | 'skipped'
+> {
+  const replied = raw['replied'] ?? 0;
+  const read = (raw['read'] ?? 0) + replied;
   const delivered = (raw['delivered'] ?? 0) + read;
-  const sent      = (raw['sent']     ?? 0) + delivered;
+  const sent = (raw['sent'] ?? 0) + delivered;
   return {
     sent,
     delivered,
     read,
     replied,
-    failed:  raw['failed']  ?? 0,
+    failed: raw['failed'] ?? 0,
     skipped: raw['skipped'] ?? 0,
   };
 }

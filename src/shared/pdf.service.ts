@@ -1,22 +1,32 @@
-import { Injectable, Logger, InternalServerErrorException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
 import { appConfig } from '../config/config';
 
 // pdfmake v0.3 exports a singleton instance — not a constructor class.
-// eslint-disable-next-line @typescript-eslint/no-var-requires
+
 const pdfmake = require('pdfmake');
 
 // Absolute paths to TTF files shipped inside the pdfmake package.
 // process.cwd() is the project root (backend/), stable across src/ and dist/.
-const FONT_DIR = path.join(process.cwd(), 'node_modules', 'pdfmake', 'fonts', 'Roboto');
+const FONT_DIR = path.join(
+  process.cwd(),
+  'node_modules',
+  'pdfmake',
+  'fonts',
+  'Roboto',
+);
 
 try {
   pdfmake.setFonts({
     Roboto: {
-      normal:      path.join(FONT_DIR, 'Roboto-Regular.ttf'),
-      bold:        path.join(FONT_DIR, 'Roboto-Medium.ttf'),
-      italics:     path.join(FONT_DIR, 'Roboto-Italic.ttf'),
+      normal: path.join(FONT_DIR, 'Roboto-Regular.ttf'),
+      bold: path.join(FONT_DIR, 'Roboto-Medium.ttf'),
+      italics: path.join(FONT_DIR, 'Roboto-Italic.ttf'),
       bolditalics: path.join(FONT_DIR, 'Roboto-MediumItalic.ttf'),
     },
   });
@@ -28,13 +38,23 @@ try {
 
 const SLATE_OWN = '#64748b';
 
-function ownershipPdfStack(data: any, opts?: { showPhone?: boolean; approvalPending?: boolean }) {
+function ownershipPdfStack(
+  data: any,
+  opts?: { showPhone?: boolean; approvalPending?: boolean },
+) {
   const lines: any[] = [];
   const salesName = data?.salesman_name || data?.sales_person;
   if (salesName) {
-    const parts = [salesName, data?.salesman_role, opts?.showPhone !== false ? data?.salesman_phone : null].filter(Boolean);
+    const parts = [
+      salesName,
+      data?.salesman_role,
+      opts?.showPhone !== false ? data?.salesman_phone : null,
+    ].filter(Boolean);
     lines.push({
-      text: [{ text: 'Sales     ', bold: true, color: SLATE_OWN }, parts.join(' · ')],
+      text: [
+        { text: 'Sales     ', bold: true, color: SLATE_OWN },
+        parts.join(' · '),
+      ],
       fontSize: 8,
     });
   }
@@ -48,7 +68,10 @@ function ownershipPdfStack(data: any, opts?: { showPhone?: boolean; approvalPend
     });
   } else if (opts?.approvalPending) {
     lines.push({
-      text: [{ text: 'Approved  ', bold: true, color: SLATE_OWN }, 'Pending Approval'],
+      text: [
+        { text: 'Approved  ', bold: true, color: SLATE_OWN },
+        'Pending Approval',
+      ],
       fontSize: 8,
       italics: true,
       color: '#b45309',
@@ -76,854 +99,975 @@ export class PdfService {
     return dir;
   }
 
+  private resolveStaticImage(filename: string): string | null {
+    const p = path.join(process.cwd(), 'static', filename);
+    return fs.existsSync(p) ? p : null;
+  }
+
+  /**
+   * pdfmake can't embed a remote URL directly — it needs a local file path
+   * or a base64 data URI. Fetches the item-master product photo and inlines
+   * it; returns null (falling back to the placeholder box) on any failure
+   * so a broken/slow image never breaks PDF generation.
+   */
+  private async fetchImageDataUri(url: string): Promise<string | null> {
+    if (!url) return null;
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+      if (!res.ok) return null;
+      const contentType = res.headers.get('content-type') || '';
+      if (!contentType.startsWith('image/')) return null;
+      const buf = Buffer.from(await res.arrayBuffer());
+      return `data:${contentType};base64,${buf.toString('base64')}`;
+    } catch (err: any) {
+      this.logger.warn(`[PDF_IMAGE_FETCH_FAILED] ${url}: ${err?.message}`);
+      return null;
+    }
+  }
+
+  /** Batch-resolves a set of item photo URLs to data URIs, deduping repeats. */
+  private async fetchImageMap(
+    urls: (string | null | undefined)[],
+  ): Promise<Map<string, string>> {
+    const unique = [...new Set(urls.filter((u): u is string => !!u))];
+    const map = new Map<string, string>();
+    await Promise.all(
+      unique.map(async (u) => {
+        const dataUri = await this.fetchImageDataUri(u);
+        if (dataUri) map.set(u, dataUri);
+      }),
+    );
+    return map;
+  }
+
   // ── Template: Quotation ──────────────────────────────────────────────────────
 
-  quotationTemplate(data: any): any {
-    const BLUE  = '#005fb8';
+  async quotationTemplate(data: any): Promise<any> {
+    const BLUE = '#016bb2';
     const SLATE = '#64748b';
-    const LIGHT = '#f1f5f9';
-    const RULE  = '#94a3b8';
-    const RED   = '#dc2626';
+    const INK = '#0f172a';
+    const RULE = '#cbd5e1';
 
     const safe = (v: any, fallback = '—') =>
-      (v != null && String(v).trim() !== '') ? String(v) : fallback;
-    const inr  = (n: any) =>
-      `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    const date = (d: any) => {
-      try { return d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'; }
-      catch { return '—'; }
+      v != null && String(v).trim() !== '' ? String(v) : fallback;
+    const fmt2 = (n: any) => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const inr = (n: any) => `₹${fmt2(n)}`;
+    const fmtDate = (dt: Date) => { const d = String(dt.getDate()).padStart(2,'0'); const m = String(dt.getMonth()+1).padStart(2,'0'); return `${d}/${m}/${dt.getFullYear()}`; }; const today = fmtDate(new Date());
+    const dateStr = (d: any) => {
+      try {
+        return d ? fmtDate(new Date(d)) : today;
+      } catch {
+        return today;
+      }
     };
 
-    // Amount in words
-    const _ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
-      'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen',
-      'Seventeen', 'Eighteen', 'Nineteen'];
-    const _tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-    const u100  = (n: number) =>
-      n < 20 ? _ones[n] : _tens[Math.floor(n / 10)] + (n % 10 ? ' ' + _ones[n % 10] : '');
-    const u1000 = (n: number) =>
-      n < 100 ? u100(n) : _ones[Math.floor(n / 100)] + ' Hundred' + (n % 100 ? ' ' + u100(n % 100) : '');
-    const amountInWords = (amount: number): string => {
-      const n     = Math.floor(Math.abs(amount));
-      const paise = Math.round((Math.abs(amount) - n) * 100);
-      if (n === 0 && paise === 0) return 'Zero Rupees Only';
-      const cr  = Math.floor(n / 10000000);
-      const lk  = Math.floor((n % 10000000) / 100000);
-      const th  = Math.floor((n % 100000) / 1000);
-      const rem = n % 1000;
-      let w = '';
-      if (cr)  w += u1000(cr) + ' Crore ';
-      if (lk)  w += u100(lk)  + ' Lakh ';
-      if (th)  w += u100(th)  + ' Thousand ';
-      if (rem) w += u1000(rem);
-      w = w.trim() + ' Rupees';
-      if (paise > 0) w += ' and ' + u100(paise) + ' Paise';
-      return w + ' Only';
-    };
+    const rows = Array.isArray(data?.items) ? data.items : [];
+    const itemImageMap = await this.fetchImageMap(
+      rows.map((it: any) => it?.image_url),
+    );
+    const companyName =
+      appConfig?.companyName || 'Hesh Opto Lab Private Limited';
+    const companyAddr =
+      appConfig?.companyAddress ||
+      'No. 207 / 208 / 209, Sri Selva Vinayagar Nagar, Alinjivakkam,\nRedhills, Chennai, Tamil Nadu, 600052';
+    const companyPhone = appConfig?.companyPhone || '7010366206';
+    const companyEmail =
+      appConfig?.companyEmail || 'heshstoreaccounts@hotmail.com';
+    const companyGstin = appConfig?.companyGstin || '33AABCH5436K1ZM';
+    const bankAccName =
+      appConfig?.bankAccountName || 'Hesh Opto Lab Private Limited';
+    const bankName = appConfig?.bankName || 'Kotak Mahindra Bank';
+    const bankBranch = appConfig?.bankBranch || 'Parrys Chennai';
+    const bankAccount = appConfig?.bankAccount || '5811128721';
+    const bankIfsc = appConfig?.bankIfsc || 'KKBK0000464';
+    const companyPan = process.env.COMPANY_PAN || 'AABCH5436K';
 
-    const rows         = Array.isArray(data?.items) ? data.items : [];
-    const companyName  = safe(appConfig?.companyName,    'Saachu');
-    const companyAddr  = safe(appConfig?.companyAddress, '');
-    const companyPhone = safe(appConfig?.companyPhone,   '');
-    const companyEmail = safe(appConfig?.companyEmail,   '');
-    const companyWeb   = safe(appConfig?.companyWebsite, '');
-    const companyGstin = safe(appConfig?.companyGstin,   '');
-    const payTerms     = appConfig?.paymentTerms || '';
-    const bankAccName  = appConfig?.bankAccountName || '';
-    const bankName     = appConfig?.bankName        || '';
-    const bankBranch   = appConfig?.bankBranch      || '';
-    const bankAccount  = appConfig?.bankAccount     || '';
-    const bankIfsc     = appConfig?.bankIfsc        || '';
-    const bankUpi      = appConfig?.bankUpiId       || '';
-    const hasBankInfo  = bankName || bankAccount || bankIfsc;
-
-    // Financials
-    const subTotal   = Number(data?.sub_total) || 0;
-    const discType   = (data?.discount_type || 'PERCENT').toUpperCase();
-    const discValue  = Number(data?.discount_value) || 0;
-    const headerDisc = discType === 'FLAT' ? discValue : (subTotal * discValue) / 100;
-    const taxable    = subTotal - headerDisc;
-    const totalGst   = rows.reduce((s: number, it: any) => {
-      const base = Number(it?.amount) || 0;
-      const pct  = Number(it?.gst_percent) || 0;
-      return s + (base * pct) / 100;
-    }, 0);
-    const cgst       = totalGst / 2;
-    const sgst       = totalGst / 2;
-    const chargePack = Number(data?.charges_packing)      || 0;
-    const chargeCar  = Number(data?.charges_cartage)      || 0;
-    const chargeFwd  = Number(data?.charges_forwarding)   || 0;
+    const subTotal = Number(data?.sub_total) || 0;
+    const chargePack = Number(data?.charges_packing) || 0;
+    const chargeCar = Number(data?.charges_cartage) || 0;
+    const chargeFwd = Number(data?.charges_forwarding) || 0;
     const chargeInst = Number(data?.charges_installation) || 0;
-    const chargeLoad = Number(data?.charges_loading)      || 0;
+    const chargeLoad = Number(data?.charges_loading || data?.loading_charges || data?.loading_unloading) || 0;
+    const roundOff = Number(data?.round_off ?? data?.roundoff ?? data?.roundOff) || 0;
+    const gstByRate = new Map<number, number>();
+    for (const it of rows) {
+      const base = Number(it?.amount) || 0;
+      const pct = Number(it?.gst_percent) || 0;
+      if (pct > 0) gstByRate.set(pct, (gstByRate.get(pct) || 0) + (base * pct) / 100);
+    }
     const grandTotal = Number(data?.total_amount) || 0;
 
-    // Items table (8 cols — Photo col omitted in PDF)
+    const custName = safe(data?.customer_name, '');
+    const billAddr = safe(data?.billing_address, '');
+    const shipAddr = safe(data?.shipping_address || data?.billing_address, '');
+    const quotNo = safe(data?.quotation_no, '');
+    const quoteDate = dateStr(data?.created_at || data?.quotation_date);
+
+    // Dispatch fields
+    const qBookingAt = safe(data?.booking_at, '');
+    const qGoodsSentBy = safe(data?.goods_sent_by || data?.delivery_by, '');
+    const qTransportPaymentBy = safe(data?.transport_payment_by || data?.payment_type || data?.payment_mode, '');
+    const qDeliveryType = safe(data?.delivery_type, '');
+    const qDeliveryInstructions = safe(data?.delivery_instructions, '');
+
+    // Logo image
+    const logoPath = this.resolveStaticImage('logo.png');
+    const qrPath = this.resolveStaticImage('QR.jpg');
+
+    // Items table rows: S.No | Photo | Item/SKU/HSN | Instruction | Qty | UOM | [Disc] | Rate | GST | Amount
+    // The Disc column only appears at all if at least one line item actually has a discount.
+    const hasAnyDiscount = rows.some((it: any) => Number(it?.discount_value) > 0);
+    const COLS = hasAnyDiscount ? 10 : 9;
     const itemRows: any[] = rows.map((it: any, i: number) => {
-      const base   = Number(it?.amount) || 0;
+      const base = Number(it?.amount) || 0;
+      const rate = Number(it?.rate || 0);
+      const qty = Number(it?.qty) || 0;
       const gstPct = Number(it?.gst_percent) || 0;
-      const gstAmt = (base * gstPct) / 100;
-      const total  = base + gstAmt;
-      const disc   = it?.discount_percent
-        ? `${it.discount_percent}%`
-        : it?.discount_value
-          ? inr(it.discount_value)
-          : '—';
+      const discVal = Number(it?.discount_value) || 0;
+      // Only two values are ever saved by the form: 'percent' or 'fixed'.
+      // Treat anything other than 'percent' as a flat rupee discount rather
+      // than matching specific strings ('flat'/'rs'/'amount') that the form
+      // never actually sends — that mismatch silently misread every ₹
+      // discount as a % discount.
+      const discType = String(it?.discount_type || 'percent').toLowerCase();
+      const isFlatDisc = discType !== 'percent';
+      // Discount is always per piece: a % discount is a % of the per-unit
+      // rate, and a flat discount is a rupee amount off the per-unit rate —
+      // neither is computed against rate × qty.
+      const perUnitDiscAmt = isFlatDisc ? discVal : (rate * discVal) / 100;
+      const discountedRate = Math.max(0, rate - perUnitDiscAmt);
+
+      let discCell: any;
+      if (discVal > 0) {
+        discCell = {
+          stack: [
+            { text: isFlatDisc ? `₹${fmt2(discVal)}` : `${discVal}%`, fontSize: 7, bold: true, color: INK },
+            { text: `on ₹${fmt2(rate)}`, fontSize: 6, color: SLATE, margin: [0, 2, 0, 0] },
+            {
+              text: `= ₹${fmt2(isFlatDisc ? discountedRate : perUnitDiscAmt)}`,
+              fontSize: 7,
+              bold: true,
+              color: INK,
+              margin: [0, 3, 0, 0],
+            },
+          ],
+          alignment: 'center',
+          margin: [0, 4, 0, 0],
+        };
+      } else {
+        discCell = { text: '', fontSize: 7, alignment: 'center' };
+      }
+
+      // Real item-master photo when available; otherwise the gray placeholder box.
+      const photoDataUri = it?.image_url ? itemImageMap.get(it.image_url) : null;
+      const photoCell = photoDataUri
+        ? { image: photoDataUri, fit: [24, 24], alignment: 'center', margin: [2, 3, 2, 2] }
+        : {
+            stack: [
+              {
+                canvas: [
+                  { type: 'rect', x: 1, y: 1, w: 24, h: 24, r: 3, color: '#e2e8f0' },
+                  { type: 'ellipse', x: 13, y: 10, r1: 4, r2: 4, color: '#94a3b8' },
+                  { type: 'rect', x: 4, y: 16, w: 17, h: 7, r: 2, color: '#cbd5e1' },
+                ],
+              },
+              { text: 'Photo', fontSize: 6, alignment: 'center', color: '#94a3b8', margin: [0, 1, 0, 0] },
+            ],
+            margin: [2, 3, 2, 2],
+          };
+
       return [
-        { text: String(i + 1),                                                alignment: 'center', fontSize: 7.5 },
+        { text: String(i + 1), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
+        photoCell,
         {
           stack: [
-            { text: safe(it?.item_name || it?.itemName, `Item ${i + 1}`),    bold: true, fontSize: 8 },
-            ...(it?.sku ? [{ text: String(it.sku), color: SLATE, fontSize: 6.5 }] : []),
+            ...(it?.sku ? [{ text: it.sku, fontSize: 7, bold: true, color: BLUE }] : []),
+            { text: safe(it?.item_name || it?.itemName, `Item ${i + 1}`), fontSize: 8, bold: true },
+            ...(it?.hsn_code ? [{ text: `HSN: ${it.hsn_code}`, fontSize: 6.5, color: SLATE }] : []),
           ],
+          margin: [0, 3, 0, 3],
         },
-        { text: safe(it?.instructions || it?.notes, '—'),                     fontSize: 7.5, color: SLATE },
-        { text: gstPct > 0 ? `${gstPct}%` : '—',                             alignment: 'center', fontSize: 7.5 },
-        { text: disc,                                                          alignment: 'center', fontSize: 7.5 },
-        { text: String(Number(it?.qty) || 0),                                 alignment: 'center', fontSize: 7.5 },
-        { text: inr(it?.rate),                                                 alignment: 'right',  fontSize: 7.5 },
-        { text: inr(total),                                                    alignment: 'right',  fontSize: 7.5, bold: true },
+        { text: safe(it?.instruction || it?.instructions || it?.notes, ''), fontSize: 7, color: SLATE, margin: [0, 3, 0, 3] },
+        { text: String(qty), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
+        { text: safe(it?.uom || it?.unit || '', ''), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
+        ...(hasAnyDiscount ? [discCell] : []),
+        { text: inr(discVal > 0 ? discountedRate : rate), alignment: 'right', fontSize: 7.5, margin: [0, 5, 0, 0] },
+        gstPct > 0
+          ? {
+              stack: [
+                { text: `${gstPct}%`, fontSize: 7.5, bold: true, alignment: 'center' },
+                { text: inr((base * gstPct) / 100), fontSize: 5.5, color: SLATE, alignment: 'center' },
+              ],
+              margin: [0, 4, 0, 0],
+            }
+          : { text: '', fontSize: 8 },
+        { text: inr(base), alignment: 'right', fontSize: 7.5, bold: true, margin: [0, 5, 0, 0] },
       ];
     });
 
     if (itemRows.length === 0) {
       itemRows.push([
-        { text: 'No items', colSpan: 8, alignment: 'center', fontSize: 8, color: SLATE },
-        {}, {}, {}, {}, {}, {}, {},
+        { text: 'No items', colSpan: COLS, alignment: 'center', fontSize: 8, color: SLATE },
+        ...Array(COLS - 1).fill({}),
       ]);
     }
 
-    // Totals breakdown (right column)
-    const totalRows: any[] = [
-      [{ text: 'Sub Total', fontSize: 8 }, { text: inr(subTotal), alignment: 'right', fontSize: 8 }],
-      ...(headerDisc > 0
-        ? [[
-            { text: discType === 'PERCENT' && discValue > 0 ? `Discount (${discValue}%)` : 'Discount', fontSize: 8, color: RED },
-            { text: `−${inr(headerDisc)}`, alignment: 'right', fontSize: 8, color: RED },
-          ]]
-        : []),
-      [{ text: 'Taxable Amount', fontSize: 8 }, { text: inr(taxable), alignment: 'right', fontSize: 8 }],
-      ...(cgst > 0 ? [[{ text: 'CGST', fontSize: 8 }, { text: inr(cgst), alignment: 'right', fontSize: 8 }]] : []),
-      ...(sgst > 0 ? [[{ text: 'SGST', fontSize: 8 }, { text: inr(sgst), alignment: 'right', fontSize: 8 }]] : []),
-      ...(chargePack  > 0 ? [[{ text: 'Packing',      fontSize: 8 }, { text: inr(chargePack),  alignment: 'right', fontSize: 8 }]] : []),
-      ...(chargeCar   > 0 ? [[{ text: 'Cartage',      fontSize: 8 }, { text: inr(chargeCar),   alignment: 'right', fontSize: 8 }]] : []),
-      ...(chargeFwd   > 0 ? [[{ text: 'Forwarding',   fontSize: 8 }, { text: inr(chargeFwd),   alignment: 'right', fontSize: 8 }]] : []),
-      ...(chargeInst  > 0 ? [[{ text: 'Installation', fontSize: 8 }, { text: inr(chargeInst),  alignment: 'right', fontSize: 8 }]] : []),
-      ...(chargeLoad  > 0 ? [[{ text: 'Loading',      fontSize: 8 }, { text: inr(chargeLoad),  alignment: 'right', fontSize: 8 }]] : []),
-      [
-        { text: 'Grand Total', bold: true, fontSize: 10, color: '#fff', fillColor: BLUE },
-        { text: inr(grandTotal), alignment: 'right', bold: true, fontSize: 10, color: '#fff', fillColor: BLUE },
+    // Account details (left of bottom section)
+    const bankRow = (label: string, value: string) => ({
+      columns: [
+        { text: label, bold: true, fontSize: 8, width: 110, color: INK },
+        { text: value, fontSize: 8, width: '*', color: '#374151' },
       ],
+      columnGap: 4,
+      margin: [0, 0, 0, 3],
+    });
+    const accountLines: any[] = [
+      bankRow("Account Holder's Name:", bankAccName),
+      bankRow('Account Number:', bankAccount),
+      bankRow('Bank Name:', bankName),
+      bankRow('Branch Name:', bankBranch),
+      bankRow('IFSC Code:', bankIfsc),
     ];
 
-    // Company info lines for header
-    const coInfoLines: any[] = [
-      { text: companyName, fontSize: 14, bold: true, color: BLUE },
+    // Totals (right of bottom section)
+    const tRow = (label: string, value: number, bold = false, large = false) => ({
+      columns: [
+        { text: label, fontSize: large ? 10 : 8.5, bold, color: large ? BLUE : INK, width: '*' },
+        { text: inr(value), fontSize: large ? 10 : 8.5, bold, color: large ? BLUE : INK, width: 'auto', alignment: 'right' },
+      ],
+      margin: [0, large ? 2 : 1, 0, large ? 2 : 1],
+    });
+    const tDiv = () => ({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: 200, y2: 0, lineWidth: 0.5, lineColor: '#999' }], margin: [0, 3, 0, 3] });
+    const totalBeforeGst = subTotal + chargePack + chargeCar + chargeFwd + chargeInst + chargeLoad;
+    const totalGstAmt = [...gstByRate.values()].reduce((s, a) => s + a, 0);
+    const computedGrandTotal = totalBeforeGst + totalGstAmt + roundOff;
+    const totalsStack: any[] = [
+      tRow('Sub Total', subTotal, true, true),
+      ...(chargePack > 0 ? [tRow('(+) Wooden Packing Charges', chargePack)] : []),
+      ...(chargeCar > 0 ? [tRow('(+) Cartage Charges', chargeCar)] : []),
+      ...(chargeFwd > 0 ? [tRow('(+) Forwarding Charges', chargeFwd)] : []),
+      ...(chargeInst > 0 ? [tRow('(+) Onsite Installation Charges', chargeInst)] : []),
+      ...(chargeLoad > 0 ? [tRow('(+) Loading & Unloading Charges', chargeLoad)] : []),
+      tDiv(),
+      tRow('Total', totalBeforeGst, true, true),
+      tDiv(),
+      ...[...gstByRate.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([pct, amt]) => tRow(`(+) GST ${pct}% on ${inr(amt * 100 / pct)}`, amt)),
+      tDiv(),
+      tRow('Rounded Off', roundOff),
+      tDiv(),
+      tRow('Grand Total', computedGrandTotal, true, true),
+      tDiv(),
     ];
-    if (companyAddr)  coInfoLines.push({ text: companyAddr,  fontSize: 7.5, color: SLATE });
-    const phoneEmail = [companyPhone, companyEmail].filter(Boolean).join('  ·  ');
-    if (phoneEmail)   coInfoLines.push({ text: phoneEmail,   fontSize: 7.5, color: SLATE });
-    if (companyWeb)   coInfoLines.push({ text: companyWeb,   fontSize: 7.5, color: SLATE });
-    if (companyGstin) coInfoLines.push({ text: `GSTIN: ${companyGstin}`, fontSize: 7.5, color: SLATE, bold: true });
 
-    // PI details (right col)
-    const piStack: any[] = [
-      { text: [{ text: 'PI No.  ', bold: true, color: SLATE }, safe(data?.quotation_no, '—')], fontSize: 8 },
-      { text: [{ text: 'PI Date ', bold: true, color: SLATE }, date(data?.created_at)],        fontSize: 8 },
-    ];
-    if (data?.valid_till) piStack.push({ text: [{ text: 'Valid   ', bold: true, color: SLATE }, date(data.valid_till)], fontSize: 8 });
-    piStack.push(...ownershipPdfStack(data, { showPhone: true, approvalPending: !data?.approved_by_name }));
-
-    // Customer addresses
-    const custName = safe(data?.customer_name, '—');
-    const billAddr = [
-      data?.billing_address,
-      data?.gst_number     ? `GSTIN: ${data.gst_number}` : null,
-      data?.customer_phone ? `Ph: ${data.customer_phone}` : null,
-    ].filter(Boolean).join('\n');
-    const shipAddr = safe(data?.shipping_address || data?.billing_address, '');
-
-    // Delivery Details (3rd col)
-    const deliveryStack: any[] = [
-      { text: 'DELIVERY DETAILS', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 3] },
-    ];
-    if (data?.booking_at) {
-      deliveryStack.push({ text: [{ text: 'Booking At: ', bold: true }, safe(data.booking_at)], fontSize: 8 });
-    }
-    deliveryStack.push({ text: [{ text: 'Goods Sent By: ', bold: true }, safe(data?.delivery_by, '—')],  fontSize: 8, margin: [0, 1, 0, 0] });
-    deliveryStack.push({ text: [{ text: 'Payment Mode: ',  bold: true }, safe(data?.payment_type, '—')], fontSize: 8, margin: [0, 1, 0, 0] });
-    if (data?.delivery_instructions) {
-      deliveryStack.push({ text: [{ text: 'Instructions: ', bold: true }, safe(data.delivery_instructions)], fontSize: 7.5, color: SLATE, margin: [0, 2, 0, 0] });
-    }
-
-    // Bank rows
-    const bankRows: any[] = [];
-    if (bankAccName) bankRows.push({ text: [{ text: 'Acc. Name: ', bold: true }, bankAccName], fontSize: 7.5 });
-    if (bankName)    bankRows.push({ text: [{ text: 'Bank: ',      bold: true }, bankName],    fontSize: 7.5 });
-    if (bankBranch)  bankRows.push({ text: [{ text: 'Branch: ',    bold: true }, bankBranch],  fontSize: 7.5 });
-    if (bankAccount) bankRows.push({ text: [{ text: 'A/C No.: ',   bold: true }, bankAccount], fontSize: 7.5 });
-    if (bankIfsc)    bankRows.push({ text: [{ text: 'IFSC: ',      bold: true }, bankIfsc],    fontSize: 7.5 });
-    if (bankUpi)     bankRows.push({ text: [{ text: 'UPI: ',       bold: true }, bankUpi],     fontSize: 7.5 });
-    if (bankRows.length === 0) bankRows.push({ text: 'Bank details not configured.', fontSize: 7.5, color: SLATE });
+    const termsText =
+      'TERMS & CONDITIONS\n' +
+      '• Prices are valid only for this quotation and are subject to change without prior notice. ' +
+      '• Order confirmation is subject to receipt of the agreed advance payment. ' +
+      '• Delivery timelines commence only after advance payment and final order confirmation. ' +
+      '• Any change in order specifications may affect pricing and delivery schedules. ' +
+      '• Goods once sold will not be taken back except for approved manufacturing defects. ' +
+      '• Risk in transit passes to the buyer upon dispatch. Transit damage claims must be made with the transporter. ' +
+      '• Delivery delays due to force majeure or unforeseen circumstances shall not be the responsibility of the company. ' +
+      '• Refunds, if approved, will be processed within 10 working days after verification. ' +
+      '• GST and other applicable taxes will be charged as per prevailing rates on the invoice date. ' +
+      '• Product specifications, prices, and designs are subject to change without prior notice. ' +
+      '• All disputes shall be subject to the exclusive jurisdiction of the courts in Chennai, Tamil Nadu.';
 
     return {
       pageSize: 'A4',
-      pageMargins: [34, 34, 34, 34],
+      pageMargins: [36, 30, 36, 40],
+      footer: (currentPage: number, pageCount: number) => ({
+        margin: [36, 0, 36, 10],
+        text: `Page ${currentPage}/${pageCount}`,
+        fontSize: 8,
+        italics: true,
+        alignment: 'center',
+        color: SLATE,
+      }),
       content: [
+        // ── Title ────────────────────────────────────────────────────────
+        { text: 'Quotation', fontSize: 16, bold: true, alignment: 'center', margin: [0, 0, 0, 3] },
 
         // ── Header ───────────────────────────────────────────────────────
         {
           columns: [
-            { stack: coInfoLines, width: '*' },
             {
-              stack: [{ text: 'PROFORMA INVOICE', fontSize: 12, bold: true, color: BLUE, alignment: 'center' }],
-              width: 'auto',
-              margin: [10, 0, 10, 0],
-              border: [true, true, true, true],
+              width: '*',
+              stack: [
+                { text: companyName, fontSize: 13, bold: true, margin: [0, 0, 0, 3] },
+                { text: companyAddr.replace(/\n/g, ', '), fontSize: 7, margin: [0, 0, 0, 2] },
+                { text: [
+                  { text: 'Mobile: ', bold: true, fontSize: 7 },
+                  { text: companyPhone, fontSize: 7, color: '#374151' },
+                  { text: '     ·     ', fontSize: 7, color: SLATE },
+                  { text: 'Email: ', bold: true, fontSize: 7 },
+                  { text: companyEmail, fontSize: 7, color: '#374151' },
+                ], margin: [0, 0, 0, 2] },
+                { text: [{ text: 'MSME Reg. No.: ', bold: true, fontSize: 7 }, { text: 'UDYAM-TN-02-0034349', fontSize: 7, color: '#374151' }], margin: [0, 0, 0, 2] },
+                { text: [{ text: 'ISO 9001 : 2015 Certified', bold: true, fontSize: 7, color: BLUE }, { text: '  |  QMS System', fontSize: 7, color: SLATE }], margin: [0, 0, 0, 2] },
+                { text: [{ text: 'GSTIN: ', bold: true, fontSize: 7.5 }, { text: companyGstin, bold: true, fontSize: 7.5 }] },
+              ],
             },
-            { stack: piStack, width: 110, alignment: 'right' },
+            ...(logoPath ? [{ image: logoPath, fit: [152, 97], width: 158, alignment: 'right' }] : []),
           ],
-          margin: [0, 0, 0, 4],
-        },
-        { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 527, y2: 0, lineWidth: 1.5, lineColor: BLUE }], margin: [0, 0, 0, 5] },
-
-        // ── 3-col: Bill To | Delivery To | Delivery Details ──────────────
-        {
-          table: {
-            widths: ['*', '*', 105],
-            body: [[
-              {
-                stack: [
-                  { text: 'BILL TO', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 2] },
-                  { text: custName, fontSize: 9, bold: true },
-                  ...(billAddr ? [{ text: billAddr, fontSize: 7.5, color: SLATE, margin: [0, 1, 0, 0] }] : []),
-                ],
-              },
-              {
-                stack: [
-                  { text: 'DELIVERY TO', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 2] },
-                  { text: custName, fontSize: 9, bold: true },
-                  ...(shipAddr ? [{ text: shipAddr, fontSize: 7.5, color: SLATE, margin: [0, 1, 0, 0] }] : []),
-                ],
-              },
-              { stack: deliveryStack },
-            ]],
-          },
-          layout: {
-            hLineWidth: () => 0.5, vLineWidth: () => 0.5,
-            hLineColor: () => RULE, vLineColor: () => RULE,
-            paddingLeft: () => 6, paddingRight: () => 6,
-            paddingTop:  () => 5, paddingBottom: () => 5,
-          },
-          margin: [0, 0, 0, 5],
+          columnGap: 8,
+          margin: [0, 0, 0, 3],
         },
 
-        // ── Items table (8 cols — Photo omitted in PDF) ───────────────────
+        // ── Bill To / Ship To / Quotation Details ───────────────────────
+        (() => {
+          const phone = safe(data?.customer_phone, '').replace(/^\+91/, '');
+          const phone2 = safe(data?.customer_phone2 || data?.mobile2, '').replace(/^\+91/, '');
+          const validity = data?.valid_till
+            ? dateStr(data.valid_till)
+            : data?.validity_days
+              ? `${data.validity_days} days from date`
+              : '30 days from date';
+
+          const labelVal = (label: string, value: string, marginBottom = 5) => ({
+            columns: [
+              { text: label, bold: true, fontSize: 8, width: 'auto', color: INK },
+              { text: value, fontSize: 8, width: '*', color: '#374151', margin: [3, 0, 0, 0] },
+            ],
+            columnGap: 0,
+            margin: [0, 0, 0, marginBottom],
+          });
+
+          const partyStack = (addr: string) => ({
+            stack: [
+              { text: custName, fontSize: 9.5, bold: true, color: INK, margin: [0, 0, 0, 5] },
+              { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 160, y2: 0, lineWidth: 0.4, lineColor: RULE }], margin: [0, 0, 0, 5] },
+              { text: addr, fontSize: 8, color: '#374151', lineHeight: 1.3, margin: [0, 0, 0, 5] },
+              ...(phone ? [{ text: [{ text: 'Mobile: ', bold: true, fontSize: 8 }, { text: phone, fontSize: 8, color: '#374151' }], margin: [0, 0, 0, 3] }] : []),
+              ...(phone2 ? [{ text: [{ text: 'Mobile 2: ', bold: true, fontSize: 8 }, { text: phone2, fontSize: 8, color: '#374151' }], margin: [0, 0, 0, 3] }] : []),
+              ...(safe(data?.gst_number, '') ? [
+                { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 160, y2: 0, lineWidth: 0.4, lineColor: RULE }], margin: [0, 4, 0, 4] },
+                { text: [{ text: 'GSTIN: ', bold: true, fontSize: 8 }, { text: safe(data.gst_number, ''), fontSize: 8, color: '#374151' }] },
+              ] : []),
+            ],
+            margin: [5, 5, 5, 5],
+          });
+
+          return {
+            table: {
+              widths: ['*', '*', '*'],
+              body: [
+                [
+                  { text: 'Bill To',           fontSize: 10, bold: true, color: '#fff', fillColor: BLUE, margin: [6, 4, 6, 4] },
+                  { text: 'Ship To',           fontSize: 10, bold: true, color: '#fff', fillColor: BLUE, margin: [6, 4, 6, 4] },
+                  { text: 'Quotation Details', fontSize: 10, bold: true, color: '#fff', fillColor: BLUE, margin: [6, 4, 6, 4] },
+                ],
+                [
+                  partyStack(billAddr),
+                  partyStack(shipAddr),
+                  {
+                    stack: [
+                      labelVal('Date:',             quoteDate),
+                      labelVal('Quotation No:',     quotNo),
+                      labelVal('Salesman:',         safe(data?.salesman_name || data?.sales_person, '')),
+                      labelVal('Validity:',         validity),
+                      { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 160, y2: 0, lineWidth: 0.4, lineColor: RULE }], margin: [0, 2, 0, 5] },
+                      labelVal('Payment Terms:',    'Advance 70% & Before Dispatch 30%'),
+                      labelVal('Delivery Type:',    safe(data?.delivery_type || data?.delivery_by, ''), 0),
+                    ],
+                    margin: [5, 5, 5, 5],
+                  },
+                ],
+              ],
+            },
+            layout: {
+              hLineWidth: (i: number) => (i === 0 || i === 1 || i === 2 ? 0.5 : 0),
+              vLineWidth: (i: number) => (i === 0 || i === 1 || i === 2 || i === 3 ? 0.5 : 0),
+              hLineColor: () => RULE,
+              vLineColor: () => RULE,
+              paddingLeft: () => 0,
+              paddingRight: () => 0,
+              paddingTop: () => 0,
+              paddingBottom: () => 0,
+            },
+            margin: [0, 0, 0, 3],
+          };
+        })(),
+
+        // ── Items table ──────────────────────────────────────────────────
         {
           table: {
             headerRows: 1,
-            widths: [14, '*', 62, 22, 28, 22, 45, 46],
+            dontBreakRows: false,
+            // Disc's width is simply omitted (not zeroed) when hidden — the
+            // Item/Name column is the only auto ('*') column, so it absorbs
+            // the freed space automatically.
+            widths: [16, 28, '*', 36, 16, 18, ...(hasAnyDiscount ? [44] : []), 52, 34, 52],
             body: [
               [
-                { text: '#',             style: 'th', alignment: 'center' },
-                { text: 'Item No / Name',style: 'th' },
-                { text: 'Instructions',  style: 'th' },
-                { text: 'GST%',          style: 'th', alignment: 'center' },
-                { text: 'Disc.',         style: 'th', alignment: 'center' },
-                { text: 'Qty',           style: 'th', alignment: 'center' },
-                { text: 'Rate (₹)',      style: 'th', alignment: 'right'  },
-                { text: 'Amount (₹)',    style: 'th', alignment: 'right'  },
+                { text: 'S.No',               style: 'th', alignment: 'center',  noWrap: true },
+                { text: 'Photo',              style: 'th', alignment: 'center',  noWrap: true },
+                { text: 'Item / Name / HSN',  style: 'th' },
+                { text: 'Instruction',        style: 'th' },
+                { text: 'Qty',                style: 'th', alignment: 'center',  noWrap: true },
+                { text: 'UOM',                style: 'th', alignment: 'center',  noWrap: true },
+                ...(hasAnyDiscount ? [{ text: 'Disc', style: 'th', alignment: 'center', noWrap: true }] : []),
+                { text: 'Rate (₹)',           style: 'th', alignment: 'right',   noWrap: true },
+                { text: 'GST Tax',            style: 'th', alignment: 'center',  noWrap: true },
+                {
+                  stack: [
+                    { text: 'Amount (₹)', fontSize: 8.5, bold: true, color: '#fff' },
+                    { text: '(Tax Extra)', fontSize: 5.5, color: '#fff', italics: true },
+                  ],
+                  alignment: 'right',
+                  fillColor: BLUE,
+                },
               ],
               ...itemRows,
             ],
           },
           layout: {
             hLineWidth: (i: number, node: any) =>
-              (i === 0 || i === node.table.headerRows || i === node.table.body.length) ? 0.75 : 0.35,
-            vLineWidth: () => 0,
-            hLineColor: (i: number) => i === 0 ? BLUE : RULE,
-            fillColor:  (row: number) => row === 0 ? BLUE : (row % 2 === 0 ? LIGHT : null),
-            paddingLeft: () => 3, paddingRight: () => 3,
-            paddingTop:  () => 3, paddingBottom: () => 3,
+              i === 0 || i === node.table.headerRows || i === node.table.body.length ? 1 : 0.4,
+            vLineWidth: () => 0.4,
+            hLineColor: (i: number) => (i === 0 || i === 1 ? BLUE : RULE),
+            vLineColor: () => RULE,
+            fillColor: (row: number) => (row === 0 ? BLUE : row % 2 === 0 ? '#f8fafc' : null),
+            paddingLeft: () => 4,
+            paddingRight: () => 4,
+            paddingTop: () => 1.5,
+            paddingBottom: () => 1.5,
           },
-          margin: [0, 0, 0, 5],
+          margin: [0, 0, 0, 3],
         },
 
-        // ── Totals: Amount in Words | Breakdown ───────────────────────────
+        // ── Account Details + QR | Totals ────────────────────────────────
         {
           columns: [
-            {
-              width: '*',
-              stack: [
-                { text: 'AMOUNT IN WORDS', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 3] },
-                { text: amountInWords(grandTotal), fontSize: 8.5, italics: true },
-              ],
-              margin: [0, 4, 10, 0],
-            },
-            {
-              width: 175,
-              table: { widths: ['*', 'auto'], body: totalRows },
-              layout: {
-                hLineWidth: (i: number, node: any) =>
-                  (i === node.table.body.length - 1 || i === node.table.body.length) ? 0 : 0.35,
-                vLineWidth: () => 0,
-                hLineColor: () => RULE,
-                paddingLeft: () => 4, paddingRight: () => 4,
-                paddingTop:  () => 3, paddingBottom: () => 3,
-              },
-            },
-          ],
-          margin: [0, 0, 0, 8],
-        },
-
-        // ── Payment Terms Bar ─────────────────────────────────────────────
-        ...(payTerms ? [{
-          table: {
-            widths: ['*'],
-            body: [[{
-              stack: [
-                { text: 'PAYMENT TERMS', fontSize: 7, bold: true, color: BLUE, alignment: 'center', margin: [0, 0, 0, 2] },
-                { text: payTerms,         fontSize: 9, bold: true, color: BLUE, alignment: 'center' },
-              ],
-              margin: [0, 4, 0, 4],
-            }]],
-          },
-          layout: {
-            hLineWidth: () => 1, vLineWidth: () => 1,
-            hLineColor: () => BLUE, vLineColor: () => BLUE,
-          },
-          margin: [0, 0, 0, 8],
-        }] : []),
-
-        // ── Rule before bottom grid ───────────────────────────────────────
-        { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 527, y2: 0, lineWidth: 0.5, lineColor: RULE }], margin: [0, 0, 0, 5] },
-
-        // ── Bottom 2-col: Bank | T&C ──────────────────────────────────────
-        {
-          columns: [
-            {
-              width: '*',
-              stack: [
-                { text: 'BANK DETAILS', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 3] },
-                ...bankRows,
-              ],
-            },
-            {
-              width: '*',
-              stack: [
-                { text: 'TERMS & CONDITIONS', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 3] },
-                {
-                  ol: [
-                    'All disputes are subject to Chennai jurisdiction only.',
-                    'Payment as per agreed terms. Goods remain property of seller until full payment received.',
-                    'Delivery charges and risks are borne by the buyer unless otherwise agreed.',
-                    'Transport / freight charges are additional unless explicitly included in this quotation.',
-                    'Prices are subject to change without prior notice for delayed orders. E.&O.E.',
+            // QR code
+            ...(qrPath
+              ? [{
+                  width: 90,
+                  stack: [
+                    { text: 'Scan to Pay', fontSize: 7.5, bold: true, alignment: 'center', color: INK, margin: [0, 0, 0, 3] },
+                    { image: qrPath, fit: [80, 80], width: 80, alignment: 'center' },
+                    { text: 'Google Pay / UPI', fontSize: 6.5, alignment: 'center', color: SLATE, margin: [0, 3, 0, 0] },
                   ],
-                  fontSize: 7.5,
-                  color: SLATE,
-                },
+                }]
+              : []),
+            // Bank details + Dispatch Details (left column)
+            {
+              width: '*',
+              stack: [
+                { text: 'Account Details', fontSize: 9.5, bold: true, color: BLUE, margin: [0, 0, 0, 5] },
+                ...accountLines,
+                // Dispatch Details below bank details
+                { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 200, y2: 0, lineWidth: 0.5, lineColor: RULE }], margin: [0, 10, 0, 8] },
+                { text: 'Dispatch Details', fontSize: 9.5, bold: true, color: BLUE, margin: [0, 0, 0, 5] },
+                ...[
+                  ['Booking At',           qBookingAt           || '—'],
+                  ['Goods Sent By',        qGoodsSentBy         || '—'],
+                  ['Transport Payment By', qTransportPaymentBy  || '—'],
+                  ['Delivery Type',        qDeliveryType        || '—'],
+                  ['Delivery Instruction', qDeliveryInstructions|| '—'],
+                ].map(([label, value]) => ({
+                  columns: [
+                    { text: `${label}:`, bold: true, fontSize: 8, width: 115, color: INK },
+                    { text: value, fontSize: 8, width: '*', color: value === '—' ? SLATE : '#374151' },
+                  ],
+                  margin: [0, 0, 0, 3],
+                })),
               ],
+              margin: [qrPath ? 10 : 0, 0, 0, 0],
+            },
+            // Divider
+            {
+              width: 0.5,
+              canvas: [{ type: 'line', x1: 0, y1: 0, x2: 0, y2: 220, lineWidth: 0.5, lineColor: '#aaa' }],
+            },
+            // Totals
+            {
+              width: '42%',
+              stack: totalsStack,
+              margin: [10, 0, 0, 0],
             },
           ],
-          margin: [0, 0, 0, 10],
+          columnGap: 8,
+          margin: [0, 0, 0, 3],
         },
 
-        // ── Computer-generated line ───────────────────────────────────────
-        {
-          text: 'This is a Computer Generated Quotation',
-          fontSize: 7.5, italics: true, color: SLATE, alignment: 'center',
-          margin: [0, 0, 0, 6],
-        },
+        // ── Terms & Conditions ───────────────────────────────────────────
+        { text: termsText, fontSize: 6, margin: [0, 2, 0, 2], color: INK },
 
-        // ── Footer ────────────────────────────────────────────────────────
+        // ── Computer Generated Notice ────────────────────────────────────
         {
-          columns: [
-            { text: 'Thank you for your business!', fontSize: 8, bold: true, color: BLUE },
-            { text: 'Page 1 of 1', fontSize: 7.5, color: SLATE, alignment: 'right' },
-          ],
+          text: 'This is a Computer Generated Quotation, Signature & Seal not required.',
+          fontSize: 7,
+          italics: true,
+          alignment: 'center',
+          color: SLATE,
+          margin: [0, 2, 0, 0],
         },
       ],
       styles: {
-        th: { bold: true, fontSize: 8, color: '#fff', fillColor: BLUE },
+        th: { bold: true, fontSize: 8.5, color: '#fff', fillColor: BLUE },
+        minorTitle: { fontSize: 7, bold: true, color: BLUE, letterSpacing: 0.2 },
       },
-      defaultStyle: { fontSize: 8.5, font: 'Roboto' },
+      defaultStyle: { fontSize: 8, font: 'Roboto' },
     };
   }
 
-  // ── Template: Order ──────────────────────────────────────────────────────────
-
   orderTemplate(data: any): any {
-    const BLUE  = '#005fb8';
+    const BLUE = '#016bb2';
     const SLATE = '#64748b';
-    const LIGHT = '#f1f5f9';
-    const RULE  = '#94a3b8';
-    const RED   = '#dc2626';
-    const GREEN = '#15803d';
+    const INK = '#0f172a';
+    const RULE = '#cbd5e1';
 
     const safe = (v: any, fallback = '—') =>
-      (v != null && String(v).trim() !== '') ? String(v) : fallback;
-    const inr  = (n: any) =>
-      `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    const date = (d: any) => {
-      try { return d ? new Date(d).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'; }
-      catch { return '—'; }
-    };
-
-    // Shared amount-in-words (same as quotationTemplate)
-    const _ones = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
-      'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen',
-      'Seventeen', 'Eighteen', 'Nineteen'];
-    const _tens = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-    const u100  = (n: number) =>
-      n < 20 ? _ones[n] : _tens[Math.floor(n / 10)] + (n % 10 ? ' ' + _ones[n % 10] : '');
-    const u1000 = (n: number) =>
-      n < 100 ? u100(n) : _ones[Math.floor(n / 100)] + ' Hundred' + (n % 100 ? ' ' + u100(n % 100) : '');
-    const amountInWords = (amount: number): string => {
-      const n     = Math.floor(Math.abs(amount));
-      const paise = Math.round((Math.abs(amount) - n) * 100);
-      if (n === 0 && paise === 0) return 'Zero Rupees Only';
-      const cr  = Math.floor(n / 10000000);
-      const lk  = Math.floor((n % 10000000) / 100000);
-      const th  = Math.floor((n % 100000) / 1000);
-      const rem = n % 1000;
-      let w = '';
-      if (cr)  w += u1000(cr) + ' Crore ';
-      if (lk)  w += u100(lk)  + ' Lakh ';
-      if (th)  w += u100(th)  + ' Thousand ';
-      if (rem) w += u1000(rem);
-      w = w.trim() + ' Rupees';
-      if (paise > 0) w += ' and ' + u100(paise) + ' Paise';
-      return w + ' Only';
+      v != null && String(v).trim() !== '' ? String(v) : fallback;
+    const inr = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const fmtDate = (dt: Date) => { const d = String(dt.getDate()).padStart(2,'0'); const m = String(dt.getMonth()+1).padStart(2,'0'); return `${d}/${m}/${dt.getFullYear()}`; }; const today = fmtDate(new Date());
+    const dateStr = (d: any) => {
+      try {
+        return d ? fmtDate(new Date(d)) : today;
+      } catch {
+        return today;
+      }
     };
 
     const rows = Array.isArray(data?.items) ? data.items : [];
+    const companyName =
+      appConfig?.companyName || 'Hesh Opto Lab Private Limited';
+    const companyAddr =
+      appConfig?.companyAddress ||
+      'No. 207 / 208 / 209, Sri Selva Vinayagar Nagar, Alinjivakkam,\nRedhills, Chennai, Tamil Nadu, 600052';
+    const companyPhone = appConfig?.companyPhone || '7010366206';
+    const companyEmail =
+      appConfig?.companyEmail || 'heshstoreaccounts@hotmail.com';
+    const companyGstin = appConfig?.companyGstin || '33AABCH5436K1ZM';
+    const bankAccName =
+      appConfig?.bankAccountName || 'Hesh Opto Lab Private Limited';
+    const bankName = appConfig?.bankName || 'Kotak Mahindra Bank';
+    const bankBranch = appConfig?.bankBranch || 'Parrys Chennai';
+    const bankAccount = appConfig?.bankAccount || '5811128721';
+    const bankIfsc = appConfig?.bankIfsc || 'KKBK0000464';
+    const companyPan = process.env.COMPANY_PAN || 'AABCH5436K';
 
-    // Order entity uses different field names from quotation
-    const companyName  = safe(appConfig?.companyName,    'Saachu');
-    const companyAddr  = safe(appConfig?.companyAddress, '');
-    const companyPhone = safe(appConfig?.companyPhone,   '');
-    const companyEmail = safe(appConfig?.companyEmail,   '');
-    const companyWeb   = safe(appConfig?.companyWebsite, '');
-    const companyGstin = safe(appConfig?.companyGstin,   '');
-    const payTerms     = appConfig?.paymentTerms || '';
-    const bankAccName  = appConfig?.bankAccountName || '';
-    const bankName     = appConfig?.bankName        || '';
-    const bankBranch   = appConfig?.bankBranch      || '';
-    const bankAccount  = appConfig?.bankAccount     || '';
-    const bankIfsc     = appConfig?.bankIfsc        || '';
-    const bankUpi      = appConfig?.bankUpiId       || '';
-
-    // Order-specific field aliases
-    const subTotal   = Number(data?.subtotal ?? data?.sub_total) || 0;
-    const discType   = (data?.discount_type || 'PERCENT').toUpperCase();
-    const discValue  = Number(data?.discount_value) || 0;
-    const headerDisc = discType === 'FLAT' ? discValue : (subTotal * discValue) / 100;
-    const taxable    = subTotal - headerDisc;
-    const totalGst   = rows.reduce((s: number, it: any) => {
+    const subTotal = Number(data?.subtotal ?? data?.sub_total) || 0;
+    const chargePack =
+      Number(data?.packing_charges ?? data?.charges_packing) || 0;
+    const chargeCar =
+      Number(data?.cartage_charges ?? data?.charges_cartage) || 0;
+    const chargeFwd =
+      Number(data?.forwarding_charges ?? data?.charges_forwarding) || 0;
+    const chargeInst =
+      Number(data?.installation_charges ?? data?.charges_installation) || 0;
+    const chargeLoad = Number(data?.charges_loading || data?.loading_charges || data?.loading_unloading) || 0;
+    const roundOff =
+      Number(data?.round_off ?? data?.roundoff ?? data?.roundOff) || 0;
+    const gstByRate2 = new Map<number, number>();
+    for (const it of rows) {
       const base = Number(it?.amount) || 0;
-      const pct  = Number(it?.gst_percent) || 0;
-      return s + (it?.gst_amount != null ? Number(it.gst_amount) : (base * pct) / 100);
-    }, 0);
-    const cgst        = totalGst / 2;
-    const sgst        = totalGst / 2;
-    const chargePack  = Number(data?.packing_charges      ?? data?.charges_packing)      || 0;
-    const chargeCar   = Number(data?.cartage_charges      ?? data?.charges_cartage)      || 0;
-    const chargeFwd   = Number(data?.forwarding_charges   ?? data?.charges_forwarding)   || 0;
-    const chargeInst  = Number(data?.installation_charges ?? data?.charges_installation) || 0;
-    const chargeLoad  = Number(data?.loading_charges      ?? data?.charges_loading)      || 0;
-    const grandTotal  = Number(data?.total_amount) || 0;
-    const paidAmount  = Number(data?.paid_amount)  || 0;
-    const pendingAmt  = Number(data?.pending_amount ?? (grandTotal - paidAmount));
-    const orderNo     = safe(data?.order_no || data?.order_number, `#${data?.id || '—'}`);
+      const pct = Number(it?.gst_percent) || 0;
+      const amt = it?.gst_amount != null ? Number(it.gst_amount) : (base * pct) / 100;
+      if (pct > 0) gstByRate2.set(pct, (gstByRate2.get(pct) || 0) + amt);
+    }
+    const grandTotal = Number(data?.total_amount) || 0;
 
-    // Status badge
-    const STATUS_LABEL: Record<string, string> = {
-      PENDING_APPROVAL: 'Pending Approval', APPROVED: 'Approved',
-      REJECTED: 'Rejected', IN_PRODUCTION: 'In Production',
-      READY_FOR_DISPATCH: 'Ready for Dispatch', DISPATCHED: 'Dispatched',
-      COMPLETED: 'Completed', CANCELLED: 'Cancelled',
-    };
-    const STATUS_BG: Record<string, string> = {
-      APPROVED: '#d1fae5', REJECTED: '#fee2e2', CANCELLED: '#fee2e2',
-      IN_PRODUCTION: '#dbeafe', PENDING_APPROVAL: '#fff7ed',
-    };
-    const statusText = STATUS_LABEL[data?.status] || data?.status || '';
-    const statusBg   = STATUS_BG[data?.status]   || LIGHT;
+    const bookingAt = safe(data?.booking_at, '');
+    const goodsSentBy = safe(data?.goods_sent_by, '');
+    const transportPaymentBy = safe(data?.transport_payment_by || data?.payment_type || data?.payment_mode, '');
+    const deliveryInstructions = safe(data?.delivery_instructions || data?.transport, '');
+    const deliveryType = safe(data?.delivery_type, '');
 
-    // Items table (8 cols — Photo omitted in PDF)
+    const orderNo = safe(data?.order_no || data?.order_number, `#${data?.id || '—'}`);
+    const salesPerson = safe(data?.salesman_name || data?.sales_person, '');
+    const custName = safe(data?.customer_name, '');
+    const billAddr = [
+      data?.billing_address,
+      data?.gst_number ? `GSTIN: ${data.gst_number}` : null,
+      data?.customer_phone ? `Ph: ${data.customer_phone}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const shipAddr = safe(data?.shipping_address || data?.billing_address, '');
+    const poNumber = safe(data?.po_number, '');
+    const orderDate = dateStr(data?.created_at);
+    const deliverDate = dateStr(data?.due_date || data?.deliver_date);
+
+    // (dispatch fields read above as bookingAt, goodsSentBy, transportPaymentBy, deliveryInstructions, deliveryType)
+
+    // Logo + QR images
+    const logoPath = this.resolveStaticImage('logo.png');
+    const qrPath = this.resolveStaticImage('QR.jpg');
+
+    // Items table: [S.No, Item Name, Instructions, Qty, UOM, [Disc], Rate, GST, Amount]
+    // The Disc column only appears at all if at least one line item actually has a discount.
+    const hasAnyDiscount = rows.some((it: any) => Number(it?.discount_value) > 0);
     const itemRows: any[] = rows.map((it: any, i: number) => {
-      const base   = Number(it?.amount) || 0;
+      const base = Number(it?.amount) || 0;
       const gstPct = Number(it?.gst_percent) || 0;
-      const gstAmt = it?.gst_amount != null ? Number(it.gst_amount) : (base * gstPct) / 100;
-      const total  = base + gstAmt;
       const discVal = Number(it?.discount_value) || 0;
-      const disc    = discVal > 0
-        ? (String(it?.discount_type || '').toLowerCase() === 'percent' ? `${discVal}%` : inr(discVal))
-        : '—';
+      const disc =
+        discVal > 0
+          ? String(it?.discount_type || '').toLowerCase() === 'percent'
+            ? `${discVal}%`
+            : inr(discVal)
+          : '';
       return [
-        { text: String(i + 1),                                                alignment: 'center', fontSize: 7.5 },
+        { text: String(i + 1), alignment: 'center', fontSize: 9 },
         {
           stack: [
-            { text: safe(it?.item_name || it?.itemName, `Item ${i + 1}`),    bold: true, fontSize: 8 },
-            ...(it?.sku ? [{ text: String(it.sku), color: SLATE, fontSize: 6.5 }] : []),
+            { text: safe(it?.item_name || it?.itemName, `Item ${i + 1}`), bold: true, fontSize: 9 },
+            ...(it?.sku ? [{ text: String(it.sku), color: SLATE, fontSize: 7 }] : []),
           ],
         },
-        { text: safe(it?.instruction || it?.instructions || it?.notes, '—'), fontSize: 7.5, color: SLATE },
-        { text: gstPct > 0 ? `${gstPct}%` : '—',                             alignment: 'center', fontSize: 7.5 },
-        { text: disc,                                                          alignment: 'center', fontSize: 7.5 },
-        { text: String(Number(it?.qty) || 0),                                 alignment: 'center', fontSize: 7.5 },
-        { text: inr(it?.rate),                                                 alignment: 'right',  fontSize: 7.5 },
-        { text: inr(total),                                                    alignment: 'right',  fontSize: 7.5, bold: true },
+        {
+          text: safe(it?.instruction || it?.instructions || it?.notes, ''),
+          fontSize: 8,
+          color: SLATE,
+        },
+        { text: String(Number(it?.qty) || 0), alignment: 'center', fontSize: 9 },
+        { text: safe(it?.uom || it?.unit || '', ''), alignment: 'center', fontSize: 9 },
+        ...(hasAnyDiscount ? [{ text: disc, alignment: 'center', fontSize: 9 }] : []),
+        { text: inr(it?.rate), alignment: 'right', fontSize: 9 },
+        { text: gstPct > 0 ? `${gstPct}%` : '', alignment: 'center', fontSize: 9 },
+        { text: inr(base), alignment: 'right', fontSize: 9, bold: true },
       ];
     });
 
     if (itemRows.length === 0) {
+      const cols = hasAnyDiscount ? 9 : 8;
       itemRows.push([
-        { text: 'No items', colSpan: 8, alignment: 'center', fontSize: 8, color: SLATE },
-        {}, {}, {}, {}, {}, {}, {},
+        { text: 'No items', colSpan: cols, alignment: 'center', fontSize: 9, color: SLATE },
+        ...Array(cols - 1).fill({}),
       ]);
     }
 
-    // Totals breakdown
-    const totalRows: any[] = [
-      [{ text: 'Sub Total', fontSize: 8 }, { text: inr(subTotal), alignment: 'right', fontSize: 8 }],
-      ...(headerDisc > 0 ? [[
-        { text: discType === 'PERCENT' && discValue > 0 ? `Discount (${discValue}%)` : 'Discount', fontSize: 8, color: RED },
-        { text: `−${inr(headerDisc)}`, alignment: 'right', fontSize: 8, color: RED },
-      ]] : []),
-      [{ text: 'Taxable Amount', fontSize: 8 }, { text: inr(taxable), alignment: 'right', fontSize: 8 }],
-      ...(cgst > 0 ? [[{ text: 'CGST', fontSize: 8 }, { text: inr(cgst), alignment: 'right', fontSize: 8 }]] : []),
-      ...(sgst > 0 ? [[{ text: 'SGST', fontSize: 8 }, { text: inr(sgst), alignment: 'right', fontSize: 8 }]] : []),
-      ...(chargePack  > 0 ? [[{ text: 'Packing',      fontSize: 8 }, { text: inr(chargePack),  alignment: 'right', fontSize: 8 }]] : []),
-      ...(chargeCar   > 0 ? [[{ text: 'Cartage',      fontSize: 8 }, { text: inr(chargeCar),   alignment: 'right', fontSize: 8 }]] : []),
-      ...(chargeFwd   > 0 ? [[{ text: 'Forwarding',   fontSize: 8 }, { text: inr(chargeFwd),   alignment: 'right', fontSize: 8 }]] : []),
-      ...(chargeInst  > 0 ? [[{ text: 'Installation', fontSize: 8 }, { text: inr(chargeInst),  alignment: 'right', fontSize: 8 }]] : []),
-      ...(chargeLoad  > 0 ? [[{ text: 'Loading',      fontSize: 8 }, { text: inr(chargeLoad),  alignment: 'right', fontSize: 8 }]] : []),
-      [
-        { text: 'Grand Total', bold: true, fontSize: 10, color: '#fff', fillColor: BLUE },
-        { text: inr(grandTotal), alignment: 'right', bold: true, fontSize: 10, color: '#fff', fillColor: BLUE },
+    // Account details
+    const bankRow2 = (label: string, value: string) => ({
+      columns: [
+        { text: label, bold: true, fontSize: 8, width: 110, color: INK },
+        { text: value, fontSize: 8, width: '*', color: '#374151' },
       ],
+      columnGap: 4,
+      margin: [0, 0, 0, 3],
+    });
+    const accountLines: any[] = [
+      bankRow2("Account Holder's Name:", bankAccName),
+      bankRow2('Account Number:', bankAccount),
+      bankRow2('Bank Name:', bankName),
+      bankRow2('Branch Name:', bankBranch),
+      bankRow2('IFSC Code:', bankIfsc),
     ];
 
-    // Company info lines
-    const coInfoLines: any[] = [
-      { text: companyName, fontSize: 14, bold: true, color: BLUE },
+    // Totals stack
+    const tRow2 = (label: string, value: number, bold = false, large = false) => ({
+      columns: [
+        { text: label, fontSize: large ? 10 : 8.5, bold, color: large ? BLUE : INK, width: '*' },
+        { text: inr(value), fontSize: large ? 10 : 8.5, bold, color: large ? BLUE : INK, width: 'auto', alignment: 'right' },
+      ],
+      margin: [0, large ? 2 : 1, 0, large ? 2 : 1],
+    });
+    const tDiv2 = () => ({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: 200, y2: 0, lineWidth: 0.5, lineColor: '#999' }], margin: [0, 3, 0, 3] });
+    const totalBeforeGst2 = subTotal + chargePack + chargeCar + chargeFwd + chargeInst + chargeLoad;
+    const totalGstAmt2 = [...gstByRate2.values()].reduce((s, a) => s + a, 0);
+    const computedGrandTotal2 = totalBeforeGst2 + totalGstAmt2 + roundOff;
+    const totalsStack: any[] = [
+      tRow2('Sub Total', subTotal, true, true),
+      ...(chargePack > 0 ? [tRow2('(+) Wooden Packing Charges', chargePack)] : []),
+      ...(chargeCar > 0 ? [tRow2('(+) Cartage Charges', chargeCar)] : []),
+      ...(chargeFwd > 0 ? [tRow2('(+) Forwarding Charges', chargeFwd)] : []),
+      ...(chargeInst > 0 ? [tRow2('(+) Onsite Installation Charges', chargeInst)] : []),
+      ...(chargeLoad > 0 ? [tRow2('(+) Loading & Unloading Charges', chargeLoad)] : []),
+      tDiv2(),
+      tRow2('Total', totalBeforeGst2, true, true),
+      tDiv2(),
+      ...[...gstByRate2.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([pct, amt]) => tRow2(`(+) GST ${pct}% on ${inr(amt * 100 / pct)}`, amt)),
+      tDiv2(),
+      tRow2('Rounded Off', roundOff),
+      tDiv2(),
+      tRow2('Grand Total', computedGrandTotal2, true, true),
+      tDiv2(),
     ];
-    if (companyAddr)  coInfoLines.push({ text: companyAddr,  fontSize: 7.5, color: SLATE });
-    const phoneEmail = [companyPhone, companyEmail].filter(Boolean).join('  ·  ');
-    if (phoneEmail)   coInfoLines.push({ text: phoneEmail,   fontSize: 7.5, color: SLATE });
-    if (companyWeb)   coInfoLines.push({ text: companyWeb,   fontSize: 7.5, color: SLATE });
-    if (companyGstin) coInfoLines.push({ text: `GSTIN: ${companyGstin}`, fontSize: 7.5, color: SLATE, bold: true });
 
-    // Order details (right col)
-    const detailStack: any[] = [
-      { text: [{ text: 'Order No.  ', bold: true, color: SLATE }, orderNo],          fontSize: 8 },
-      { text: [{ text: 'Order Date ', bold: true, color: SLATE }, date(data?.created_at)], fontSize: 8 },
-    ];
-    if (data?.due_date) detailStack.push({ text: [{ text: 'Exp. Delivery ', bold: true, color: SLATE }, date(data.due_date)], fontSize: 8 });
-    const orderPending =
-      String(data?.status || '').toUpperCase() === 'PENDING_APPROVAL' ||
-      String(data?.status || '').toUpperCase() === 'GENERATED';
-    detailStack.push(
-      ...ownershipPdfStack(data, {
-        showPhone: true,
-        approvalPending: orderPending && !data?.approved_by_name,
-      }),
-    );
-    if (statusText)           detailStack.push({ text: statusText, fontSize: 7.5, bold: true, color: '#fff', background: statusBg, margin: [0, 3, 0, 0] });
-
-    // Customer addresses
-    const custName = safe(data?.customer_name, '—');
-    const billAddr = [
-      data?.billing_address,
-      data?.gst_number      ? `GSTIN: ${data.gst_number}` : null,
-      data?.customer_phone  ? `Ph: ${data.customer_phone}` : null,
-    ].filter(Boolean).join('\n');
-    const shipAddr = safe(data?.shipping_address || data?.billing_address, '');
-
-    // Delivery details (3rd col)
-    const delivStack: any[] = [
-      { text: 'DELIVERY DETAILS', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 3] },
-    ];
-    if (data?.due_date)     delivStack.push({ text: [{ text: 'Exp. Dispatch: ', bold: true }, date(data.due_date)], fontSize: 8 });
-    delivStack.push({ text: [{ text: 'Dispatch Type: ', bold: true }, safe(data?.delivery_type, '—')], fontSize: 8, margin: [0, 1, 0, 0] });
-    delivStack.push({ text: [{ text: 'Goods Sent By: ', bold: true }, safe(data?.delivery_by, '—')],  fontSize: 8, margin: [0, 1, 0, 0] });
-    delivStack.push({ text: [{ text: 'Payment Mode: ', bold: true }, safe(data?.payment_type || data?.payment_mode, '—')], fontSize: 8, margin: [0, 1, 0, 0] });
-    if (data?.delivery_instructions) {
-      delivStack.push({ text: [{ text: 'Instructions: ', bold: true }, safe(data.delivery_instructions)], fontSize: 7.5, color: SLATE, margin: [0, 2, 0, 0] });
-    }
-
-    // Bank rows
-    const bankRows: any[] = [];
-    if (bankAccName) bankRows.push({ text: [{ text: 'Acc. Name: ', bold: true }, bankAccName], fontSize: 7.5 });
-    if (bankName)    bankRows.push({ text: [{ text: 'Bank: ',      bold: true }, bankName],    fontSize: 7.5 });
-    if (bankBranch)  bankRows.push({ text: [{ text: 'Branch: ',    bold: true }, bankBranch],  fontSize: 7.5 });
-    if (bankAccount) bankRows.push({ text: [{ text: 'A/C No.: ',   bold: true }, bankAccount], fontSize: 7.5 });
-    if (bankIfsc)    bankRows.push({ text: [{ text: 'IFSC: ',      bold: true }, bankIfsc],    fontSize: 7.5 });
-    if (bankUpi)     bankRows.push({ text: [{ text: 'UPI: ',       bold: true }, bankUpi],     fontSize: 7.5 });
-    if (bankRows.length === 0) bankRows.push({ text: 'Bank details not configured.', fontSize: 7.5, color: SLATE });
-
-    // Payment status section (orders only)
-    const hasPayment = paidAmount > 0 || pendingAmt > 0;
-    const payStatusSection: any[] = hasPayment ? [{
-      table: {
-        widths: ['*', '*', '*'],
-        body: [[
-          {
-            stack: [
-              { text: 'GRAND TOTAL', fontSize: 7, bold: true, color: SLATE, alignment: 'center' },
-              { text: inr(grandTotal), fontSize: 10, bold: true, color: BLUE, alignment: 'center' },
-            ],
-            margin: [0, 4, 0, 4],
-          },
-          {
-            stack: [
-              { text: 'ADVANCE RECEIVED', fontSize: 7, bold: true, color: SLATE, alignment: 'center' },
-              { text: inr(paidAmount), fontSize: 10, bold: true, color: GREEN, alignment: 'center' },
-            ],
-            margin: [0, 4, 0, 4],
-          },
-          {
-            stack: [
-              { text: 'BALANCE DUE', fontSize: 7, bold: true, color: SLATE, alignment: 'center' },
-              { text: inr(pendingAmt), fontSize: 10, bold: true, color: pendingAmt > 0 ? RED : GREEN, alignment: 'center' },
-            ],
-            margin: [0, 4, 0, 4],
-          },
-        ]],
-      },
-      layout: {
-        hLineWidth: () => 0.5, vLineWidth: () => 0.5,
-        hLineColor: () => RULE, vLineColor: () => RULE,
-        fillColor: () => LIGHT,
-      },
-      margin: [0, 0, 0, 8],
-    }] : [];
+    const termsText =
+      'TERMS & CONDITIONS\n' +
+      '• Prices are valid only for this quotation and are subject to change without prior notice. ' +
+      '• Order confirmation is subject to receipt of the agreed advance payment. ' +
+      '• Delivery timelines commence only after advance payment and final order confirmation. ' +
+      '• Any change in order specifications may affect pricing and delivery schedules. ' +
+      '• Goods once sold will not be taken back except for approved manufacturing defects. ' +
+      '• Risk in transit passes to the buyer upon dispatch. Transit damage claims must be made with the transporter. ' +
+      '• Delivery delays due to force majeure or unforeseen circumstances shall not be the responsibility of the company. ' +
+      '• Refunds, if approved, will be processed within 10 working days after verification. ' +
+      '• GST and other applicable taxes will be charged as per prevailing rates on the invoice date. ' +
+      '• Product specifications, prices, and designs are subject to change without prior notice. ' +
+      '• All disputes shall be subject to the exclusive jurisdiction of the courts in Chennai, Tamil Nadu.';
 
     return {
       pageSize: 'A4',
-      pageMargins: [34, 34, 34, 34],
+      pageMargins: [36, 30, 36, 40],
+      footer: (currentPage: number, pageCount: number) => ({
+        margin: [36, 0, 36, 10],
+        text: `Page ${currentPage}/${pageCount}`,
+        fontSize: 8,
+        italics: true,
+        alignment: 'center',
+        color: SLATE,
+      }),
       content: [
+        // ── Title ────────────────────────────────────────────────────────
+        { text: 'Order', fontSize: 16, bold: true, alignment: 'center', margin: [0, 0, 0, 6] },
 
         // ── Header ──────────────────────────────────────────────────
         {
           columns: [
-            { stack: coInfoLines, width: '*' },
             {
-              stack: [{ text: 'ORDER CONFIRMATION', fontSize: 12, bold: true, color: BLUE, alignment: 'center' }],
-              width: 'auto', margin: [10, 0, 10, 0],
+              width: '*',
+              stack: [
+                { text: companyName, fontSize: 13, bold: true, margin: [0, 0, 0, 3] },
+                { text: companyAddr.replace(/\n/g, ', '), fontSize: 7, margin: [0, 0, 0, 2] },
+                { text: [
+                  { text: 'Mobile: ', bold: true, fontSize: 7 },
+                  { text: companyPhone, fontSize: 7, color: '#374151' },
+                  { text: '     ·     ', fontSize: 7, color: SLATE },
+                  { text: 'Email: ', bold: true, fontSize: 7 },
+                  { text: companyEmail, fontSize: 7, color: '#374151' },
+                ], margin: [0, 0, 0, 2] },
+                { text: [{ text: 'MSME Reg. No.: ', bold: true, fontSize: 7 }, { text: 'UDYAM-TN-02-0034349', fontSize: 7, color: '#374151' }], margin: [0, 0, 0, 2] },
+                { text: [{ text: 'ISO 9001 : 2015 Certified', bold: true, fontSize: 7, color: BLUE }, { text: '  |  QMS System', fontSize: 7, color: SLATE }], margin: [0, 0, 0, 2] },
+                { text: [{ text: 'GSTIN: ', bold: true, fontSize: 7.5 }, { text: companyGstin, bold: true, fontSize: 7.5 }] },
+                ...(salesPerson ? [{ text: `Sales Person: ${salesPerson}`, fontSize: 8, margin: [0, 4, 0, 0] }] : []),
+                { text: `Order Number: ${orderNo}`, fontSize: 8, margin: [0, 2, 0, 0] },
+              ],
             },
-            { stack: detailStack, width: 110, alignment: 'right' },
+            ...(logoPath ? [{ image: logoPath, fit: [152, 97], width: 158, alignment: 'right' }] : []),
           ],
-          margin: [0, 0, 0, 4],
+          columnGap: 8,
+          margin: [0, 0, 0, 8],
         },
-        { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 527, y2: 0, lineWidth: 1.5, lineColor: BLUE }], margin: [0, 0, 0, 5] },
 
-        // ── 3-col: Bill To | Delivery To | Delivery Details ──────────
+        // ── Bill To / Ship To ──────────────────────────────────────────
         {
           table: {
-            widths: ['*', '*', 105],
-            body: [[
-              {
-                stack: [
-                  { text: 'BILL TO', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 2] },
-                  { text: custName, fontSize: 9, bold: true },
-                  ...(billAddr ? [{ text: billAddr, fontSize: 7.5, color: SLATE, margin: [0, 1, 0, 0] }] : []),
-                ],
-              },
-              {
-                stack: [
-                  { text: 'DELIVERY TO', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 2] },
-                  { text: custName, fontSize: 9, bold: true },
-                  ...(shipAddr ? [{ text: shipAddr, fontSize: 7.5, color: SLATE, margin: [0, 1, 0, 0] }] : []),
-                ],
-              },
-              { stack: delivStack },
-            ]],
+            widths: ['*', '*'],
+            body: [
+              [
+                { text: 'Bill To', fontSize: 10, bold: true, color: '#fff', fillColor: BLUE, margin: [6, 4, 6, 4] },
+                { text: 'Ship To', fontSize: 10, bold: true, color: '#fff', fillColor: BLUE, margin: [6, 4, 6, 4] },
+              ],
+              [
+                {
+                  stack: [
+                    { text: custName, fontSize: 9.5, bold: true, color: INK, margin: [0, 0, 0, 3] },
+                    { text: billAddr, fontSize: 8, color: '#374151', lineHeight: 1.3 },
+                  ],
+                  margin: [6, 6, 6, 6],
+                },
+                {
+                  stack: [
+                    { text: custName, fontSize: 9.5, bold: true, color: INK, margin: [0, 0, 0, 3] },
+                    { text: shipAddr, fontSize: 8, color: '#374151', lineHeight: 1.3 },
+                  ],
+                  margin: [6, 6, 6, 6],
+                },
+              ],
+            ],
           },
           layout: {
-            hLineWidth: () => 0.5, vLineWidth: () => 0.5,
-            hLineColor: () => RULE, vLineColor: () => RULE,
-            paddingLeft: () => 6, paddingRight: () => 6,
-            paddingTop:  () => 5, paddingBottom: () => 5,
+            hLineWidth: (i: number) => (i === 0 || i === 1 || i === 2 ? 0.5 : 0),
+            vLineWidth: (i: number) => (i === 0 || i === 1 || i === 2 ? 0.5 : 0),
+            hLineColor: () => RULE,
+            vLineColor: () => RULE,
+            paddingLeft: () => 0, paddingRight: () => 0,
+            paddingTop: () => 0, paddingBottom: () => 0,
           },
-          margin: [0, 0, 0, 5],
+          margin: [0, 0, 0, 8],
         },
 
         // ── Items table ──────────────────────────────────────────────
         {
           table: {
             headerRows: 1,
-            widths: [14, '*', 62, 22, 28, 22, 45, 46],
+            widths: [20, '*', 58, 20, 26, ...(hasAnyDiscount ? [28] : []), 48, 24, 50],
             body: [
               [
-                { text: '#',              style: 'th', alignment: 'center' },
-                { text: 'Item No / Name', style: 'th' },
-                { text: 'Instructions',   style: 'th' },
-                { text: 'GST%',           style: 'th', alignment: 'center' },
-                { text: 'Disc.',          style: 'th', alignment: 'center' },
-                { text: 'Qty',            style: 'th', alignment: 'center' },
-                { text: 'Rate (₹)',       style: 'th', alignment: 'right'  },
-                { text: 'Amount (₹)',     style: 'th', alignment: 'right'  },
+                { text: 'S.No', style: 'th', alignment: 'center' },
+                { text: 'Item Name', style: 'th' },
+                { text: 'Instructions', style: 'th' },
+                { text: 'Qty', style: 'th', alignment: 'center' },
+                { text: 'UOM', style: 'th', alignment: 'center' },
+                ...(hasAnyDiscount ? [{ text: 'Disc.', style: 'th', alignment: 'center' }] : []),
+                { text: 'Rate (₹)', style: 'th', alignment: 'right' },
+                { text: 'GST Tax', style: 'th', alignment: 'center' },
+                {
+                  stack: [
+                    { text: 'Amount (₹)', fontSize: 8.5, bold: true, color: '#fff' },
+                    { text: '(Tax Extra)', fontSize: 5.5, color: '#fff', italics: true },
+                  ],
+                  alignment: 'right',
+                  fillColor: BLUE,
+                },
               ],
               ...itemRows,
             ],
           },
           layout: {
             hLineWidth: (i: number, node: any) =>
-              (i === 0 || i === node.table.headerRows || i === node.table.body.length) ? 0.75 : 0.35,
-            vLineWidth: () => 0,
-            hLineColor: (i: number) => i === 0 ? BLUE : RULE,
-            fillColor:  (row: number) => row === 0 ? BLUE : (row % 2 === 0 ? LIGHT : null),
-            paddingLeft: () => 3, paddingRight: () => 3,
-            paddingTop:  () => 3, paddingBottom: () => 3,
+              i === 0 || i === node.table.headerRows || i === node.table.body.length
+                ? 1
+                : 0.5,
+            vLineWidth: () => 1,
+            hLineColor: () => RULE,
+            vLineColor: () => RULE,
+            fillColor: (row: number) => (row === 0 ? BLUE : null),
+            paddingLeft: () => 4,
+            paddingRight: () => 4,
+            paddingTop: () => 2,
+            paddingBottom: () => 2,
           },
-          margin: [0, 0, 0, 5],
-        },
-
-        // ── Totals: Amount in Words | Breakdown ──────────────────────
-        {
-          columns: [
-            {
-              width: '*',
-              stack: [
-                { text: 'AMOUNT IN WORDS', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 3] },
-                { text: amountInWords(grandTotal), fontSize: 8.5, italics: true },
-              ],
-              margin: [0, 4, 10, 0],
-            },
-            {
-              width: 175,
-              table: { widths: ['*', 'auto'], body: totalRows },
-              layout: {
-                hLineWidth: (i: number, node: any) =>
-                  (i === node.table.body.length - 1 || i === node.table.body.length) ? 0 : 0.35,
-                vLineWidth: () => 0,
-                hLineColor: () => RULE,
-                paddingLeft: () => 4, paddingRight: () => 4,
-                paddingTop:  () => 3, paddingBottom: () => 3,
-              },
-            },
-          ],
           margin: [0, 0, 0, 8],
         },
 
-        // ── Payment Status (if any payments recorded) ────────────────
-        ...payStatusSection,
-
-        // ── Payment Terms Bar ────────────────────────────────────────
-        ...(payTerms ? [{
-          table: {
-            widths: ['*'],
-            body: [[{
-              stack: [
-                { text: 'PAYMENT TERMS', fontSize: 7, bold: true, color: BLUE, alignment: 'center', margin: [0, 0, 0, 2] },
-                { text: payTerms, fontSize: 9, bold: true, color: BLUE, alignment: 'center' },
-              ],
-              margin: [0, 4, 0, 4],
-            }]],
-          },
-          layout: {
-            hLineWidth: () => 1, vLineWidth: () => 1,
-            hLineColor: () => BLUE, vLineColor: () => BLUE,
-          },
-          margin: [0, 0, 0, 8],
-        }] : []),
-
-        // ── Rule before bottom ───────────────────────────────────────
-        { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 527, y2: 0, lineWidth: 0.5, lineColor: RULE }], margin: [0, 0, 0, 5] },
-
-        // ── Bottom 2-col: Bank | T&C ─────────────────────────────────
+        // ── Account Details + QR | Totals ────────────────────────────────
         {
           columns: [
-            {
-              width: '*',
-              stack: [
-                { text: 'BANK DETAILS', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 3] },
-                ...bankRows,
-              ],
-            },
-            {
-              width: '*',
-              stack: [
-                { text: 'TERMS & CONDITIONS', fontSize: 7, bold: true, color: SLATE, margin: [0, 0, 0, 3] },
-                {
-                  ol: [
-                    'All disputes are subject to Chennai jurisdiction only.',
-                    'Payment as per agreed terms. Goods remain property of seller until full payment received.',
-                    'Delivery charges and risks are borne by the buyer unless otherwise agreed.',
-                    'Transport / freight charges are additional unless explicitly included in this order.',
-                    'Prices are subject to change without prior notice for delayed orders. E.&O.E.',
+            // QR code
+            ...(qrPath
+              ? [{
+                  width: 90,
+                  stack: [
+                    { text: 'Scan to Pay', fontSize: 7.5, bold: true, alignment: 'center', color: INK, margin: [0, 0, 0, 3] },
+                    { image: qrPath, fit: [80, 80], width: 80, alignment: 'center' },
+                    { text: 'Google Pay / UPI', fontSize: 6.5, alignment: 'center', color: SLATE, margin: [0, 3, 0, 0] },
                   ],
-                  fontSize: 7.5, color: SLATE,
-                },
+                }]
+              : []),
+            // Bank details + Dispatch Details (left column)
+            {
+              width: '*',
+              stack: [
+                { text: 'Account Details', fontSize: 9.5, bold: true, color: BLUE, margin: [0, 0, 0, 5] },
+                ...accountLines,
+                { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 200, y2: 0, lineWidth: 0.5, lineColor: RULE }], margin: [0, 10, 0, 8] },
+                { text: 'Dispatch Details', fontSize: 9.5, bold: true, color: BLUE, margin: [0, 0, 0, 5] },
+                ...[
+                  ['Booking At',           bookingAt           || '—'],
+                  ['Goods Sent By',        goodsSentBy         || '—'],
+                  ['Transport Payment By', transportPaymentBy  || '—'],
+                  ['Delivery Type',        deliveryType        || '—'],
+                  ['Delivery Instruction', deliveryInstructions|| '—'],
+                ].map(([label, value]) => ({
+                  columns: [
+                    { text: `${label}:`, bold: true, fontSize: 8, width: 115, color: INK },
+                    { text: value, fontSize: 8, width: '*', color: value === '—' ? SLATE : '#374151' },
+                  ],
+                  margin: [0, 0, 0, 3],
+                })),
               ],
+              margin: [qrPath ? 10 : 0, 0, 0, 0],
+            },
+            // Divider
+            {
+              width: 0.5,
+              canvas: [{ type: 'line', x1: 0, y1: 0, x2: 0, y2: 220, lineWidth: 0.5, lineColor: '#aaa' }],
+            },
+            // Totals
+            {
+              width: '42%',
+              stack: totalsStack,
+              margin: [10, 0, 0, 0],
             },
           ],
-          margin: [0, 0, 0, 10],
+          columnGap: 8,
+          margin: [0, 0, 0, 8],
         },
 
-        // ── Computer-generated line ──────────────────────────────────
-        {
-          text: 'This is a Computer Generated Order Confirmation',
-          fontSize: 7.5, italics: true, color: SLATE, alignment: 'center',
-          margin: [0, 0, 0, 6],
-        },
+        // ── Terms & Conditions ───────────────────────────────────────
+        { text: termsText, fontSize: 6, margin: [0, 6, 0, 6], color: INK },
 
-        // ── Footer ───────────────────────────────────────────────────
+        // ── Computer Generated Notice ─────────────────────────────────
         {
-          columns: [
-            { text: 'Thank you for your order!', fontSize: 8, bold: true, color: BLUE },
-            { text: 'Page 1 of 1', fontSize: 7.5, color: SLATE, alignment: 'right' },
-          ],
+          text: 'This is a Computer Generated Order, Signature & Seal not required.',
+          fontSize: 7.5,
+          italics: true,
+          alignment: 'center',
+          color: SLATE,
+          margin: [0, 4, 0, 0],
         },
       ],
       styles: {
-        th: { bold: true, fontSize: 8, color: '#fff', fillColor: BLUE },
+        th: { bold: true, fontSize: 8.5, color: '#fff', fillColor: BLUE },
       },
-      defaultStyle: { fontSize: 8.5, font: 'Roboto' },
+      defaultStyle: { fontSize: 8, font: 'Roboto' },
     };
   }
 
   // ── Template: Invoice ────────────────────────────────────────────────────────
 
   invoiceTemplate(data: any): any {
-    const items = (Array.isArray(data?.items) ? data.items : []).map((item: any, i: number) => [
-      String(i + 1),
-      item?.itemName || item?.item_name || '-',
-      String(Number(item?.quantity) || 0),
-      `₹${Number(item?.rate || 0).toFixed(2)}`,
-      `₹${Number(item?.amount || 0).toFixed(2)}`,
-    ]);
+    const items = (Array.isArray(data?.items) ? data.items : []).map(
+      (item: any, i: number) => [
+        String(i + 1),
+        item?.itemName || item?.item_name || '-',
+        String(Number(item?.quantity) || 0),
+        `₹${Number(item?.rate || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        `₹${Number(item?.amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+      ],
+    );
 
     const ownershipLines = ownershipPdfStack(data, {
       showPhone: true,
       approvalPending:
-        String(data?.order_status || data?.status || '').toUpperCase() === 'PENDING_APPROVAL' &&
-        !data?.approved_by_name,
+        String(data?.order_status || data?.status || '').toUpperCase() ===
+          'PENDING_APPROVAL' && !data?.approved_by_name,
     });
 
     return {
       content: [
+        { text: 'Tax Invoice', fontSize: 18, bold: true, alignment: 'center', margin: [0, 0, 0, 8] },
         { text: appConfig?.companyName || 'Saachu', style: 'header' },
-        { text: `INVOICE: ${data?.invoice_no || data?.id || ''}`, style: 'subheader' },
-        { text: `Customer: ${data?.customer_name || ''}`, margin: [0, 4, 0, 2] },
-        ...(ownershipLines.length ? [{ stack: ownershipLines, margin: [0, 0, 0, 8] }] : []),
+        {
+          text: `INVOICE: ${data?.invoice_no || data?.id || ''}`,
+          style: 'subheader',
+        },
+        {
+          text: `Customer: ${data?.customer_name || ''}`,
+          margin: [0, 4, 0, 2],
+        },
+        ...(ownershipLines.length
+          ? [{ stack: ownershipLines, margin: [0, 0, 0, 8] }]
+          : []),
         {
           table: {
             headerRows: 1,
             widths: ['auto', '*', 'auto', 'auto', 'auto'],
-            body: [['#', 'Item', 'Qty', 'Rate', 'Amount'], ...(items.length ? items : [['—', '—', '0', '—', '—']])],
+            body: [
+              ['#', 'Item', 'Qty', 'Rate', 'Amount'],
+              ...(items.length ? items : [['—', '—', '0', '—', '—']]),
+            ],
           },
         },
-        { text: `Sub Total: ₹${Number(data?.sub_total || 0).toFixed(2)}`, margin: [0, 8, 0, 2], alignment: 'right' },
-        { text: `GST: ₹${Number((data?.cgst || 0) + (data?.sgst || 0) + (data?.igst || 0)).toFixed(2)}`, margin: [0, 0, 0, 2], alignment: 'right' },
-        { text: `Total: ₹${Number(data?.total_amount || 0).toFixed(2)}`, style: 'total', margin: [0, 4, 0, 0] },
+        {
+          text: `Sub Total: ₹${Number(data?.sub_total || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          margin: [0, 8, 0, 2],
+          alignment: 'right',
+        },
+        {
+          text: `GST: ₹${Number((data?.cgst || 0) + (data?.sgst || 0) + (data?.igst || 0)).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          margin: [0, 0, 0, 2],
+          alignment: 'right',
+        },
+        {
+          text: `Total: ₹${Number(data?.total_amount || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+          style: 'total',
+          margin: [0, 4, 0, 0],
+        },
       ],
       styles: {
-        header:    { fontSize: 18, bold: true },
+        header: { fontSize: 18, bold: true },
         subheader: { fontSize: 14, bold: true, margin: [0, 4, 0, 4] },
-        total:     { fontSize: 14, bold: true, alignment: 'right' },
+        total: { fontSize: 14, bold: true, alignment: 'right' },
       },
       defaultStyle: { font: 'Roboto' },
     };
@@ -936,21 +1080,30 @@ export class PdfService {
       const doc = pdfmake.createPdf(docDefinition);
       return await doc.getBuffer();
     } catch (e: any) {
-      this.logger.error(`[PDF ERROR] generateBuffer failed: ${e?.message}`, e?.stack);
-      throw new InternalServerErrorException(`PDF generation failed: ${e?.message || 'unknown error'}`);
+      this.logger.error(
+        `[PDF ERROR] generateBuffer failed: ${e?.message}`,
+        e?.stack,
+      );
+      throw new InternalServerErrorException(
+        `PDF generation failed: ${e?.message || 'unknown error'}`,
+      );
     }
   }
 
   // ── Core: generate + save to disk ────────────────────────────────────────────
 
-  async generateAndSave(type: 'quotation' | 'order' | 'invoice', id: number, data: any): Promise<string> {
+  async generateAndSave(
+    type: 'quotation' | 'order' | 'invoice',
+    id: number,
+    data: any,
+  ): Promise<string> {
     let template: any;
-    if (type === 'quotation')     template = this.quotationTemplate(data);
-    else if (type === 'order')    template = this.orderTemplate(data);
-    else                          template = this.invoiceTemplate(data);
+    if (type === 'quotation') template = await this.quotationTemplate(data);
+    else if (type === 'order') template = this.orderTemplate(data);
+    else template = this.invoiceTemplate(data);
 
-    const buffer   = await this.generateBuffer(template);
-    const dir      = this.ensureUploadsDir();
+    const buffer = await this.generateBuffer(template);
+    const dir = this.ensureUploadsDir();
     const filename = `${type}-${id}.pdf`;
     const filepath = path.join(dir, filename);
     fs.writeFileSync(filepath, buffer);

@@ -88,10 +88,19 @@ export class NumbersController {
   @Post(':id/connect')
   @HttpCode(200)
   async connect(@Param('id') id: string) {
-    this.logger.warn(`[WA_OPERATOR_CONNECT] numberId=${id} method=qr ts=${new Date().toISOString()}`);
+    this.logger.warn(
+      `[WA_OPERATOR_CONNECT] numberId=${id} method=qr ts=${new Date().toISOString()}`,
+    );
     await this.numbersService.findOne(id); // 404 guard
-    await this.marketingWa.connectNumber(id, true /* isManual — user initiated */);
-    return { ok: true, message: 'Connect initiated — scan QR at /numbers/:id/qr or use /link-phone' };
+    await this.marketingWa.connectNumber(
+      id,
+      true /* isManual — user initiated */,
+    );
+    return {
+      ok: true,
+      message:
+        'Connect initiated — scan QR at /numbers/:id/qr or use /link-phone',
+    };
   }
 
   /**
@@ -101,13 +110,24 @@ export class NumbersController {
    */
   @Post(':id/link-phone')
   @HttpCode(200)
-  async linkWithPhone(@Param('id') id: string, @Body() body: { phone_number: string }) {
+  async linkWithPhone(
+    @Param('id') id: string,
+    @Body() body: { phone_number: string },
+  ) {
     await this.numbersService.findOne(id); // 404 guard
     if (!body?.phone_number) {
       return { ok: false, error: 'phone_number is required in request body' };
     }
-    const result = await this.marketingWa.requestPhoneLink(id, body.phone_number);
-    return { ok: true, code: result.code, message: 'Enter this code in WhatsApp → Linked Devices → Link with phone number' };
+    const result = await this.marketingWa.requestPhoneLink(
+      id,
+      body.phone_number,
+    );
+    return {
+      ok: true,
+      code: result.code,
+      message:
+        'Enter this code in WhatsApp → Linked Devices → Link with phone number',
+    };
   }
 
   /** Gracefully disconnect and destroy the WA client for this number. */
@@ -124,7 +144,10 @@ export class NumbersController {
   async reset(@Param('id') id: string) {
     await this.numbersService.findOne(id); // 404 guard
     await this.marketingWa.resetNumber(id);
-    return { ok: true, message: 'Session wiped — scan new QR at /numbers/:id/qr' };
+    return {
+      ok: true,
+      message: 'Session wiped — scan new QR at /numbers/:id/qr',
+    };
   }
 
   /**

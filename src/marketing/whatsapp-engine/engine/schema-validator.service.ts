@@ -15,13 +15,38 @@ const REQUIRED_TABLES = [
 
 // Columns added after the base migration (phases 5–9) — the drift-prone ones.
 const REQUIRED_COLUMNS: Record<string, string[]> = {
-  marketing_templates:    ['performance_weight', 'product_category'],
-  marketing_audience:     ['is_test_contact', 'cooldown_until', 'fatigue_score', 'sources_used', 'source_count', 'contact_strength', 'last_enriched_at'],
-  whatsapp_numbers:       ['wa_state', 'warmup_level', 'risk_score', 'daily_sent', 'last_message_sent_at'],
-  whatsapp_message_queue: ['attempt_count', 'priority', 'message_payload', 'number_id'],
-  whatsapp_message_logs:  ['delivered_at', 'read_at', 'reply_received', 'reply_message', 'number_id'],
-  engine_audit_logs:      ['metadata', 'score'],
-  whatsapp_replies:       ['conversation_key'],
+  marketing_templates: ['performance_weight', 'product_category'],
+  marketing_audience: [
+    'is_test_contact',
+    'cooldown_until',
+    'fatigue_score',
+    'sources_used',
+    'source_count',
+    'contact_strength',
+    'last_enriched_at',
+  ],
+  whatsapp_numbers: [
+    'wa_state',
+    'warmup_level',
+    'risk_score',
+    'daily_sent',
+    'last_message_sent_at',
+  ],
+  whatsapp_message_queue: [
+    'attempt_count',
+    'priority',
+    'message_payload',
+    'number_id',
+  ],
+  whatsapp_message_logs: [
+    'delivered_at',
+    'read_at',
+    'reply_received',
+    'reply_message',
+    'number_id',
+  ],
+  engine_audit_logs: ['metadata', 'score'],
+  whatsapp_replies: ['conversation_key'],
 };
 
 // Probing queries — each one selects only the critical column(s) with LIMIT 0.
@@ -81,9 +106,9 @@ export class SchemaValidatorService implements OnApplicationBootstrap {
     const opts = (this.ds.driver as any)?.options ?? {};
     this.logger.log(
       `[SchemaValidator] Connected to DB: ${r['db'] ?? opts.database ?? '?'} ` +
-      `| schema: ${r['schema'] ?? 'public'} ` +
-      `| host: ${r['host'] ?? opts.host ?? '?'} ` +
-      `| env: ${process.env.NODE_ENV ?? 'development'}`,
+        `| schema: ${r['schema'] ?? 'public'} ` +
+        `| host: ${r['host'] ?? opts.host ?? '?'} ` +
+        `| env: ${process.env.NODE_ENV ?? 'development'}`,
     );
   }
 
@@ -117,14 +142,16 @@ export class SchemaValidatorService implements OnApplicationBootstrap {
     }
 
     if (missing.length === 0) {
-      this.logger.log('[SchemaValidator] ✓ information_schema check passed — all tables and columns present');
+      this.logger.log(
+        '[SchemaValidator] ✓ information_schema check passed — all tables and columns present',
+      );
       return;
     }
 
     this.logger.error(
       `[SchemaValidator] ❌ SCHEMA DRIFT DETECTED — ${missing.length} missing item(s):\n` +
-      missing.map((m) => `  • ${m}`).join('\n') +
-      `\n  → Fix: node scripts/migrate-whatsapp-engine-schema-final.js`,
+        missing.map((m) => `  • ${m}`).join('\n') +
+        `\n  → Fix: node scripts/migrate-whatsapp-engine-schema-final.js`,
     );
   }
 
@@ -148,12 +175,14 @@ export class SchemaValidatorService implements OnApplicationBootstrap {
     if (failed.length > 0) {
       this.logger.error(
         `[SchemaValidator] ❌ ${failed.length} probe(s) failed — DB schema does not match entity definitions.\n` +
-        `  Failing: ${failed.join(', ')}\n` +
-        `  → Fix: node scripts/migrate-whatsapp-engine-schema-final.js\n` +
-        `  → Then restart the backend completely.`,
+          `  Failing: ${failed.join(', ')}\n` +
+          `  → Fix: node scripts/migrate-whatsapp-engine-schema-final.js\n` +
+          `  → Then restart the backend completely.`,
       );
     } else {
-      this.logger.log('[SchemaValidator] ✓ All probe queries passed — entity schema matches DB');
+      this.logger.log(
+        '[SchemaValidator] ✓ All probe queries passed — entity schema matches DB',
+      );
     }
   }
 }

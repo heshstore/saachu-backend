@@ -1,4 +1,13 @@
-import { Controller, Get, Post, Patch, Delete, Body, Param, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Body,
+  Param,
+  Query,
+} from '@nestjs/common';
 import { VendorsService } from './vendors.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
@@ -8,10 +17,7 @@ export class VendorsController {
 
   @Get()
   @RequirePermission('inventory.view')
-  findAll(
-    @Query('search') search?: string,
-    @Query('active') active?: string,
-  ) {
+  findAll(@Query('search') search?: string, @Query('active') active?: string) {
     return this.svc.findAll({ search, active });
   }
 
@@ -45,7 +51,10 @@ export class VendorItemMappingsController {
     @Query('itemSource') itemSource?: string,
   ) {
     if (!itemId) return [];
-    return this.svc.findMappingsForItem(+itemId, (itemSource || 'SERVICE').toUpperCase());
+    return this.svc.findMappingsForItem(
+      +itemId,
+      (itemSource || 'SERVICE').toUpperCase(),
+    );
   }
 
   @Post()

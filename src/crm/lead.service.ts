@@ -1,4 +1,11 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Logger, OnModuleInit } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+  Logger,
+  OnModuleInit,
+} from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import * as crypto from 'crypto';
@@ -15,7 +22,16 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Lead, LeadSource, LeadStatus, LeadPriority, LeadStage, LeadQuality, WorkflowState, OutcomeType } from './entities/lead.entity';
+import {
+  Lead,
+  LeadSource,
+  LeadStatus,
+  LeadPriority,
+  LeadStage,
+  LeadQuality,
+  WorkflowState,
+  OutcomeType,
+} from './entities/lead.entity';
 
 /**
  * Manual / high-trust sources where phone is optional.
@@ -43,22 +59,37 @@ import { User } from '../users/entities/user.entity';
 import { CreateLeadDto } from './dto/create-lead.dto';
 import { UpdateLeadDto } from './dto/update-lead.dto';
 import { LeadAssignmentService } from './lead-assignment.service';
-import { DecisionEngineService, DecisionContext, OutcomeHistory, computeNextActionDue, computeSlaStatus, computeQueueTier, isValidWorkflowTransition, WORKFLOW_RANK } from './decision-engine.service';
+import {
+  DecisionEngineService,
+  DecisionContext,
+  OutcomeHistory,
+  computeNextActionDue,
+  computeSlaStatus,
+  computeQueueTier,
+  isValidWorkflowTransition,
+  WORKFLOW_RANK,
+} from './decision-engine.service';
 import { IsNull } from 'typeorm';
 import { LeadAuditService } from './lead-audit.service';
 import { QuotationService } from '../quotation/quotation.service';
 import { DEDUP } from '../config/config';
-import { CRM_FULL_ACCESS_ROLES, CRM_WORKFLOW_BYPASS_ROLES, CRM_NON_OPERATIONAL_QUALITIES, hasOperationalIdentity, hasContactInfo } from './crm.constants';
+import {
+  CRM_FULL_ACCESS_ROLES,
+  CRM_WORKFLOW_BYPASS_ROLES,
+  CRM_NON_OPERATIONAL_QUALITIES,
+  hasOperationalIdentity,
+  hasContactInfo,
+} from './crm.constants';
 
 // Allowed forward-only status transitions.
 // Admin/COO bypass this check entirely.
 const VALID_TRANSITIONS: Record<string, string[]> = {
-  NEW:        ['CONTACTED', 'LOST'],
-  CONTACTED:  ['INTERESTED', 'LOST'],
+  NEW: ['CONTACTED', 'LOST'],
+  CONTACTED: ['INTERESTED', 'LOST'],
   INTERESTED: ['QUOTATION', 'CONTACTED', 'LOST'],
-  QUOTATION:  ['CONVERTED', 'INTERESTED', 'LOST'],
-  CONVERTED:  [],
-  LOST:       ['CONTACTED'],
+  QUOTATION: ['CONVERTED', 'INTERESTED', 'LOST'],
+  CONVERTED: [],
+  LOST: ['CONTACTED'],
 };
 
 // Re-exported from crm.constants.ts for use inside this file.
@@ -109,8 +140,8 @@ function extractPhoneFromText(text: string): string | null {
   const matches = text.match(/\+?\d[\d\s-]{8,20}\d/g);
   if (!matches || matches.length === 0) return null;
   const validNumbers = matches
-    .map(raw => raw.replace(/\D/g, ''))
-    .filter(raw => !raw.startsWith('0') && !/^(\d)\1+$/.test(raw));
+    .map((raw) => raw.replace(/\D/g, ''))
+    .filter((raw) => !raw.startsWith('0') && !/^(\d)\1+$/.test(raw));
   if (validNumbers.length === 0) return null;
   validNumbers.sort((a, b) => b.length - a.length);
   const selected = validNumbers[0];
@@ -118,8 +149,10 @@ function extractPhoneFromText(text: string): string | null {
   return normalized && normalized !== 'unknown' ? normalized : null;
 }
 
-
-function generateIdempotencyKey(phone: string | null, dto: Partial<CreateLeadDto>): string | null {
+function generateIdempotencyKey(
+  phone: string | null,
+  dto: Partial<CreateLeadDto>,
+): string | null {
   if (!phone || phone === 'unknown') return null;
   const dateHour = new Date().toISOString().slice(0, 13); // "2026-05-02T15"
   const parts = [
@@ -127,24 +160,38 @@ function generateIdempotencyKey(phone: string | null, dto: Partial<CreateLeadDto
     (dto.product_interest ?? '').toLowerCase().trim(),
     dateHour,
   ];
-  return crypto.createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 32);
+  return crypto
+    .createHash('sha256')
+    .update(parts.join('|'))
+    .digest('hex')
+    .slice(0, 32);
 }
 
 /** Idempotency key for Shopify leads.
  *  Known phone → deterministic hash (deduplicates repeat clicks from same customer).
  *  Unknown phone → unique key per click (every anonymous WhatsApp click is a separate lead). */
 function generateShopifyExternalId(payload: {
-  phone?: string; action?: string; lead_type?: string; product?: string;
+  phone?: string;
+  action?: string;
+  lead_type?: string;
+  product?: string;
 }): string {
   const rawPhone = (payload.phone || '').trim();
   if (!rawPhone || rawPhone.toLowerCase() === 'unknown') {
     return `shopify_anon_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
   }
-  const phone   = normalizePhone(rawPhone).replace(/\D/g, '').slice(-10);
-  const type    = (payload.action || payload.lead_type || 'enquiry').toLowerCase().replace(/\s+/g, '_');
-  const product = (payload.product || '').toLowerCase().replace(/\s+/g, '_').slice(0, 40);
-  const raw     = `shopify_${type}_${phone}_${product}`;
-  return 'sh_' + crypto.createHash('sha256').update(raw).digest('hex').slice(0, 24);
+  const phone = normalizePhone(rawPhone).replace(/\D/g, '').slice(-10);
+  const type = (payload.action || payload.lead_type || 'enquiry')
+    .toLowerCase()
+    .replace(/\s+/g, '_');
+  const product = (payload.product || '')
+    .toLowerCase()
+    .replace(/\s+/g, '_')
+    .slice(0, 40);
+  const raw = `shopify_${type}_${phone}_${product}`;
+  return (
+    'sh_' + crypto.createHash('sha256').update(raw).digest('hex').slice(0, 24)
+  );
 }
 
 /**
@@ -163,8 +210,11 @@ function resolveShopifyUtmContext(
   rawContext: string,
   payload: {
     action?: string;
-    utm_source?: string; utm_medium?: string; utm_campaign?: string;
-    gclid?: string; fbclid?: string;
+    utm_source?: string;
+    utm_medium?: string;
+    utm_campaign?: string;
+    gclid?: string;
+    fbclid?: string;
   },
 ): string {
   // Explicit context from the form takes precedence over UTM signals
@@ -195,27 +245,37 @@ export class LeadService implements OnModuleInit {
   private _whatsappDown = false;
 
   // ── Lead lock map (memory-only, 15-min TTL, Admin/COO bypass) ─────────────────
-  private readonly leadLockMap = new Map<number, { userId: number; userName: string; lockedUntil: number }>();
+  private readonly leadLockMap = new Map<
+    number,
+    { userId: number; userName: string; lockedUntil: number }
+  >();
 
   acquireLock(leadId: number, user: any): void {
     this.leadLockMap.set(leadId, {
-      userId:      user.id,
-      userName:    user.name ?? 'Unknown',
+      userId: user.id,
+      userName: user.name ?? 'Unknown',
       lockedUntil: Date.now() + 15 * 60_000,
     });
   }
 
-  getLockInfo(leadId: number): { userId: number; userName: string; lockedUntil: number } | null {
+  getLockInfo(
+    leadId: number,
+  ): { userId: number; userName: string; lockedUntil: number } | null {
     const entry = this.leadLockMap.get(leadId);
     if (!entry) return null;
-    if (Date.now() > entry.lockedUntil) { this.leadLockMap.delete(leadId); return null; }
+    if (Date.now() > entry.lockedUntil) {
+      this.leadLockMap.delete(leadId);
+      return null;
+    }
     return entry;
   }
 
   releaseLock(leadId: number, user: any): boolean {
     const lock = this.leadLockMap.get(leadId);
     if (!lock) return true;
-    const isBypass = (CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role);
+    const isBypass = (CRM_FULL_ACCESS_ROLES as readonly string[]).includes(
+      user?.role,
+    );
     if (lock.userId !== user?.id && !isBypass) return false;
     this.leadLockMap.delete(leadId);
     return true;
@@ -251,15 +311,17 @@ export class LeadService implements OnModuleInit {
     } catch {
       this.logger.error(
         '┌─────────────────────────────────────────────────────────────────────┐\n' +
-        '│  MIGRATION REQUIRED — leads.tags column is missing                  │\n' +
-        '│  Run: node scripts/migrate-crm-phase20-1-startup-cleanup.js         │\n' +
-        '└─────────────────────────────────────────────────────────────────────┘',
+          '│  MIGRATION REQUIRED — leads.tags column is missing                  │\n' +
+          '│  Run: node scripts/migrate-crm-phase20-1-startup-cleanup.js         │\n' +
+          '└─────────────────────────────────────────────────────────────────────┘',
       );
     }
   }
 
   /** Returns the customer id from customer_phones for the given E.164 phone, or null. */
-  private async findCustomerIdByPhone(phone: string | null): Promise<number | null> {
+  private async findCustomerIdByPhone(
+    phone: string | null,
+  ): Promise<number | null> {
     if (!phone) return null;
     const rows = await this.ds.query<{ customer_id: number }[]>(
       `SELECT customer_id FROM customer_phones WHERE phone = $1 LIMIT 1`,
@@ -271,11 +333,11 @@ export class LeadService implements OnModuleInit {
   // ── Create ──────────────────────────────────────────────────────────────────
 
   async create(dto: CreateLeadDto, user: any): Promise<LeadCreateResult> {
-
     // @deprecated Coercion guard for legacy 'MANUAL' source value — no current client sends this.
     // Safe to remove once confirmed no MANUAL rows exist in production DB.
     // Check: SELECT COUNT(*) FROM leads WHERE source = 'MANUAL'
-    if ((dto.source as string) === 'MANUAL') (dto as any).source = LeadSource.DIRECT;
+    if ((dto.source as string) === 'MANUAL')
+      (dto as any).source = LeadSource.DIRECT;
 
     const identityNorm = this.applyIdentityNormalization(dto);
     const storedPhone = identityNorm.phone;
@@ -338,19 +400,21 @@ export class LeadService implements OnModuleInit {
         const normNewReq = normalizeRequirement(dto.product_interest);
 
         // Find an active lead that matches on requirement + source.
-        const matchingLead = rows.find((row) => {
-          const normExistingReq = normalizeRequirement(row.product_interest);
-          return normNewReq === normExistingReq && row.source === dto.source;
-        }) ?? null;
+        const matchingLead =
+          rows.find((row) => {
+            const normExistingReq = normalizeRequirement(row.product_interest);
+            return normNewReq === normExistingReq && row.source === dto.source;
+          }) ?? null;
 
         if (matchingLead) {
           const existing: Lead = matchingLead;
           const patch: Partial<Lead> = {};
 
           // Append requirement_note; never overwrite prior content.
-          const mergedNote = [existing.requirement_note, dto.requirement_note]
-            .filter(Boolean)
-            .join('\n---\n') || undefined;
+          const mergedNote =
+            [existing.requirement_note, dto.requirement_note]
+              .filter(Boolean)
+              .join('\n---\n') || undefined;
           if (mergedNote && mergedNote !== existing.requirement_note) {
             patch.requirement_note = mergedNote;
           }
@@ -361,10 +425,12 @@ export class LeadService implements OnModuleInit {
           }
 
           // Accumulate all context labels in contextHistory TEXT[].
-          const mergedHistory = Array.from(new Set([
-            ...(existing.contextHistory || []),
-            ...(dto.context ? [dto.context] : []),
-          ]));
+          const mergedHistory = Array.from(
+            new Set([
+              ...(existing.contextHistory || []),
+              ...(dto.context ? [dto.context] : []),
+            ]),
+          );
           if (mergedHistory.length > (existing.contextHistory || []).length) {
             patch.contextHistory = mergedHistory;
           }
@@ -372,15 +438,21 @@ export class LeadService implements OnModuleInit {
           // context = latest touch-point; context_history = full pipe-separated journey.
           if (dto.context) {
             patch.context = dto.context;
-            const historyParts = (existing.context_history || '').split(' | ').map(s => s.trim()).filter(Boolean);
+            const historyParts = (existing.context_history || '')
+              .split(' | ')
+              .map((s) => s.trim())
+              .filter(Boolean);
             if (!historyParts.includes(dto.context)) {
-              patch.context_history = [...historyParts, dto.context].join(' | ');
+              patch.context_history = [...historyParts, dto.context].join(
+                ' | ',
+              );
             }
           }
 
           // Link customer if not already set and a matching customer exists.
           if (!existing.customer_id) {
-            const linkedCustomerId = await this.findCustomerIdByPhone(storedPhone);
+            const linkedCustomerId =
+              await this.findCustomerIdByPhone(storedPhone);
             if (linkedCustomerId) patch.customer_id = linkedCustomerId;
           }
 
@@ -388,11 +460,15 @@ export class LeadService implements OnModuleInit {
             await this.leadRepo.update(existing.id, patch);
           }
 
-          const updated = (await this.leadRepo.findOne({ where: { id: existing.id } })) ?? existing;
+          const updated =
+            (await this.leadRepo.findOne({ where: { id: existing.id } })) ??
+            existing;
           this.logger.log(
             `[RETURNING_CUSTOMER] lead=${existing.lead_ref ?? existing.id} phone=${storedPhone} src=${dto.source} req="${normNewReq.slice(0, 30)}" action=enrich` +
-            (Object.keys(patch).length ? ` patched=${Object.keys(patch).join(',')}` : ' no_changes') +
-            ` ts=${new Date().toISOString()}`,
+              (Object.keys(patch).length
+                ? ` patched=${Object.keys(patch).join(',')}`
+                : ' no_changes') +
+              ` ts=${new Date().toISOString()}`,
           );
           return { lead: updated };
         }
@@ -409,16 +485,28 @@ export class LeadService implements OnModuleInit {
 
     // UTM-signal context resolution: if context is still missing but UTM/click-id fields are
     // present (e.g. a manually-created CRM lead from a tracked URL), infer from signals.
-    if (!dto.context && (dto.source === LeadSource.DIRECT || dto.source === LeadSource.SHOPIFY)) {
+    if (
+      !dto.context &&
+      (dto.source === LeadSource.DIRECT || dto.source === LeadSource.SHOPIFY)
+    ) {
       const rawPayload = (dto as any).raw_payload || {};
-      const gclid     = (dto as any).gclid || rawPayload.gclid;
-      const fbclid    = (dto as any).fbclid || rawPayload.fbclid;
-      const utmSrc    = ((dto as any).utm_source || rawPayload.utm_source || '').toLowerCase();
-      const utmMed    = ((dto as any).utm_medium || rawPayload.utm_medium || '').toLowerCase();
+      const gclid = (dto as any).gclid || rawPayload.gclid;
+      const fbclid = (dto as any).fbclid || rawPayload.fbclid;
+      const utmSrc = (
+        (dto as any).utm_source ||
+        rawPayload.utm_source ||
+        ''
+      ).toLowerCase();
+      const utmMed = (
+        (dto as any).utm_medium ||
+        rawPayload.utm_medium ||
+        ''
+      ).toLowerCase();
       if (gclid || utmSrc.includes('google')) {
-        (dto as any).context = gclid || utmMed === 'cpc' || utmMed === 'ppc'
-          ? contextToLabel(LeadContext.GOOGLE_ADS)
-          : contextToLabel(LeadContext.GOOGLE_ORGANIC);
+        (dto as any).context =
+          gclid || utmMed === 'cpc' || utmMed === 'ppc'
+            ? contextToLabel(LeadContext.GOOGLE_ADS)
+            : contextToLabel(LeadContext.GOOGLE_ORGANIC);
       } else if (fbclid || utmSrc.match(/meta|facebook|fb|instagram/)) {
         (dto as any).context = contextToLabel(LeadContext.META_LEAD_FORM);
       }
@@ -434,9 +522,13 @@ export class LeadService implements OnModuleInit {
       if (storedPhone) {
         // Auto-assign to telecaller queue only when a mobile number is present.
         // No phone = telecaller cannot call the lead → skip round-robin, leave for manual assignment.
-        assignedTo = await this.assignmentService.getNextAssignee(dto.source) ?? undefined;
+        assignedTo =
+          (await this.assignmentService.getNextAssignee(dto.source)) ??
+          undefined;
         if (!assignedTo) {
-          this.logger.warn(`No eligible telecaller found for source=${dto.source} — lead will be unassigned`);
+          this.logger.warn(
+            `No eligible telecaller found for source=${dto.source} — lead will be unassigned`,
+          );
         }
       } else {
         this.logger.log(
@@ -453,7 +545,9 @@ export class LeadService implements OnModuleInit {
     // True duplicates (same phone + same requirement + same source) are caught earlier and
     // handled by enriching the existing lead — they never reach this point.
     const dupCount = storedPhone
-      ? await this.leadRepo.count({ where: { phone: storedPhone, is_active: true } })
+      ? await this.leadRepo.count({
+          where: { phone: storedPhone, is_active: true },
+        })
       : 0;
     const isReturningCustomer = dupCount > 0; // informational only — NOT used for quality classification
 
@@ -472,19 +566,29 @@ export class LeadService implements OnModuleInit {
     );
 
     // Auto-elevate priority for highest-trust sources if not explicitly set
-    const highTrustSources = new Set([LeadSource.OLD_CUSTOMER, LeadSource.REFERRAL]);
+    const highTrustSources = new Set([
+      LeadSource.OLD_CUSTOMER,
+      LeadSource.REFERRAL,
+    ]);
     if (!dto.lead_priority && highTrustSources.has(dto.source)) {
       (dto as any).lead_priority = LeadPriority.HIGH;
     }
 
     const lead = this.leadRepo.create({
       ...dto,
-      name: (dto.name && dto.name !== 'Unknown' && dto.name !== 'Unknown Lead')
-        ? sentenceCaseWords(dto.name)
-        : 'Customer',
+      name:
+        dto.name && dto.name !== 'Unknown' && dto.name !== 'Unknown Lead'
+          ? sentenceCaseWords(dto.name)
+          : 'Customer',
       phone: storedPhone as any,
-      notes: dto.notes != null && dto.notes !== '' ? toSentenceCase(dto.notes) : undefined,
-      product_interest: dto.product_interest != null && dto.product_interest !== '' ? sentenceCaseWords(dto.product_interest) : undefined,
+      notes:
+        dto.notes != null && dto.notes !== ''
+          ? toSentenceCase(dto.notes)
+          : undefined,
+      product_interest:
+        dto.product_interest != null && dto.product_interest !== ''
+          ? sentenceCaseWords(dto.product_interest)
+          : undefined,
       assigned_to: assignedTo,
       created_by: user?.id,
       duplicate_flag: isDuplicate,
@@ -498,7 +602,11 @@ export class LeadService implements OnModuleInit {
       quality_score: score,
       workflow_state: WorkflowState.FIRST_CALL,
       workflow_state_entered_at: new Date(),
-      next_action_due_at: computeNextActionDue(WorkflowState.FIRST_CALL, dto.source, null),
+      next_action_due_at: computeNextActionDue(
+        WorkflowState.FIRST_CALL,
+        dto.source,
+        null,
+      ),
       call_attempt_count: 0,
       no_answer_count: 0,
       automation_manually_paused: false,
@@ -522,6 +630,10 @@ export class LeadService implements OnModuleInit {
       );
     }
 
+    const followUpDue = new Date();
+    followUpDue.setDate(followUpDue.getDate() + 3);
+    lead.follow_up_date = followUpDue;
+
     let saved: Lead;
     try {
       saved = await this.leadRepo.save(lead);
@@ -541,27 +653,34 @@ export class LeadService implements OnModuleInit {
       throw err;
     }
 
-    const qualityTag = (quality === 'TRACKING_ONLY' || quality === 'JUNK')
-      ? `[${quality}]`
-      : '[CRM_LEAD_CREATED]';
+    const qualityTag =
+      quality === 'TRACKING_ONLY' || quality === 'JUNK'
+        ? `[${quality}]`
+        : '[CRM_LEAD_CREATED]';
     this.logger.log(
       `${qualityTag} lead=${saved.lead_ref ?? saved.id} src=${dto.source} quality=${quality} phone=${storedPhone ?? 'none'} assigned_to=${assignedTo ?? 'none'}` +
-      (isReturningCustomer ? ' returning_customer=true' : '') +
-      (this._whatsappDown ? ' wa_fallback=true' : '') +
-      ` ts=${new Date().toISOString()}`,
+        (isReturningCustomer ? ' returning_customer=true' : '') +
+        (this._whatsappDown ? ' wa_fallback=true' : '') +
+        ` ts=${new Date().toISOString()}`,
     );
     this.logsService.log(
       LogAction.LEAD_CREATED,
-      { leadId: saved.id, phone: storedPhone, source: dto.source, assigned_to: assignedTo ?? null, returning_customer: isReturningCustomer },
+      {
+        leadId: saved.id,
+        phone: storedPhone,
+        source: dto.source,
+        assigned_to: assignedTo ?? null,
+        returning_customer: isReturningCustomer,
+      },
       user?.id ?? null,
     );
 
     this.eventEmitter.emit('crm.lead.created', {
-      id:               saved.id,
-      name:             saved.name,
-      phone:            saved.phone ?? null,
-      source:           saved.source,
-      assigned_to:      saved.assigned_to ?? null,
+      id: saved.id,
+      name: saved.name,
+      phone: saved.phone ?? null,
+      source: saved.source,
+      assigned_to: saved.assigned_to ?? null,
       product_interest: saved.product_interest ?? null,
     });
 
@@ -572,10 +691,12 @@ export class LeadService implements OnModuleInit {
     // Uses independent PostgreSQL sequences — TRK counter never affects LD counter.
     const refYear = new Date(saved.created_at ?? Date.now()).getFullYear();
     const isTrkRef = !hasOperationalIdentity(saved);
-    const seqName  = isTrkRef ? 'lead_ref_trk_seq' : 'lead_ref_ld_seq';
+    const seqName = isTrkRef ? 'lead_ref_trk_seq' : 'lead_ref_ld_seq';
     const refPrefix = isTrkRef ? 'TRK' : 'LD';
     try {
-      const [{ nextval }] = await this.ds.query(`SELECT nextval('${seqName}') AS nextval`);
+      const [{ nextval }] = await this.ds.query(
+        `SELECT nextval('${seqName}') AS nextval`,
+      );
       const lead_ref = `${refPrefix}-${refYear}-${String(nextval).padStart(6, '0')}`;
       await this.leadRepo.update(saved.id, { lead_ref });
       saved.lead_ref = lead_ref;
@@ -584,12 +705,15 @@ export class LeadService implements OnModuleInit {
       );
     } catch (e) {
       this.logger.error(
-        `[LEAD_REF_FAILED] leadId=${saved.id} seq=${seqName}: ${(e as any)?.message}`,
+        `[LEAD_REF_FAILED] leadId=${saved.id} seq=${seqName}: ${e?.message}`,
       );
       // Lead still exists without ref — migration script backfills on next run
     }
 
-    return { lead: saved, warning: isReturningCustomer ? 'returning_customer' : undefined };
+    return {
+      lead: saved,
+      warning: isReturningCustomer ? 'returning_customer' : undefined,
+    };
   }
 
   // ── List / Detail ────────────────────────────────────────────────────────────
@@ -600,7 +724,9 @@ export class LeadService implements OnModuleInit {
     // includeInactive=true is used exclusively by the All Leads historical view.
     // It must never apply to operational views (Today Tasks, Available Leads).
     // Restricted to elevated roles — telecallers always see active leads only.
-    const canSeeInactive = filters.includeInactive === 'true' && (CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role);
+    const canSeeInactive =
+      filters.includeInactive === 'true' &&
+      (CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role);
     if (!canSeeInactive) {
       q.where('l.is_active = true');
     }
@@ -617,7 +743,8 @@ export class LeadService implements OnModuleInit {
 
     // Manager review queue — surfaces all leads needing human intervention
     if (filters.filter === 'manager-review') {
-      if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role)) throw new ForbiddenException('Manager review requires elevated access');
+      if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role))
+        throw new ForbiddenException('Manager review requires elevated access');
       q.andWhere(
         `(
           l.tags @> '["needs_manager_review"]'
@@ -628,25 +755,41 @@ export class LeadService implements OnModuleInit {
           OR (l.next_action_due_at < NOW() - INTERVAL '72 hours' AND l.status NOT IN ('CONVERTED', 'LOST'))
         )`,
       );
-      q.andWhere('l.status NOT IN (:...terminalStates)', { terminalStates: ['CONVERTED', 'LOST'] });
+      q.andWhere('l.status NOT IN (:...terminalStates)', {
+        terminalStates: ['CONVERTED', 'LOST'],
+      });
       q.orderBy('l.next_action_due_at', 'ASC');
       return q.getMany();
     }
 
-    if (filters.status) q.andWhere('l.status = :status', { status: filters.status });
-    if (filters.source) q.andWhere('l.source = :source', { source: filters.source });
-    if (filters.assigned_to) q.andWhere('l.assigned_to = :at', { at: filters.assigned_to });
+    if (filters.status)
+      q.andWhere('l.status = :status', { status: filters.status });
+    if (filters.source)
+      q.andWhere('l.source = :source', { source: filters.source });
+    if (filters.assigned_to)
+      q.andWhere('l.assigned_to = :at', { at: filters.assigned_to });
     if (filters.search) {
-      q.andWhere('(l.name ILIKE :s OR l.phone ILIKE :s OR l.email ILIKE :s OR l.lead_ref ILIKE :s)', {
-        s: `%${filters.search}%`,
-      });
+      q.andWhere(
+        '(l.name ILIKE :s OR l.phone ILIKE :s OR l.email ILIKE :s OR l.lead_ref ILIKE :s)',
+        {
+          s: `%${filters.search}%`,
+        },
+      );
     }
-    if (filters.from) q.andWhere('l.created_at >= :from', { from: filters.from });
+    if (filters.from)
+      q.andWhere('l.created_at >= :from', { from: filters.from });
     if (filters.to) q.andWhere('l.created_at <= :to', { to: filters.to });
     // Attribution filters — stored as text columns or JSONB on raw_payload
-    if (filters.context) q.andWhere('l.context ILIKE :ctx', { ctx: `%${filters.context}%` });
-    if (filters.utm_source) q.andWhere(`l.raw_payload->>'utm_source' ILIKE :utmSrc`, { utmSrc: `%${filters.utm_source}%` });
-    if (filters.utm_campaign) q.andWhere(`l.raw_payload->>'utm_campaign' ILIKE :utmCmp`, { utmCmp: `%${filters.utm_campaign}%` });
+    if (filters.context)
+      q.andWhere('l.context ILIKE :ctx', { ctx: `%${filters.context}%` });
+    if (filters.utm_source)
+      q.andWhere(`l.raw_payload->>'utm_source' ILIKE :utmSrc`, {
+        utmSrc: `%${filters.utm_source}%`,
+      });
+    if (filters.utm_campaign)
+      q.andWhere(`l.raw_payload->>'utm_campaign' ILIKE :utmCmp`, {
+        utmCmp: `%${filters.utm_campaign}%`,
+      });
 
     // Quality filter: exact tier when specified; operational-only excludes TRACKING_ONLY/JUNK/DUPLICATE.
     // NULL quality rows (pre-backfill) are treated as operational (included).
@@ -669,8 +812,17 @@ export class LeadService implements OnModuleInit {
     id: number,
     user: any,
     ip?: string,
-  ): Promise<Lead & { activityNotes: LeadNote[]; followups: LeadFollowUp[]; journey: any; lockInfo: any }> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+  ): Promise<
+    Lead & {
+      activityNotes: LeadNote[];
+      followups: LeadFollowUp[];
+      journey: any;
+      lockInfo: any;
+    }
+  > {
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
@@ -679,9 +831,22 @@ export class LeadService implements OnModuleInit {
     const lockInfo = this.getLockInfo(id);
     void this.auditService.log(id, user.id, 'VIEWED', undefined, ip);
 
-    const [notes, followups, quotationRows, orderRows, prevLeadRows, siblingOpportunities] = await Promise.all([
-      this.noteRepo.find({ where: { lead_id: id }, order: { created_at: 'DESC' } }),
-      this.followUpRepo.find({ where: { lead_id: id }, order: { due_date: 'ASC' } }),
+    const [
+      notes,
+      followups,
+      quotationRows,
+      orderRows,
+      prevLeadRows,
+      siblingOpportunities,
+    ] = await Promise.all([
+      this.noteRepo.find({
+        where: { lead_id: id },
+        order: { created_at: 'DESC' },
+      }),
+      this.followUpRepo.find({
+        where: { lead_id: id },
+        order: { due_date: 'ASC' },
+      }),
       this.ds.query<any[]>(
         `SELECT id, quotation_no, status, total_amount, created_at FROM quotation WHERE lead_id = $1 ORDER BY created_at DESC LIMIT 10`,
         [id],
@@ -699,7 +864,7 @@ export class LeadService implements OnModuleInit {
       // Customer lifetime — all CRM opportunities for the same phone or email, regardless of active/inactive.
       // Groups same-phone requirements so telecallers see the full customer journey
       // across separate opportunities (e.g., "Microfiber Cloth" vs "Display Stand" from same customer).
-      (lead.phone || lead.email)
+      lead.phone || lead.email
         ? this.ds.query<any[]>(
             `SELECT id, lead_ref, status, workflow_state, source, product_interest,
                     created_at, last_outcome_type, call_attempt_count, is_active
@@ -716,7 +881,10 @@ export class LeadService implements OnModuleInit {
         : Promise.resolve([]),
     ]);
 
-    const totalRevenue = orderRows.reduce((sum: number, o: any) => sum + Number(o.total_amount || 0), 0);
+    const totalRevenue = orderRows.reduce(
+      (sum: number, o: any) => sum + Number(o.total_amount || 0),
+      0,
+    );
 
     const journey = {
       quotations: quotationRows,
@@ -751,20 +919,31 @@ export class LeadService implements OnModuleInit {
    * Detect and log logical inconsistencies between the three parallel state systems.
    * Observe-only — does NOT auto-fix. Called after any state mutation.
    */
-  private detectStateDivergence(lead: Partial<Lead> & { id: number }, trigger: string): void {
+  private detectStateDivergence(
+    lead: Partial<Lead> & { id: number },
+    trigger: string,
+  ): void {
     const status = lead.status as string | undefined;
-    const wf     = lead.workflow_state as string | undefined;
+    const wf = lead.workflow_state as string | undefined;
     if (!status) return;
 
     const checks: Array<[boolean, string]> = [
-      [['CONTACTED', 'INTERESTED', 'QUOTATION'].includes(status) && !wf,
-        `status=${status} but workflow_state=null`],
-      [status === 'CONVERTED' && !!wf && wf !== 'CONVERTED',
-        `status=CONVERTED but workflow_state=${wf}`],
-      [status === 'LOST' && !!wf && wf !== 'LOST',
-        `status=LOST but workflow_state=${wf}`],
-      [status === 'NEW' && (wf === 'CONVERTED' || wf === 'LOST'),
-        `status=NEW but workflow_state=${wf}`],
+      [
+        ['CONTACTED', 'INTERESTED', 'QUOTATION'].includes(status) && !wf,
+        `status=${status} but workflow_state=null`,
+      ],
+      [
+        status === 'CONVERTED' && !!wf && wf !== 'CONVERTED',
+        `status=CONVERTED but workflow_state=${wf}`,
+      ],
+      [
+        status === 'LOST' && !!wf && wf !== 'LOST',
+        `status=LOST but workflow_state=${wf}`,
+      ],
+      [
+        status === 'NEW' && (wf === 'CONVERTED' || wf === 'LOST'),
+        `status=NEW but workflow_state=${wf}`,
+      ],
     ];
 
     for (const [cond, detail] of checks) {
@@ -791,18 +970,38 @@ export class LeadService implements OnModuleInit {
     ip?: string,
     callbackDate?: Date | null,
   ): Promise<{ nextDue: Date | null }> {
-    const from = lead.workflow_state as WorkflowState | null;
+    const from = lead.workflow_state;
     const isBypass = WORKFLOW_BYPASS_ROLES.includes(user?.role);
     if (!isValidWorkflowTransition(from, to, isBypass)) {
-      throw new BadRequestException(`Invalid workflow transition: ${from ?? 'none'} → ${to}`);
+      throw new BadRequestException(
+        `Invalid workflow transition: ${from ?? 'none'} → ${to}`,
+      );
     }
-    const nextDue = computeNextActionDue(to, lead.source, callbackDate ?? lead.follow_up_date ?? null, new Date());
+    const nextDue = computeNextActionDue(
+      to,
+      lead.source,
+      callbackDate ?? lead.follow_up_date ?? null,
+      new Date(),
+    );
     await this.ds.query(
       `UPDATE leads SET workflow_state = $1, workflow_state_entered_at = NOW(), next_action_due_at = $3 WHERE id = $2`,
       [to, lead.id, nextDue],
     );
-    this.logStateChange('workflow_state', from, to, lead, 'transitionWorkflowState', user?.id ?? null);
-    void this.auditService.log(lead.id, user.id, 'UPDATED', `Workflow: ${from ?? 'none'} → ${to}`, ip);
+    this.logStateChange(
+      'workflow_state',
+      from,
+      to,
+      lead,
+      'transitionWorkflowState',
+      user?.id ?? null,
+    );
+    void this.auditService.log(
+      lead.id,
+      user.id,
+      'UPDATED',
+      `Workflow: ${from ?? 'none'} → ${to}`,
+      ip,
+    );
     return { nextDue };
   }
 
@@ -829,7 +1028,9 @@ export class LeadService implements OnModuleInit {
     q.andWhere('l.status NOT IN (:...done)', { done: ['CONVERTED', 'LOST'] });
 
     if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role)) {
-      q.andWhere('(l.assigned_to = :uid OR l.created_by = :uid)', { uid: user.id });
+      q.andWhere('(l.assigned_to = :uid OR l.created_by = :uid)', {
+        uid: user.id,
+      });
     }
 
     // Non-actionable quality tiers excluded — NULL quality rows treated as operational.
@@ -843,42 +1044,59 @@ export class LeadService implements OnModuleInit {
 
     // No DB ordering — tier engine produces the final sorted output
     const leads = await q.getMany();
-    const now    = Date.now();
+    const now = Date.now();
     const nowDate = new Date(now);
 
-    const items = leads.map(lead => {
-      const score     = this.decisionEngine.scoreLead(lead);
+    const items = leads.map((lead) => {
+      const score = this.decisionEngine.scoreLead(lead);
       const queueTier = computeQueueTier(lead, now);
 
       // For CALLBACK_WAIT: pass next_action_due_at as callbackPromisedAt so the
       // decision engine renders the correct countdown label in the queue card.
       // All other history fields read from entity — no follow-up repo query needed.
       const minHistory: OutcomeHistory = {
-        callAttempts:      lead.call_attempt_count ?? 0,
-        noAnswerCount:     lead.no_answer_count ?? 0,
-        laterCount:        0,
-        lastOutcomeType:   (lead.last_outcome_type as OutcomeHistory['lastOutcomeType']) ?? null,
-        lastCallAt:        lead.last_contacted_at ?? null,
+        callAttempts: lead.call_attempt_count ?? 0,
+        noAnswerCount: lead.no_answer_count ?? 0,
+        laterCount: 0,
+        lastOutcomeType:
+          (lead.last_outcome_type as OutcomeHistory['lastOutcomeType']) ?? null,
+        lastCallAt: lead.last_contacted_at ?? null,
         lastObjectionType: lead.last_objection_type ?? null,
-        callbackPromisedAt: lead.workflow_state === WorkflowState.CALLBACK_WAIT
-          ? (lead.next_action_due_at ?? null)
-          : null,
+        callbackPromisedAt:
+          lead.workflow_state === WorkflowState.CALLBACK_WAIT
+            ? (lead.next_action_due_at ?? null)
+            : null,
         workflowState: lead.workflow_state ?? null,
       };
 
-      const nextAction  = this.decisionEngine.getNextAction(lead, minHistory);
-      const ageHours    = Math.round((now - new Date(lead.created_at).getTime()) / 3_600_000);
-      const dueMs       = lead.next_action_due_at ? new Date(lead.next_action_due_at).getTime() : null;
-      const isOverdue   = dueMs !== null && dueMs < now;
-      const overdueMins = dueMs !== null ? Math.round((now - dueMs) / 60_000) : 0;
-      const slaStatus   = computeSlaStatus(lead.next_action_due_at, nowDate);
+      const nextAction = this.decisionEngine.getNextAction(lead, minHistory);
+      const ageHours = Math.round(
+        (now - new Date(lead.created_at).getTime()) / 3_600_000,
+      );
+      const dueMs = lead.next_action_due_at
+        ? new Date(lead.next_action_due_at).getTime()
+        : null;
+      const isOverdue = dueMs !== null && dueMs < now;
+      const overdueMins =
+        dueMs !== null ? Math.round((now - dueMs) / 60_000) : 0;
+      const slaStatus = computeSlaStatus(lead.next_action_due_at, nowDate);
 
       const isBlocked = LeadService.isOperationallyBlocked(lead);
-      return { lead, score, nextAction, isOverdue, ageHours, queueTier, overdueMins, slaStatus, isBlocked };
+      return {
+        lead,
+        score,
+        nextAction,
+        isOverdue,
+        ageHours,
+        queueTier,
+        overdueMins,
+        slaStatus,
+        isBlocked,
+      };
     });
 
     // Exclude tier-0 leads (future wait states, terminals — no action needed now)
-    const operational = items.filter(i => i.queueTier > 0);
+    const operational = items.filter((i) => i.queueTier > 0);
 
     const urgencyRank: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
 
@@ -887,8 +1105,12 @@ export class LeadService implements OnModuleInit {
       if (a.queueTier !== b.queueTier) return a.queueTier - b.queueTier;
 
       // Secondary: tier-specific ordering
-      const aDue = a.lead.next_action_due_at ? +new Date(a.lead.next_action_due_at) : 0;
-      const bDue = b.lead.next_action_due_at ? +new Date(b.lead.next_action_due_at) : 0;
+      const aDue = a.lead.next_action_due_at
+        ? +new Date(a.lead.next_action_due_at)
+        : 0;
+      const bDue = b.lead.next_action_due_at
+        ? +new Date(b.lead.next_action_due_at)
+        : 0;
 
       switch (a.queueTier) {
         case 1: // CALLBACK_WAIT — soonest due / most recently overdue first (ASC)
@@ -900,12 +1122,15 @@ export class LeadService implements OnModuleInit {
         case 3: // SLA BREACH — most overdue first (MAX overdueMins)
           return b.overdueMins - a.overdueMins;
 
-        case 4: { // ESCALATION — highest no_answer_count, then score
-          const naDiff = (b.lead.no_answer_count ?? 0) - (a.lead.no_answer_count ?? 0);
+        case 4: {
+          // ESCALATION — highest no_answer_count, then score
+          const naDiff =
+            (b.lead.no_answer_count ?? 0) - (a.lead.no_answer_count ?? 0);
           return naDiff !== 0 ? naDiff : b.score - a.score;
         }
 
-        case 5: { // ACTIVE PIPELINE — urgency → score → newest activity
+        case 5: {
+          // ACTIVE PIPELINE — urgency → score → newest activity
           const ua = urgencyRank[a.nextAction?.urgency] ?? 1;
           const ub = urgencyRank[b.nextAction?.urgency] ?? 1;
           if (ua !== ub) return ua - ub;
@@ -929,7 +1154,9 @@ export class LeadService implements OnModuleInit {
   /** Full decision context for a single lead.
    *  Reads structured workflow memory directly from the lead entity — no note queries. */
   async getDecision(id: number, user: any): Promise<DecisionContext> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
@@ -940,14 +1167,15 @@ export class LeadService implements OnModuleInit {
     });
 
     const history: OutcomeHistory = {
-      callAttempts:       lead.call_attempt_count ?? 0,
-      noAnswerCount:      lead.no_answer_count ?? 0,
-      laterCount:         0,  // not tracked separately; use workflowState instead
-      lastOutcomeType:    (lead.last_outcome_type as OutcomeHistory['lastOutcomeType']) ?? null,
-      lastCallAt:         lead.last_contacted_at ?? null,
-      lastObjectionType:  lead.last_objection_type ?? null,
+      callAttempts: lead.call_attempt_count ?? 0,
+      noAnswerCount: lead.no_answer_count ?? 0,
+      laterCount: 0, // not tracked separately; use workflowState instead
+      lastOutcomeType:
+        (lead.last_outcome_type as OutcomeHistory['lastOutcomeType']) ?? null,
+      lastCallAt: lead.last_contacted_at ?? null,
+      lastObjectionType: lead.last_objection_type ?? null,
       callbackPromisedAt: pendingFu?.due_date ?? null,
-      workflowState:      lead.workflow_state ?? null,
+      workflowState: lead.workflow_state ?? null,
     };
 
     return this.decisionEngine.getDecisionContext(lead, history);
@@ -972,17 +1200,23 @@ export class LeadService implements OnModuleInit {
     user: any,
     ip?: string,
   ): Promise<Lead> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
     // Lock enforcement: reject if another user holds an active view lock.
     // Uses workflow bypass roles (Admin/COO only) — Sales Manager cannot bypass locks.
-    const isBypass = (CRM_WORKFLOW_BYPASS_ROLES as readonly string[]).includes(user?.role);
+    const isBypass = (CRM_WORKFLOW_BYPASS_ROLES as readonly string[]).includes(
+      user?.role,
+    );
     if (!isBypass) {
       const lock = this.getLockInfo(id);
       if (lock && lock.userId !== user.id) {
-        throw new ForbiddenException(`Lead is being worked by ${lock.userName}. Try again in a few minutes.`);
+        throw new ForbiddenException(
+          `Lead is being worked by ${lock.userName}. Try again in a few minutes.`,
+        );
       }
     }
 
@@ -997,11 +1231,17 @@ export class LeadService implements OnModuleInit {
     );
 
     if (noteType === NoteType.CALL) {
-      void this.auditService.log(id, user.id, 'CALLED', body.note.slice(0, 120), ip);
+      void this.auditService.log(
+        id,
+        user.id,
+        'CALLED',
+        body.note.slice(0, 120),
+        ip,
+      );
       this.eventEmitter.emit('crm.lead.action_logged', {
-        lead_id:   id,
+        lead_id: id,
         lead_name: lead.name,
-        user_id:   user?.id ?? null,
+        user_id: user?.id ?? null,
         user_name: user?.name ?? null,
       });
       // Auto-complete any pending AUTO follow-ups — workflow advances via call outcome,
@@ -1028,9 +1268,10 @@ export class LeadService implements OnModuleInit {
           resetNoAnswer = true;
         } else if (outcome === OutcomeType.LATER) {
           // CHASE_QUOTATION + LATER = customer is still in discussion — advance to NEGOTIATING
-          newWorkflowState = lead.workflow_state === WorkflowState.CHASE_QUOTATION
-            ? WorkflowState.NEGOTIATING
-            : WorkflowState.CALLBACK_WAIT;
+          newWorkflowState =
+            lead.workflow_state === WorkflowState.CHASE_QUOTATION
+              ? WorkflowState.NEGOTIATING
+              : WorkflowState.CALLBACK_WAIT;
           resetNoAnswer = true;
         } else if (outcome === OutcomeType.NOT_INTERESTED) {
           newWorkflowState = WorkflowState.NURTURE;
@@ -1041,12 +1282,15 @@ export class LeadService implements OnModuleInit {
         }
 
         const now = new Date();
-        const callbackDate = body.callbackDate ? new Date(body.callbackDate) : null;
+        const callbackDate = body.callbackDate
+          ? new Date(body.callbackDate)
+          : null;
 
         if (outcome === OutcomeType.NO_ANSWER) {
           // Increment no_answer_count and derive workflow_state + SLA timestamps atomically.
           // next_action_due_at mirrors computeNextActionDue() for each NO_ANSWER state.
-          await this.ds.query(`
+          await this.ds.query(
+            `
             UPDATE leads SET
               call_attempt_count        = COALESCE(call_attempt_count, 0) + 1,
               no_answer_count           = COALESCE(no_answer_count, 0) + 1,
@@ -1064,18 +1308,31 @@ export class LeadService implements OnModuleInit {
                 ELSE NOW() + INTERVAL '48 hours'
               END
             WHERE id = $2
-          `, [outcome, id]);
+          `,
+            [outcome, id],
+          );
 
           const noAnswerNewCount = (lead.no_answer_count ?? 0) + 1;
-          const noAnswerNewState = noAnswerNewCount === 1 ? WorkflowState.NO_ANSWER_1
-            : noAnswerNewCount === 2 ? WorkflowState.NO_ANSWER_2
-            : WorkflowState.NO_ANSWER_ESC;
-          this.logStateChange('workflow_state', lead.workflow_state ?? null, noAnswerNewState, lead, 'call_outcome_NO_ANSWER', user?.id ?? null);
+          const noAnswerNewState =
+            noAnswerNewCount === 1
+              ? WorkflowState.NO_ANSWER_1
+              : noAnswerNewCount === 2
+                ? WorkflowState.NO_ANSWER_2
+                : WorkflowState.NO_ANSWER_ESC;
+          this.logStateChange(
+            'workflow_state',
+            lead.workflow_state ?? null,
+            noAnswerNewState,
+            lead,
+            'call_outcome_NO_ANSWER',
+            user?.id ?? null,
+          );
 
           // Circuit breaker: 5+ unanswered calls → tag + escalate to manager
           const newNoAnswerCount = noAnswerNewCount;
           if (newNoAnswerCount >= 5) {
-            await this.ds.query(`
+            await this.ds.query(
+              `
               UPDATE leads
               SET tags = CASE
                 WHEN NOT (COALESCE(tags, '[]'::jsonb) ? 'needs_manager_review')
@@ -1083,21 +1340,29 @@ export class LeadService implements OnModuleInit {
                 ELSE tags
               END
               WHERE id = $1
-            `, [id]);
+            `,
+              [id],
+            );
             this.eventEmitter.emit('crm.lead.escalated', {
               id,
-              name:             lead.name,
-              phone:            lead.phone ?? null,
-              assigned_to:      lead.assigned_to ?? null,
+              name: lead.name,
+              phone: lead.phone ?? null,
+              assigned_to: lead.assigned_to ?? null,
               product_interest: lead.product_interest ?? null,
-              reason:           `NO_ANSWER circuit breaker: ${newNoAnswerCount} unanswered calls`,
-              no_answer_count:  newNoAnswerCount,
+              reason: `NO_ANSWER circuit breaker: ${newNoAnswerCount} unanswered calls`,
+              no_answer_count: newNoAnswerCount,
             });
           }
         } else {
           // All other outcomes — compute SLA deadline via single source of truth function
-          const nextDue = computeNextActionDue(newWorkflowState, lead.source, callbackDate, now);
-          await this.ds.query(`
+          const nextDue = computeNextActionDue(
+            newWorkflowState,
+            lead.source,
+            callbackDate,
+            now,
+          );
+          await this.ds.query(
+            `
             UPDATE leads SET
               call_attempt_count        = COALESCE(call_attempt_count, 0) + 1,
               no_answer_count           = COALESCE($1, no_answer_count),
@@ -1108,24 +1373,36 @@ export class LeadService implements OnModuleInit {
               workflow_state_entered_at = NOW(),
               next_action_due_at        = $6
             WHERE id = $5
-          `, [
-            resetNoAnswer ? 0 : null,
-            outcome,
-            body.objectionType ?? null,
+          `,
+            [
+              resetNoAnswer ? 0 : null,
+              outcome,
+              body.objectionType ?? null,
+              newWorkflowState,
+              id,
+              nextDue,
+            ],
+          );
+          this.logStateChange(
+            'workflow_state',
+            lead.workflow_state ?? null,
             newWorkflowState,
-            id,
-            nextDue,
-          ]);
-          this.logStateChange('workflow_state', lead.workflow_state ?? null, newWorkflowState, lead, `call_outcome_${outcome}`, user?.id ?? null);
+            lead,
+            `call_outcome_${outcome}`,
+            user?.id ?? null,
+          );
         }
       } else {
         // Unstructured CALL note (free-text, no outcomeType) — only increment attempt count
-        await this.ds.query(`
+        await this.ds.query(
+          `
           UPDATE leads SET
             call_attempt_count = COALESCE(call_attempt_count, 0) + 1,
             last_contacted_at  = NOW()
           WHERE id = $1
-        `, [id]);
+        `,
+          [id],
+        );
 
         // Warn in critical states where structured outcomes are required for pipeline accuracy
         const criticalStates = new Set<WorkflowState>([
@@ -1134,16 +1411,22 @@ export class LeadService implements OnModuleInit {
           WorkflowState.CHASE_QUOTATION,
           WorkflowState.NEGOTIATING,
         ]);
-        if (lead.workflow_state && criticalStates.has(lead.workflow_state as WorkflowState)) {
+        if (lead.workflow_state && criticalStates.has(lead.workflow_state)) {
           await this.noteRepo.save(
             this.noteRepo.create({
               lead_id: id,
-              note:    `⚠️ Call logged without an outcome in ${lead.workflow_state} state. Select an outcome (Interested / Later / No Answer) to keep the pipeline accurate.`,
-              type:    NoteType.SYSTEM,
+              note: `⚠️ Call logged without an outcome in ${lead.workflow_state} state. Select an outcome (Interested / Later / No Answer) to keep the pipeline accurate.`,
+              type: NoteType.SYSTEM,
               created_by: user.id,
             }),
           );
-          void this.auditService.log(id, user.id, 'UPDATED', `Unstructured call in critical state: ${lead.workflow_state}`, ip);
+          void this.auditService.log(
+            id,
+            user.id,
+            'UPDATED',
+            `Unstructured call in critical state: ${lead.workflow_state}`,
+            ip,
+          );
         }
       }
     }
@@ -1158,24 +1441,38 @@ export class LeadService implements OnModuleInit {
     }
 
     if (body.newStatus && body.newStatus !== lead.status) {
-      return this.update(id, { status: body.newStatus as LeadStatus } as UpdateLeadDto, user, ip);
+      return this.update(
+        id,
+        { status: body.newStatus as LeadStatus } as UpdateLeadDto,
+        user,
+        ip,
+      );
     }
 
     // Return the fresh lead so callers see the updated workflow state
-    return (await this.leadRepo.findOne({ where: { id } }))!;
+    return await this.leadRepo.findOne({ where: { id } });
   }
 
   // ── Update (with workflow enforcement) ──────────────────────────────────────
 
-  async update(id: number, dto: UpdateLeadDto, user: any, ip?: string): Promise<Lead> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+  async update(
+    id: number,
+    dto: UpdateLeadDto,
+    user: any,
+    ip?: string,
+  ): Promise<Lead> {
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
     if (dto.phone) dto.phone = normalizePhone(dto.phone);
     if (dto.name) dto.name = sentenceCaseWords(dto.name);
-    if ((dto as any).notes) (dto as any).notes = toSentenceCase((dto as any).notes);
-    if (dto.product_interest) dto.product_interest = sentenceCaseWords(dto.product_interest);
+    if ((dto as any).notes)
+      (dto as any).notes = toSentenceCase((dto as any).notes);
+    if (dto.product_interest)
+      dto.product_interest = sentenceCaseWords(dto.product_interest);
 
     // Workflow enforcement — block invalid stage jumps for non-bypass roles
     if (dto.status && dto.status !== lead.status) {
@@ -1193,51 +1490,78 @@ export class LeadService implements OnModuleInit {
       Object.assign(lead, dto);
       let saved = await this.leadRepo.save(lead);
 
-      this.logStateChange('status', prevStatus, saved.status, saved, 'manual_update', user?.id ?? null);
-      void this.auditService.log(id, user.id, 'STATUS_CHANGED', `${prevStatus} → ${saved.status}`, ip);
+      this.logStateChange(
+        'status',
+        prevStatus,
+        saved.status,
+        saved,
+        'manual_update',
+        user?.id ?? null,
+      );
+      void this.auditService.log(
+        id,
+        user.id,
+        'STATUS_CHANGED',
+        `${prevStatus} → ${saved.status}`,
+        ip,
+      );
 
       if (prevStatus !== saved.status) {
         this.eventEmitter.emit('crm.lead.status_changed', {
-          id:               saved.id,
-          name:             saved.name,
-          phone:            saved.phone ?? null,
-          assigned_to:      saved.assigned_to ?? null,
-          prev_status:      prevStatus,
-          new_status:       saved.status,
+          id: saved.id,
+          name: saved.name,
+          phone: saved.phone ?? null,
+          assigned_to: saved.assigned_to ?? null,
+          prev_status: prevStatus,
+          new_status: saved.status,
           product_interest: saved.product_interest ?? null,
         });
 
-        await this.autoScheduleFollowUp(saved, saved.status as LeadStatus, user);
-        const targetStage = this.computeTargetStageForStatus(saved.stage, saved.status as LeadStatus);
+        await this.autoScheduleFollowUp(saved, saved.status, user);
+        const targetStage = this.computeTargetStageForStatus(
+          saved.stage,
+          saved.status,
+        );
         if (targetStage) {
           saved = await this.updateStage(saved.id, targetStage, user);
         }
 
         // Sync workflow_state to match new status — status change always overrides
         // any outcome-derived state because a manual stage advance is intentional.
-        const statusToWorkflowState: Partial<Record<LeadStatus, WorkflowState>> = {
-          [LeadStatus.NEW]:        WorkflowState.FIRST_CALL,
-          [LeadStatus.CONTACTED]:  WorkflowState.FOLLOW_UP,
+        const statusToWorkflowState: Partial<
+          Record<LeadStatus, WorkflowState>
+        > = {
+          [LeadStatus.NEW]: WorkflowState.FIRST_CALL,
+          [LeadStatus.CONTACTED]: WorkflowState.FOLLOW_UP,
           [LeadStatus.INTERESTED]: WorkflowState.SEND_QUOTATION,
-          [LeadStatus.QUOTATION]:  WorkflowState.CHASE_QUOTATION,
-          [LeadStatus.CONVERTED]:  WorkflowState.CONVERTED,
-          [LeadStatus.LOST]:       WorkflowState.LOST,
+          [LeadStatus.QUOTATION]: WorkflowState.CHASE_QUOTATION,
+          [LeadStatus.CONVERTED]: WorkflowState.CONVERTED,
+          [LeadStatus.LOST]: WorkflowState.LOST,
         };
-        const targetWfState = statusToWorkflowState[saved.status as LeadStatus];
+        const targetWfState = statusToWorkflowState[saved.status];
         if (targetWfState) {
           // Regression protection: if the lead is already in a protected state
           // at a higher rank, skip the workflow_state update for non-bypass roles.
           // The status change is still persisted — only the workflow_state is guarded.
-          const currentWfState = saved.workflow_state as WorkflowState | null;
-          const currentRank    = currentWfState ? (WORKFLOW_RANK[currentWfState] ?? 0) : 0;
-          const targetRank     = WORKFLOW_RANK[targetWfState] ?? 0;
-          const isBypass       = WORKFLOW_BYPASS_ROLES.includes(user?.role);
-          const isRegression   = !isBypass && currentWfState && PROTECTED_WORKFLOW_STATES.has(currentWfState) && targetRank < currentRank;
+          const currentWfState = saved.workflow_state;
+          const currentRank = currentWfState
+            ? (WORKFLOW_RANK[currentWfState] ?? 0)
+            : 0;
+          const targetRank = WORKFLOW_RANK[targetWfState] ?? 0;
+          const isBypass = WORKFLOW_BYPASS_ROLES.includes(user?.role);
+          const isRegression =
+            !isBypass &&
+            currentWfState &&
+            PROTECTED_WORKFLOW_STATES.has(currentWfState) &&
+            targetRank < currentRank;
 
           // Identity gate: operational workflow states require phone or email.
           // Log + skip — the status save succeeds, but the no-identity lead stays
           // in its current workflow_state rather than advancing operationally.
-          if (OPERATIONAL_WORKFLOW_STATES.has(targetWfState) && !LeadService.hasIdentity(saved)) {
+          if (
+            OPERATIONAL_WORKFLOW_STATES.has(targetWfState) &&
+            !LeadService.hasIdentity(saved)
+          ) {
             this.logger.warn(
               `[STATE_CHANGE] lead=${saved.lead_ref ?? id} field=workflow_state trigger=update_identity_blocked: no phone/email, keeping ${currentWfState ?? 'null'} instead of ${targetWfState}`,
             );
@@ -1246,12 +1570,24 @@ export class LeadService implements OnModuleInit {
               `[STATE_CHANGE] lead=${saved.lead_ref ?? id} field=workflow_state trigger=update_regression_blocked: ${currentWfState}(rank ${currentRank}) → ${targetWfState}(rank ${targetRank}) blocked`,
             );
           } else {
-            const nextDue = computeNextActionDue(targetWfState, saved.source, saved.follow_up_date, new Date());
+            const nextDue = computeNextActionDue(
+              targetWfState,
+              saved.source,
+              saved.follow_up_date,
+              new Date(),
+            );
             await this.ds.query(
               `UPDATE leads SET workflow_state = $1, workflow_state_entered_at = NOW(), next_action_due_at = $3 WHERE id = $2`,
               [targetWfState, id, nextDue],
             );
-            this.logStateChange('workflow_state', currentWfState, targetWfState, saved, 'status_sync', user?.id ?? null);
+            this.logStateChange(
+              'workflow_state',
+              currentWfState,
+              targetWfState,
+              saved,
+              'status_sync',
+              user?.id ?? null,
+            );
             saved.workflow_state = targetWfState;
             saved.workflow_state_entered_at = new Date();
             saved.next_action_due_at = nextDue!;
@@ -1279,8 +1615,15 @@ export class LeadService implements OnModuleInit {
     await this.leadRepo.save(lead);
   }
 
-  async assignLead(id: number, userId: number | null, user: any, ip?: string): Promise<Lead> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+  async assignLead(
+    id: number,
+    userId: number | null,
+    user: any,
+    ip?: string,
+  ): Promise<Lead> {
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
 
     if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role)) {
@@ -1297,17 +1640,37 @@ export class LeadService implements OnModuleInit {
     const target = await this.leadRepo.manager.findOne(User, {
       where: { id: userId, is_active: true },
     });
-    if (!target) throw new BadRequestException('Target user not found or inactive');
+    if (!target)
+      throw new BadRequestException('Target user not found or inactive');
 
     lead.assigned_to = userId;
     const saved = await this.leadRepo.save(lead);
-    void this.auditService.log(id, user.id, 'ASSIGNED', `→ ${target.name} (id=${userId})`, ip);
-    this.eventEmitter.emit('crm.lead.assigned', { id, name: lead.name, assigned_to: userId, assigned_to_name: target.name, assigned_by_id: user.id, assigned_by_name: user.name });
+    void this.auditService.log(
+      id,
+      user.id,
+      'ASSIGNED',
+      `→ ${target.name} (id=${userId})`,
+      ip,
+    );
+    this.eventEmitter.emit('crm.lead.assigned', {
+      id,
+      name: lead.name,
+      assigned_to: userId,
+      assigned_to_name: target.name,
+      assigned_by_id: user.id,
+      assigned_by_name: user.name,
+    });
     return saved;
   }
 
-  async addNote(leadId: number, body: { note: string; type?: NoteType }, user: any): Promise<LeadNote> {
-    const lead = await this.leadRepo.findOne({ where: { id: leadId, is_active: true } });
+  async addNote(
+    leadId: number,
+    body: { note: string; type?: NoteType },
+    user: any,
+  ): Promise<LeadNote> {
+    const lead = await this.leadRepo.findOne({
+      where: { id: leadId, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
@@ -1319,15 +1682,25 @@ export class LeadService implements OnModuleInit {
     });
     const saved = await this.noteRepo.save(note);
     await this.tryKeywordAdvance(lead, body.note, user);
-    this.eventEmitter.emit('crm.lead.note_added', { lead_id: leadId, lead_name: lead.name, by_user_id: user.id, by_user_name: user.name });
+    this.eventEmitter.emit('crm.lead.note_added', {
+      lead_id: leadId,
+      lead_name: lead.name,
+      by_user_id: user.id,
+      by_user_name: user.name,
+    });
     return saved;
   }
 
   async getNotes(leadId: number, user: any): Promise<LeadNote[]> {
-    const lead = await this.leadRepo.findOne({ where: { id: leadId, is_active: true } });
+    const lead = await this.leadRepo.findOne({
+      where: { id: leadId, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
-    return this.noteRepo.find({ where: { lead_id: leadId }, order: { created_at: 'DESC' } });
+    return this.noteRepo.find({
+      where: { lead_id: leadId },
+      order: { created_at: 'DESC' },
+    });
   }
 
   private static isOperationallyBlocked(lead: Lead): boolean {
@@ -1342,8 +1715,15 @@ export class LeadService implements OnModuleInit {
     return hasContactInfo(lead);
   }
 
-  async addFollowUp(leadId: number, body: { due_date: string; note?: string }, user: any, ip?: string): Promise<LeadFollowUp> {
-    const lead = await this.leadRepo.findOne({ where: { id: leadId, is_active: true } });
+  async addFollowUp(
+    leadId: number,
+    body: { due_date: string; note?: string },
+    user: any,
+    ip?: string,
+  ): Promise<LeadFollowUp> {
+    const lead = await this.leadRepo.findOne({
+      where: { id: leadId, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
@@ -1369,23 +1749,35 @@ export class LeadService implements OnModuleInit {
     await this.leadRepo.save(lead);
     const saved = await this.followUpRepo.save(fu);
     await this.tryKeywordAdvance(lead, body.note, user);
-    void this.auditService.log(leadId, user.id, 'FOLLOWUP_CREATED', `due: ${body.due_date}`, ip);
+    void this.auditService.log(
+      leadId,
+      user.id,
+      'FOLLOWUP_CREATED',
+      `due: ${body.due_date}`,
+      ip,
+    );
     this.eventEmitter.emit('crm.lead.followup.created', {
-      lead_id:   leadId,
+      lead_id: leadId,
       lead_name: lead.name,
-      due_date:  body.due_date,
-      note:      body.note ?? null,
-      user_id:   user?.id ?? null,
+      due_date: body.due_date,
+      note: body.note ?? null,
+      user_id: user?.id ?? null,
       user_name: user?.name ?? null,
     });
     return saved;
   }
 
-  async completeFollowUp(followUpId: number, user: any, ip?: string): Promise<LeadFollowUp> {
+  async completeFollowUp(
+    followUpId: number,
+    user: any,
+    ip?: string,
+  ): Promise<LeadFollowUp> {
     const fu = await this.followUpRepo.findOne({ where: { id: followUpId } });
     if (!fu) throw new NotFoundException('Follow-up not found');
 
-    const lead = await this.leadRepo.findOne({ where: { id: fu.lead_id, is_active: true } });
+    const lead = await this.leadRepo.findOne({
+      where: { id: fu.lead_id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
@@ -1393,9 +1785,22 @@ export class LeadService implements OnModuleInit {
     fu.completed_at = new Date();
     fu.completed_by = user.id;
     const saved = await this.followUpRepo.save(fu);
-    void this.auditService.log(fu.lead_id, user.id, 'FOLLOWUP_COMPLETED', `followup_id=${followUpId}`, ip);
-    this.eventEmitter.emit('crm.lead.followup.completed', { lead_id: fu.lead_id, followup_id: followUpId, by_user_id: user.id, by_user_name: user.name });
-    this.eventEmitter.emit('lead.followup.completed', { followup_id: followUpId });
+    void this.auditService.log(
+      fu.lead_id,
+      user.id,
+      'FOLLOWUP_COMPLETED',
+      `followup_id=${followUpId}`,
+      ip,
+    );
+    this.eventEmitter.emit('crm.lead.followup.completed', {
+      lead_id: fu.lead_id,
+      followup_id: followUpId,
+      by_user_id: user.id,
+      by_user_name: user.name,
+    });
+    this.eventEmitter.emit('lead.followup.completed', {
+      followup_id: followUpId,
+    });
     return saved;
   }
 
@@ -1416,8 +1821,13 @@ export class LeadService implements OnModuleInit {
    * All heavy queries run in parallel via Promise.all.
    * Called on-demand from LeadDetail/WorkMode only (NOT injected into queue responses).
    */
-  async getCustomerMatch(id: number, user: any): Promise<Record<string, any> | null> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+  async getCustomerMatch(
+    id: number,
+    user: any,
+  ): Promise<Record<string, any> | null> {
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
@@ -1439,12 +1849,14 @@ export class LeadService implements OnModuleInit {
       const digits = lead.phone.replace(/\D/g, '');
       const bare10 = digits.slice(-10);
       // Build de-duplicated set of all plausible stored formats
-      const formats = [...new Set([
-        lead.phone,          // stored as-is in leads
-        bare10,              // bare 10-digit
-        `+91${bare10}`,      // E.164 with +
-        `91${bare10}`,       // E.164 without +
-      ])].filter(Boolean);
+      const formats = [
+        ...new Set([
+          lead.phone, // stored as-is in leads
+          bare10, // bare 10-digit
+          `+91${bare10}`, // E.164 with +
+          `91${bare10}`, // E.164 without +
+        ]),
+      ].filter(Boolean);
       const ph = formats.map((_, i) => `$${i + 1}`).join(', ');
 
       // a. customer_phones index (indexed — fast)
@@ -1452,7 +1864,10 @@ export class LeadService implements OnModuleInit {
         `SELECT cp.customer_id FROM customer_phones cp WHERE cp.phone IN (${ph}) LIMIT 1`,
         formats,
       );
-      if (cpRows.length) { customerId = Number(cpRows[0].customer_id); matchTier = 'EXACT'; }
+      if (cpRows.length) {
+        customerId = Number(cpRows[0].customer_id);
+        matchTier = 'EXACT';
+      }
 
       // b. Direct mobile1 fallback — covers customers created before the phone registry
       if (!customerId) {
@@ -1460,7 +1875,10 @@ export class LeadService implements OnModuleInit {
           `SELECT id FROM customer WHERE mobile1 IN (${ph}) LIMIT 1`,
           formats,
         );
-        if (c1Rows.length) { customerId = Number(c1Rows[0].id); matchTier = 'HIGH'; }
+        if (c1Rows.length) {
+          customerId = Number(c1Rows[0].id);
+          matchTier = 'HIGH';
+        }
       }
 
       // c. Digit-normalized fallback — covers phones stored with spaces/dashes/country code
@@ -1474,7 +1892,10 @@ export class LeadService implements OnModuleInit {
            LIMIT 1`,
           [bare10],
         );
-        if (c2Rows.length) { customerId = Number(c2Rows[0].id); matchTier = 'HIGH'; }
+        if (c2Rows.length) {
+          customerId = Number(c2Rows[0].id);
+          matchTier = 'HIGH';
+        }
       }
     }
 
@@ -1485,16 +1906,28 @@ export class LeadService implements OnModuleInit {
         `SELECT id FROM customer WHERE LOWER(email) = LOWER($1) LIMIT 1`,
         [lead.email],
       );
-      if (rows.length) { customerId = Number(rows[0].id); matchTier = 'HIGH'; }
+      if (rows.length) {
+        customerId = Number(rows[0].id);
+        matchTier = 'HIGH';
+      }
     }
 
     if (!customerId) return null;
 
     // 3. Parallel intelligence queries — all touch indexed columns
-    let customerRows: any[], ordersRows: any[], recentProductsRows: any[],
-        financeRows: any[], ticketsRows: any[], amcRows: any[], pendingQuotesRows: any[],
-        channelsRows: any[], salesmenRows: any[], ownershipRows: any[], recentLeadsRows: any[],
-        conversionTimelineRows: any[], topObjectionRows: any[];
+    let customerRows: any[],
+      ordersRows: any[],
+      recentProductsRows: any[],
+      financeRows: any[],
+      ticketsRows: any[],
+      amcRows: any[],
+      pendingQuotesRows: any[],
+      channelsRows: any[],
+      salesmenRows: any[],
+      ownershipRows: any[],
+      recentLeadsRows: any[],
+      conversionTimelineRows: any[],
+      topObjectionRows: any[];
     try {
       [
         customerRows,
@@ -1620,34 +2053,41 @@ export class LeadService implements OnModuleInit {
         ),
       ]);
     } catch (e) {
-      console.error('[CUSTOMER MATCH ERROR] intelligence query failed for customerId', customerId, e);
+      console.error(
+        '[CUSTOMER MATCH ERROR] intelligence query failed for customerId',
+        customerId,
+        e,
+      );
       throw e;
     }
 
     if (!customerRows.length) return null;
     const c = customerRows[0];
 
-    const totalOrders      = Number(ordersRows[0]?.total    ?? 0);
-    const totalValue       = Number(ordersRows[0]?.total_value ?? 0);
-    const outstanding      = Number(financeRows[0]?.outstanding ?? 0);
-    const overdue          = Number(financeRows[0]?.overdue ?? 0);
-    const openTickets      = Number(ticketsRows[0]?.open_tickets ?? 0);
-    const activeAmc        = Number(amcRows[0]?.active_amc ?? 0);
+    const totalOrders = Number(ordersRows[0]?.total ?? 0);
+    const totalValue = Number(ordersRows[0]?.total_value ?? 0);
+    const outstanding = Number(financeRows[0]?.outstanding ?? 0);
+    const overdue = Number(financeRows[0]?.overdue ?? 0);
+    const openTickets = Number(ticketsRows[0]?.open_tickets ?? 0);
+    const activeAmc = Number(amcRows[0]?.active_amc ?? 0);
     const pendingQuotations = Number(pendingQuotesRows[0]?.pending ?? 0);
     const lastOrderDate: string | null = ordersRows[0]?.last_order_date ?? null;
     const daysSinceLastOrder = lastOrderDate
-      ? Math.floor((Date.now() - new Date(lastOrderDate).getTime()) / 86_400_000)
+      ? Math.floor(
+          (Date.now() - new Date(lastOrderDate).getTime()) / 86_400_000,
+        )
       : null;
 
     // Relationship flags — computed from live business data, no separate tables
     const flags: string[] = [];
-    if (totalOrders >= 1)                                            flags.push('REPEAT_CUSTOMER');
-    if (totalValue >= 100_000)                                       flags.push('HIGH_VALUE');
-    if (overdue > 0)                                                 flags.push('PAYMENT_OVERDUE');
-    if (activeAmc > 0)                                               flags.push('AMC_ACTIVE');
-    if (openTickets > 0)                                             flags.push('SERVICE_RISK');
-    if (daysSinceLastOrder !== null && daysSinceLastOrder > 180)     flags.push('INACTIVE_CUSTOMER');
-    if (totalOrders >= 4)                                            flags.push('FREQUENT_BUYER');
+    if (totalOrders >= 1) flags.push('REPEAT_CUSTOMER');
+    if (totalValue >= 100_000) flags.push('HIGH_VALUE');
+    if (overdue > 0) flags.push('PAYMENT_OVERDUE');
+    if (activeAmc > 0) flags.push('AMC_ACTIVE');
+    if (openTickets > 0) flags.push('SERVICE_RISK');
+    if (daysSinceLastOrder !== null && daysSinceLastOrder > 180)
+      flags.push('INACTIVE_CUSTOMER');
+    if (totalOrders >= 4) flags.push('FREQUENT_BUYER');
 
     // Identity confidence — how certain we are this is the right customer
     const identity_confidence = matchTier;
@@ -1656,7 +2096,11 @@ export class LeadService implements OnModuleInit {
     const channels: string[] = channelsRows.map((r: any) => r.source as string);
 
     // Salesmen who've handled this customer
-    const salesmen = salesmenRows.map((r: any) => ({ id: Number(r.id), name: r.name, role: r.role }));
+    const salesmen = salesmenRows.map((r: any) => ({
+      id: Number(r.id),
+      name: r.name,
+      role: r.role,
+    }));
 
     // Ownership risk — compare the lead's current assignee vs the last revenue-generating salesman
     const ownershipRow = ownershipRows[0] ?? null;
@@ -1664,9 +2108,14 @@ export class LeadService implements OnModuleInit {
     let ownershipWarning: string | null = null;
     if (ownershipRow) {
       const daysSinceOwnership = ownershipRow.event_date
-        ? Math.floor((Date.now() - new Date(ownershipRow.event_date).getTime()) / 86_400_000)
+        ? Math.floor(
+            (Date.now() - new Date(ownershipRow.event_date).getTime()) /
+              86_400_000,
+          )
         : null;
-      const sameOwner = lead.assigned_to && Number(lead.assigned_to) === Number(ownershipRow.salesman_id);
+      const sameOwner =
+        lead.assigned_to &&
+        Number(lead.assigned_to) === Number(ownershipRow.salesman_id);
       if (!sameOwner) {
         if (daysSinceOwnership !== null && daysSinceOwnership <= 30) {
           ownershipRisk = 'HIGH';
@@ -1683,14 +2132,19 @@ export class LeadService implements OnModuleInit {
 
     // Customer health score — weighted penalty model
     let healthScore = 100;
-    if (overdue > 0)                                                        healthScore -= 30;
-    if (openTickets > 0)                                                    healthScore -= 20;
-    if (daysSinceLastOrder !== null && daysSinceLastOrder > 180)            healthScore -= 25;
-    if (pendingQuotations === 0 && totalOrders === 0)                       healthScore -= 15;
+    if (overdue > 0) healthScore -= 30;
+    if (openTickets > 0) healthScore -= 20;
+    if (daysSinceLastOrder !== null && daysSinceLastOrder > 180)
+      healthScore -= 25;
+    if (pendingQuotations === 0 && totalOrders === 0) healthScore -= 15;
     const healthGrade =
-      healthScore >= 80 ? 'EXCELLENT' :
-      healthScore >= 60 ? 'GOOD' :
-      healthScore >= 40 ? 'RISK' : 'CRITICAL';
+      healthScore >= 80
+        ? 'EXCELLENT'
+        : healthScore >= 60
+          ? 'GOOD'
+          : healthScore >= 40
+            ? 'RISK'
+            : 'CRITICAL';
 
     return {
       matched: true,
@@ -1712,14 +2166,19 @@ export class LeadService implements OnModuleInit {
         lastOrderDate,
         lastOrderNo: ordersRows[0]?.last_order_no ?? null,
         pendingQuotations,
-        recentProducts: recentProductsRows.map((r: any) => r.item_name as string),
+        recentProducts: recentProductsRows.map(
+          (r: any) => r.item_name as string,
+        ),
       },
       finance: {
         outstanding,
         overdue,
-        paymentDiscipline: overdue === 0 ? 'GOOD'
-          : overdue / Math.max(outstanding, 1) > 0.5 ? 'POOR'
-          : 'FAIR',
+        paymentDiscipline:
+          overdue === 0
+            ? 'GOOD'
+            : overdue / Math.max(outstanding, 1) > 0.5
+              ? 'POOR'
+              : 'FAIR',
       },
       service: {
         openTickets,
@@ -1734,7 +2193,10 @@ export class LeadService implements OnModuleInit {
         userName: ownershipRow?.salesman_name ?? null,
         sourceType: ownershipRow?.source_type ?? null,
         daysAgo: ownershipRow?.event_date
-          ? Math.floor((Date.now() - new Date(ownershipRow.event_date).getTime()) / 86_400_000)
+          ? Math.floor(
+              (Date.now() - new Date(ownershipRow.event_date).getTime()) /
+                86_400_000,
+            )
           : null,
         risk: ownershipRisk,
         warning: ownershipWarning,
@@ -1753,10 +2215,12 @@ export class LeadService implements OnModuleInit {
       conversionTimeline: (() => {
         const t = conversionTimelineRows[0] ?? {};
         return {
-          totalLeads:         +t.total_leads || 0,
-          convertedLeads:     +t.converted_leads || 0,
-          avgSalesCycleDays:  t.avg_sales_cycle_days !== null ? +t.avg_sales_cycle_days : null,
-          lastCycleSpanDays:  t.last_cycle_span_days !== null ? +t.last_cycle_span_days : null,
+          totalLeads: +t.total_leads || 0,
+          convertedLeads: +t.converted_leads || 0,
+          avgSalesCycleDays:
+            t.avg_sales_cycle_days !== null ? +t.avg_sales_cycle_days : null,
+          lastCycleSpanDays:
+            t.last_cycle_span_days !== null ? +t.last_cycle_span_days : null,
           repeatLeadFrequency: +t.total_leads > 1 ? +t.total_leads : 0,
           mostCommonObjection: topObjectionRows[0]?.last_objection_type ?? null,
         };
@@ -1765,21 +2229,25 @@ export class LeadService implements OnModuleInit {
   }
 
   async checkConvert(id: number, user: any): Promise<any> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
     // Look up customer via customer_phones index (global unique phone registry)
-    const e164   = lead.phone ?? null;
+    const e164 = lead.phone ?? null;
     const bare10 = lead.phone ? lead.phone.replace(/\D/g, '').slice(-10) : null;
-    const existing = e164 ? await this.leadRepo.manager.query(
-      `SELECT c.id, c."companyName", c."contactName", c.mobile1, c.email, c.city
+    const existing = e164
+      ? await this.leadRepo.manager.query(
+          `SELECT c.id, c."companyName", c."contactName", c.mobile1, c.email, c.city
        FROM customer_phones cp
        JOIN customer c ON c.id = cp.customer_id
        WHERE cp.phone = $1 OR cp.phone = $2
        LIMIT 1`,
-      [e164, bare10],
-    ) : [];
+          [e164, bare10],
+        )
+      : [];
 
     const customerExists = existing.length > 0;
     return {
@@ -1796,8 +2264,14 @@ export class LeadService implements OnModuleInit {
   }
 
   /** One-click conversion: find-or-create customer, mark lead CONVERTED, return customerId. */
-  async quickConvert(id: number, user: any, ip?: string): Promise<{ customerId: number; isNew: boolean }> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+  async quickConvert(
+    id: number,
+    user: any,
+    ip?: string,
+  ): Promise<{ customerId: number; isNew: boolean }> {
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
@@ -1806,7 +2280,7 @@ export class LeadService implements OnModuleInit {
       return { customerId: lead.customer_id, isNew: false };
     }
 
-    const e164   = lead.phone ?? null;
+    const e164 = lead.phone ?? null;
     const bare10 = lead.phone ? lead.phone.replace(/\D/g, '').slice(-10) : null;
     let customerId: number | null = null;
     let isNew = false;
@@ -1822,39 +2296,57 @@ export class LeadService implements OnModuleInit {
       if (rows.length > 0) customerId = rows[0].id;
     }
 
-    // 2. Create minimal customer if none found; register phone in customer_phones
-    if (!customerId) {
-      const name  = toSentenceCase(lead.name || 'Unknown');
-      const phone = e164 || bare10 || null;
-      const city  = lead.city  || 'TBD';
-      const state = lead.state || 'TBD';
+    // 2. Create minimal customer if none found; register phone in customer_phones.
+    // 3. Mark lead as CONVERTED.
+    // All three writes are atomic: if the lead update fails, customer and phone rows roll back.
+    await this.leadRepo.manager.transaction(async (tx) => {
+      if (!customerId) {
+        const name = toSentenceCase(lead.name || 'Unknown');
+        const phone = e164 || bare10 || null;
+        const city = lead.city || 'TBD';
+        const state = lead.state || 'TBD';
 
-      const inserted = await this.leadRepo.manager.query(
-        `INSERT INTO customer ("companyName", "contactName", mobile1, city, state, pincode, "customerType", "createdBy", "createdAt")
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
-         ON CONFLICT (mobile1) DO UPDATE SET "contactName" = EXCLUDED."contactName"
-         RETURNING id`,
-        [name, name, phone, city, state, '000000', 'Retail Shop', String(user.id)],
-      );
-      customerId = inserted[0].id;
-      isNew = true;
-
-      // Register phone in the global index so future lookups hit customer_phones
-      if (phone) {
-        await this.leadRepo.manager.query(
-          `INSERT INTO customer_phones (customer_id, phone)
-           VALUES ($1, $2)
-           ON CONFLICT (phone) DO NOTHING`,
-          [customerId, phone],
+        const inserted = await tx.query(
+          `INSERT INTO customer ("companyName", "contactName", mobile1, city, state, pincode, "customerType", "createdBy", "createdAt")
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+           ON CONFLICT (mobile1) DO UPDATE SET "contactName" = EXCLUDED."contactName"
+           RETURNING id`,
+          [
+            name,
+            name,
+            phone,
+            city,
+            state,
+            '000000',
+            'Retail Shop',
+            String(user.id),
+          ],
         );
-      }
-    }
+        customerId = inserted[0].id;
+        isNew = true;
 
-    // 3. Mark lead as CONVERTED
-    lead.status      = LeadStatus.CONVERTED;
-    lead.customer_id = customerId;
-    await this.leadRepo.save(lead);
-    void this.auditService.log(id, user.id, 'CONVERTED', `customer_id=${customerId} isNew=${isNew}`, ip);
+        // Register phone in the global index so future lookups hit customer_phones
+        if (phone) {
+          await tx.query(
+            `INSERT INTO customer_phones (customer_id, phone)
+             VALUES ($1, $2)
+             ON CONFLICT (phone) DO NOTHING`,
+            [customerId, phone],
+          );
+        }
+      }
+
+      lead.status = LeadStatus.CONVERTED;
+      lead.customer_id = customerId;
+      await tx.save(lead);
+    });
+    void this.auditService.log(
+      id,
+      user.id,
+      'CONVERTED',
+      `customer_id=${customerId} isNew=${isNew}`,
+      ip,
+    );
 
     return { customerId, isNew };
   }
@@ -1862,15 +2354,23 @@ export class LeadService implements OnModuleInit {
   private static readonly QUALIFIED_KEYWORDS = /price|cost|quotation/i;
 
   /** If note text contains buying-intent keywords and lead is at CONTACTED, advance to QUALIFIED. */
-  private async tryKeywordAdvance(lead: Lead, text: string | undefined, user: any): Promise<void> {
+  private async tryKeywordAdvance(
+    lead: Lead,
+    text: string | undefined,
+    user: any,
+  ): Promise<void> {
     if (!text || lead.stage !== LeadStage.CONTACTED) return;
     if (!LeadService.QUALIFIED_KEYWORDS.test(text)) return;
     await this.updateStage(lead.id, LeadStage.QUALIFIED, user);
   }
 
   /** Returns the LeadStage implied by a status transition, or null if no stage sync is needed. */
-  private computeTargetStageForStatus(currentStage: LeadStage, newStatus: LeadStatus): LeadStage | null {
-    if (currentStage === LeadStage.WON || currentStage === LeadStage.LOST) return null;
+  private computeTargetStageForStatus(
+    currentStage: LeadStage,
+    newStatus: LeadStatus,
+  ): LeadStage | null {
+    if (currentStage === LeadStage.WON || currentStage === LeadStage.LOST)
+      return null;
     if (newStatus === LeadStatus.QUOTATION) return LeadStage.QUOTED;
     if (newStatus === LeadStatus.CONVERTED) return LeadStage.WON;
     if (newStatus === LeadStatus.LOST) return LeadStage.LOST;
@@ -1895,7 +2395,9 @@ export class LeadService implements OnModuleInit {
    * - Transitioning to LOST is always valid from any non-terminal stage.
    */
   async updateStage(id: number, newStage: LeadStage, user: any): Promise<Lead> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
@@ -1912,13 +2414,20 @@ export class LeadService implements OnModuleInit {
     if (newStage === LeadStage.LOST) {
       lead.stage = LeadStage.LOST;
       const saved = await this.leadRepo.save(lead);
-      this.logStateChange('stage', currentStage, LeadStage.LOST, saved, 'updateStage', user?.id ?? null);
+      this.logStateChange(
+        'stage',
+        currentStage,
+        LeadStage.LOST,
+        saved,
+        'updateStage',
+        user?.id ?? null,
+      );
       return saved;
     }
 
-    const order       = LeadService.STAGE_ORDER;
-    const currentIdx  = order.indexOf(currentStage);
-    const targetIdx   = order.indexOf(newStage);
+    const order = LeadService.STAGE_ORDER;
+    const currentIdx = order.indexOf(currentStage);
+    const targetIdx = order.indexOf(newStage);
 
     if (targetIdx === -1) {
       throw new BadRequestException(`Unknown stage: ${newStage}`);
@@ -1941,7 +2450,10 @@ export class LeadService implements OnModuleInit {
       saved.stage = order[i];
       saved = await this.leadRepo.save({ ...saved });
       this.logStateChange(
-        'stage', prev, saved.stage, saved,
+        'stage',
+        prev,
+        saved.stage,
+        saved,
         i < targetIdx ? 'updateStage_auto_step' : 'updateStage',
         user?.id ?? null,
       );
@@ -1950,8 +2462,16 @@ export class LeadService implements OnModuleInit {
     return saved;
   }
 
-  async markConverted(id: number, customerId: number, quotationId: number, user: any, ip?: string): Promise<Lead> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+  async markConverted(
+    id: number,
+    customerId: number,
+    quotationId: number,
+    user: any,
+    ip?: string,
+  ): Promise<Lead> {
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
     lead.status = LeadStatus.CONVERTED;
@@ -1963,54 +2483,88 @@ export class LeadService implements OnModuleInit {
       saved = await this.updateStage(id, LeadStage.WON, user);
     }
 
-    void this.auditService.log(id, user.id, 'CONVERTED', `customer_id=${customerId} quotation_id=${quotationId}`, ip);
+    void this.auditService.log(
+      id,
+      user.id,
+      'CONVERTED',
+      `customer_id=${customerId} quotation_id=${quotationId}`,
+      ip,
+    );
     return saved;
   }
 
   /** Entry-point for Shopify theme JS events (POST /api/leads/shopify).
    *  Routes through the standard create() so dedup, assignment, and follow-up all apply. */
   async createFromShopifyClick(payload: {
-    source?: string; action?: string; name?: string; phone?: string;
-    email?: string; city?: string; country?: string; context?: string;
-    message?: string; product?: string; product_title?: string; product_url?: string;
-    page_url?: string; lead_type?: string; priority?: string; timestamp?: string;
+    source?: string;
+    action?: string;
+    name?: string;
+    phone?: string;
+    email?: string;
+    city?: string;
+    country?: string;
+    context?: string;
+    message?: string;
+    product?: string;
+    product_title?: string;
+    product_url?: string;
+    page_url?: string;
+    lead_type?: string;
+    priority?: string;
+    timestamp?: string;
     tag?: string;
     // UTM attribution
-    utm_source?: string; utm_medium?: string; utm_campaign?: string;
-    utm_term?: string; utm_content?: string; gclid?: string; fbclid?: string;
+    utm_source?: string;
+    utm_medium?: string;
+    utm_campaign?: string;
+    utm_term?: string;
+    utm_content?: string;
+    gclid?: string;
+    fbclid?: string;
   }): Promise<{ ok: boolean; leadId?: number; error?: string }> {
     const externalId = generateShopifyExternalId(payload);
 
-    const rawName    = (payload.name || '').trim();
-    const rawEmail   = normalizeIdentityField(payload.email) ?? '';
-    const rawCity    = (payload.city || '').trim();
+    const rawName = (payload.name || '').trim();
+    const rawEmail = normalizeIdentityField(payload.email) ?? '';
+    const rawCity = (payload.city || '').trim();
     const rawCountry = (payload.country || '').trim();
     const rawContext = (payload.context || '').trim();
 
     // Validate phone: reject empty, too-short, and all-same-digit fakes (0000000000, 9999999999…)
-    const phoneIsReal     = isShopifyPhoneReal(payload.phone ?? '');
-    const normalizedPhone = phoneIsReal ? normalizePhone(payload.phone ?? '') : 'unknown';
-    const resolvedPhone   = phoneIsReal && normalizedPhone !== 'unknown' ? normalizedPhone : undefined;
+    const phoneIsReal = isShopifyPhoneReal(payload.phone ?? '');
+    const normalizedPhone = phoneIsReal
+      ? normalizePhone(payload.phone ?? '')
+      : 'unknown';
+    const resolvedPhone =
+      phoneIsReal && normalizedPhone !== 'unknown'
+        ? normalizedPhone
+        : undefined;
 
     const resolvedContext = resolveShopifyUtmContext(rawContext, payload);
 
     const leadData: CreateLeadDto = {
-      name:              rawName    || undefined,
-      phone:             resolvedPhone,
-      is_phone_valid:    phoneIsReal,
-      email:             rawEmail   || undefined,
-      city:              rawCity    || undefined,
-      country:           rawCountry || undefined,
-      context:           resolvedContext,
-      product_interest:  payload.product || payload.product_title || payload.page_url || 'General Inquiry',
-      notes:             payload.message ? payload.message : `Lead from ${payload.page_url || ''}`,
-      source:            LeadSource.SHOPIFY,
+      name: rawName || undefined,
+      phone: resolvedPhone,
+      is_phone_valid: phoneIsReal,
+      email: rawEmail || undefined,
+      city: rawCity || undefined,
+      country: rawCountry || undefined,
+      context: resolvedContext,
+      product_interest:
+        payload.product ||
+        payload.product_title ||
+        payload.page_url ||
+        'General Inquiry',
+      notes: payload.message
+        ? payload.message
+        : `Lead from ${payload.page_url || ''}`,
+      source: LeadSource.SHOPIFY,
       lead_source_label: resolvedContext,
-      landing_page:      payload.page_url || '',
-      external_id:       externalId,
-      raw_payload:       {
+      landing_page: payload.page_url || '',
+      external_id: externalId,
+      raw_payload: {
         ...payload,
-        last_message:    payload.message || '',
+        last_message: payload.message || '',
         last_message_at: new Date().toISOString(),
       },
     };
@@ -2025,13 +2579,15 @@ export class LeadService implements OnModuleInit {
     );
     if (recentDup) {
       const existingRp =
-        recentDup.raw_payload && typeof recentDup.raw_payload === 'object' && !Array.isArray(recentDup.raw_payload)
+        recentDup.raw_payload &&
+        typeof recentDup.raw_payload === 'object' &&
+        !Array.isArray(recentDup.raw_payload)
           ? recentDup.raw_payload
           : {};
       await this.leadRepo.update(recentDup.id, {
         raw_payload: {
           ...existingRp,
-          last_message:    payload.message || existingRp['last_message'] || '',
+          last_message: payload.message || existingRp['last_message'] || '',
           last_message_at: new Date().toISOString(),
         } as any,
       });
@@ -2050,20 +2606,37 @@ export class LeadService implements OnModuleInit {
       this.logger.log(`Shopify lead id=${lead.id} external_id=${externalId}`);
       if (!phoneIsReal) {
         try {
-          await this.addNote(lead.id, { note: 'Phone not provided from Shopify', type: NoteType.SYSTEM }, { id: null, role: 'Admin' });
-        } catch { /* note failure must not block lead creation */ }
+          await this.addNote(
+            lead.id,
+            { note: 'Phone not provided from Shopify', type: NoteType.SYSTEM },
+            { id: null, role: 'Admin' },
+          );
+        } catch {
+          /* note failure must not block lead creation */
+        }
       }
       return { ok: true, leadId: lead.id };
     } catch (e: any) {
       console.error('SHOPIFY ERROR:', e?.message, e?.stack);
       if (e instanceof BadRequestException) throw e;
       // Unique index violation — concurrent duplicate submission
-      if (e?.code === '23505' || e?.message?.includes('unique') || e?.message?.includes('duplicate')) {
+      if (
+        e?.code === '23505' ||
+        e?.message?.includes('unique') ||
+        e?.message?.includes('duplicate')
+      ) {
         const existing = await this.findByExternalId(externalId);
         if (existing) return { ok: true, leadId: existing.id };
       }
-      this.logger.error(`createFromShopifyClick failed: ${e?.message}`, e?.stack);
-      this.logsService.log(LogAction.ERROR, { context: 'createFromShopifyClick', message: e?.message, payload });
+      this.logger.error(
+        `createFromShopifyClick failed: ${e?.message}`,
+        e?.stack,
+      );
+      this.logsService.log(LogAction.ERROR, {
+        context: 'createFromShopifyClick',
+        message: e?.message,
+        payload,
+      });
       return { ok: false, error: e?.message };
     }
   }
@@ -2075,13 +2648,17 @@ export class LeadService implements OnModuleInit {
   @OnEvent('crm.whatsapp.down')
   onWhatsAppDown(): void {
     this._whatsappDown = true;
-    this.logger.warn('[LeadService] WhatsApp is down — incoming leads will be escalated to HIGH priority');
+    this.logger.warn(
+      '[LeadService] WhatsApp is down — incoming leads will be escalated to HIGH priority',
+    );
   }
 
   @OnEvent('crm.whatsapp.up')
   onWhatsAppUp(): void {
     this._whatsappDown = false;
-    this.logger.log('[LeadService] WhatsApp restored — normal lead priority resumed');
+    this.logger.log(
+      '[LeadService] WhatsApp restored — normal lead priority resumed',
+    );
   }
 
   @OnEvent('lead.incoming', { async: true })
@@ -2127,7 +2704,8 @@ export class LeadService implements OnModuleInit {
 
       if (existing) {
         // Append the new message to notes rather than creating a duplicate row
-        const incomingMessage: string = payload.raw_payload?.body ?? payload.raw_payload?.message ?? '';
+        const incomingMessage: string =
+          payload.raw_payload?.body ?? payload.raw_payload?.message ?? '';
         if (incomingMessage) {
           const timestamp = new Date().toISOString();
           const appendLine = `\n[${timestamp}] ${incomingMessage}`;
@@ -2154,7 +2732,11 @@ export class LeadService implements OnModuleInit {
           const extracted = extractPhoneFromText(incomingMessage);
           if (extracted) {
             await this.leadRepo.update(existing.id, { phone: extracted });
-            this.logger.log({ action: 'PHONE_EXTRACTED_FROM_CHAT', leadId: existing.id, phone: extracted });
+            this.logger.log({
+              action: 'PHONE_EXTRACTED_FROM_CHAT',
+              leadId: existing.id,
+              phone: extracted,
+            });
           }
         }
 
@@ -2166,30 +2748,31 @@ export class LeadService implements OnModuleInit {
 
       const rp = payload.raw_payload ?? {};
       // Enrich from raw_payload when WhatsApp contact info is richer than the emitted payload
-      const enrichedName  = payload.name || rp.pushname || rp.name || rp.contact_name || undefined;
-      const enrichedCity  = rp.city || rp.location || undefined;
-      const inboundBody   = rp.body || rp.message || '';
-      const timestamp     = new Date().toISOString();
+      const enrichedName =
+        payload.name || rp.pushname || rp.name || rp.contact_name || undefined;
+      const enrichedCity = rp.city || rp.location || undefined;
+      const inboundBody = rp.body || rp.message || '';
+      const timestamp = new Date().toISOString();
 
       const dto: CreateLeadDto = {
-        phone,                          // undefined for invalid/missing phones → anonymous lead
-        name:               enrichedName,
-        city:               enrichedCity,
-        source:             payload.source,
-        context:            contextToLabel(LeadContext.WHATSAPP_INBOUND),
-        whatsapp_chat_id:   payload.whatsapp_chat_id,
-        notes:              inboundBody || undefined,
-        raw_payload:        {
+        phone, // undefined for invalid/missing phones → anonymous lead
+        name: enrichedName,
+        city: enrichedCity,
+        source: payload.source,
+        context: contextToLabel(LeadContext.WHATSAPP_INBOUND),
+        whatsapp_chat_id: payload.whatsapp_chat_id,
+        notes: inboundBody || undefined,
+        raw_payload: {
           ...rp,
-          raw_phone:       payload.phone ?? null,  // preserve original for analytics
-          last_message:    inboundBody || null,
+          raw_phone: payload.phone ?? null, // preserve original for analytics
+          last_message: inboundBody || null,
           last_message_at: timestamp,
         },
-        external_id:        payload.external_id,
-        channel:            'WHATSAPP',
-        lead_source_label:  'inbound_message',
-        whatsappMessageId:  messageId,
-        hasSerializedId:    payload.hasSerializedId ?? false,
+        external_id: payload.external_id,
+        channel: 'WHATSAPP',
+        lead_source_label: 'inbound_message',
+        whatsappMessageId: messageId,
+        hasSerializedId: payload.hasSerializedId ?? false,
       };
 
       try {
@@ -2208,28 +2791,37 @@ export class LeadService implements OnModuleInit {
           const extracted = extractPhoneFromText(inboundBody);
           if (extracted) {
             await this.leadRepo.update(savedLead.id, { phone: extracted });
-            this.logger.log({ action: 'PHONE_EXTRACTED_FROM_CHAT', leadId: savedLead.id, phone: extracted });
+            this.logger.log({
+              action: 'PHONE_EXTRACTED_FROM_CHAT',
+              leadId: savedLead.id,
+              phone: extracted,
+            });
           }
         }
 
         this.logger.log({
-          action:    'WHATSAPP_LEAD_CREATED',
+          action: 'WHATSAPP_LEAD_CREATED',
           phone,
           messageId: messageId ?? null,
         });
       } catch (err: any) {
         if (err?.code === '23505' && messageId) {
           this.logger.warn({
-            action:    'WHATSAPP_DUPLICATE_DB_BLOCKED',
+            action: 'WHATSAPP_DUPLICATE_DB_BLOCKED',
             messageId: messageId,
           });
-          await this.leadRepo.findOne({ where: { whatsappMessageId: messageId } });
+          await this.leadRepo.findOne({
+            where: { whatsappMessageId: messageId },
+          });
           return;
         }
         throw err;
       }
     } catch (e) {
-      this.logger.error(`handleIncomingLead failed for phone=${normalizePhone(payload.phone ?? '')}: ${e?.message}`, e?.stack);
+      this.logger.error(
+        `handleIncomingLead failed for phone=${normalizePhone(payload.phone ?? '')}: ${e?.message}`,
+        e?.stack,
+      );
     }
   }
 
@@ -2297,17 +2889,23 @@ export class LeadService implements OnModuleInit {
     return rows.length > 0 ? rows[0] : null;
   }
 
-  async createQuotationFromLead(id: number, user: any, ip?: string): Promise<any> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+  async createQuotationFromLead(
+    id: number,
+    user: any,
+    ip?: string,
+  ): Promise<any> {
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
 
     const quotation = await this.quotationService.create(
       {
-        lead_id:          lead.id,
-        customer_name:    lead.name,
-        salesman_id:      user?.id,
-        items:            [],
+        lead_id: lead.id,
+        customer_name: lead.name,
+        salesman_id: user?.id,
+        items: [],
       },
       user,
     );
@@ -2316,12 +2914,22 @@ export class LeadService implements OnModuleInit {
     await this.leadRepo.update(id, { quotation_id: quotation.id });
 
     // Advance stage to QUOTED if not already there or past it
-    const advanceable: LeadStage[] = [LeadStage.NEW, LeadStage.CONTACTED, LeadStage.QUALIFIED];
+    const advanceable: LeadStage[] = [
+      LeadStage.NEW,
+      LeadStage.CONTACTED,
+      LeadStage.QUALIFIED,
+    ];
     if (advanceable.includes(lead.stage)) {
       await this.updateStage(id, LeadStage.QUOTED, user);
     }
 
-    void this.auditService.log(id, user.id, 'QUOTATION_CREATED', `quotation_id=${quotation.id}`, ip);
+    void this.auditService.log(
+      id,
+      user.id,
+      'QUOTATION_CREATED',
+      `quotation_id=${quotation.id}`,
+      ip,
+    );
 
     return quotation;
   }
@@ -2346,25 +2954,29 @@ export class LeadService implements OnModuleInit {
     isDuplicate: boolean,
     source?: LeadSource,
   ): { quality: LeadQuality; score: number } {
-    if (isDuplicate)         return { quality: LeadQuality.DUPLICATE,    score: 20 };
-    if (!isPhoneValid && phone) return { quality: LeadQuality.AUTO_CAPTURED, score: 15 };
+    if (isDuplicate) return { quality: LeadQuality.DUPLICATE, score: 20 };
+    if (!isPhoneValid && phone)
+      return { quality: LeadQuality.AUTO_CAPTURED, score: 15 };
 
-    const isManual     = source ? MANUAL_TRUST_SOURCES.has(source) : false;
-    const isOldCust    = source === LeadSource.OLD_CUSTOMER;
-    const isReferral   = source === LeadSource.REFERRAL;
-    const hasProduct   = !!productInterest;
+    const isManual = source ? MANUAL_TRUST_SOURCES.has(source) : false;
+    const isOldCust = source === LeadSource.OLD_CUSTOMER;
+    const isReferral = source === LeadSource.REFERRAL;
+    const hasProduct = !!productInterest;
 
     // Both phone + email → QUALIFIED (trust boost for old customer / referral)
     if (phone && email) {
       const boost = isOldCust ? 10 : isReferral ? 5 : 0;
-      return { quality: LeadQuality.QUALIFIED, score: Math.min(100, 85 + boost) };
+      return {
+        quality: LeadQuality.QUALIFIED,
+        score: Math.min(100, 85 + boost),
+      };
     }
 
     // Phone only → PARTIAL with source-aware score
     if (phone) {
       let score = hasProduct ? 65 : 60;
       if (isOldCust || isReferral) score += 10;
-      else if (isManual)           score += 5;
+      else if (isManual) score += 5;
       return { quality: LeadQuality.PARTIAL, score: Math.min(100, score) };
     }
 
@@ -2382,7 +2994,7 @@ export class LeadService implements OnModuleInit {
     }
     // Digital tracking sources: TRACKING_ONLY or JUNK
     if (hasProduct) return { quality: LeadQuality.TRACKING_ONLY, score: 10 };
-    return             { quality: LeadQuality.JUNK,           score: 5 };
+    return { quality: LeadQuality.JUNK, score: 5 };
   }
 
   /**
@@ -2452,7 +3064,9 @@ export class LeadService implements OnModuleInit {
     `);
     const count = rows?.length ?? 0;
     if (count > 0) {
-      this.logger.log(`[LeadService] archiveOrphanTrackingLeads: deactivated ${count} row(s)`);
+      this.logger.log(
+        `[LeadService] archiveOrphanTrackingLeads: deactivated ${count} row(s)`,
+      );
     }
     return count;
   }
@@ -2467,13 +3081,9 @@ export class LeadService implements OnModuleInit {
     const email = normalizeIdentityField(rawEmail)?.toLowerCase() ?? null;
 
     const phoneSentinelCleared =
-      rawPhone != null &&
-      String(rawPhone).trim() !== '' &&
-      phone === null;
+      rawPhone != null && String(rawPhone).trim() !== '' && phone === null;
     const emailSentinelCleared =
-      rawEmail != null &&
-      String(rawEmail).trim() !== '' &&
-      email === null;
+      rawEmail != null && String(rawEmail).trim() !== '' && email === null;
 
     if (phoneSentinelCleared || emailSentinelCleared) {
       this.logger.log(
@@ -2484,7 +3094,10 @@ export class LeadService implements OnModuleInit {
     return { phone, email };
   }
 
-  private async storeAsAnalyticsEventFromDto(dto: CreateLeadDto, reason: string): Promise<void> {
+  private async storeAsAnalyticsEventFromDto(
+    dto: CreateLeadDto,
+    reason: string,
+  ): Promise<void> {
     await this.storeAsAnalyticsEvent({
       action: dto.lead_source_label ?? dto.context ?? dto.source,
       event: 'lead_blocked',
@@ -2497,7 +3110,9 @@ export class LeadService implements OnModuleInit {
   }
 
   /** Store an anonymous Shopify event in analytics_events without creating a CRM lead. */
-  private async storeAsAnalyticsEvent(payload: Record<string, any>): Promise<void> {
+  private async storeAsAnalyticsEvent(
+    payload: Record<string, any>,
+  ): Promise<void> {
     try {
       await this.ds.query(
         `INSERT INTO analytics_events (session_id, event, product, page_url, created_at)
@@ -2515,7 +3130,8 @@ export class LeadService implements OnModuleInit {
   }
 
   private assertAccess(lead: Lead, user: any) {
-    if ((CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role)) return;
+    if ((CRM_FULL_ACCESS_ROLES as readonly string[]).includes(user?.role))
+      return;
     if (lead.assigned_to !== user?.id && lead.created_by !== user?.id) {
       // NotFoundException instead of ForbiddenException intentionally: returning 403 on a valid
       // lead ID confirms the resource exists and its ownership — an enumeration oracle. 404 is
@@ -2534,18 +3150,24 @@ export class LeadService implements OnModuleInit {
       created_by: lead.created_by ?? lead.assigned_to ?? null,
     });
     await this.followUpRepo.save(fu);
-    lead.follow_up_date = due;
-    await this.leadRepo.save(lead);
   }
 
   /** Auto-schedule the next follow-up when a lead advances to a new stage. */
-  private async autoScheduleFollowUp(lead: Lead, newStatus: LeadStatus, user: any): Promise<void> {
+  private async autoScheduleFollowUp(
+    lead: Lead,
+    newStatus: LeadStatus,
+    user: any,
+  ): Promise<void> {
     let hoursAhead: number | null = null;
     let noteText: string | null = null;
 
     if (newStatus === LeadStatus.CONTACTED) {
       // Hot inbound sources: first follow-up in 4h — they just expressed intent
-      const hotSources: string[] = [LeadSource.META, LeadSource.GOOGLE, LeadSource.LINKEDIN];
+      const hotSources: string[] = [
+        LeadSource.META,
+        LeadSource.GOOGLE,
+        LeadSource.LINKEDIN,
+      ];
       if (hotSources.includes(lead.source as string)) {
         hoursAhead = 4;
         noteText = 'Auto-scheduled: quick follow up (hot inbound lead)';
@@ -2571,7 +3193,7 @@ export class LeadService implements OnModuleInit {
     const fu = this.followUpRepo.create({
       lead_id: lead.id,
       due_date: due,
-      note: noteText!,
+      note: noteText,
       created_by: user?.id ?? lead.assigned_to ?? null,
     });
     await this.followUpRepo.save(fu);
@@ -2594,21 +3216,23 @@ export class LeadService implements OnModuleInit {
        WHERE key LIKE 'automation.%' OR key LIKE 'cron.%'`,
     );
     const map: Record<string, string | boolean> = {
-      'automation.lead_greeting':      true,
+      'automation.lead_greeting': true,
       'automation.followup_reminders': true,
-      'automation.payment_followups':  true,
+      'automation.payment_followups': true,
     };
     for (const row of rows) {
       if (row.key.startsWith('automation.')) {
         map[row.key] = row.value !== 'false';
       } else {
-        map[row.key] = row.value;   // ISO timestamp strings, returned as-is
+        map[row.key] = row.value; // ISO timestamp strings, returned as-is
       }
     }
     return map;
   }
 
-  async updateAutomationSettings(settings: Record<string, boolean>): Promise<Record<string, string | boolean>> {
+  async updateAutomationSettings(
+    settings: Record<string, boolean>,
+  ): Promise<Record<string, string | boolean>> {
     for (const key of LeadService.AUTOMATION_KEYS) {
       if (key in settings) {
         await this.ds.query(
@@ -2623,7 +3247,9 @@ export class LeadService implements OnModuleInit {
   }
 
   async getAuditLog(id: number, user: any): Promise<any[]> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     this.assertAccess(lead, user);
     return this.ds.query(
@@ -2645,13 +3271,16 @@ export class LeadService implements OnModuleInit {
     user?: any,
     ip?: string,
   ): Promise<Lead> {
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
     const tags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
     if (paused) {
-      if (!tags.includes('automation_off')) lead.tags = [...tags, 'automation_off'];
+      if (!tags.includes('automation_off'))
+        lead.tags = [...tags, 'automation_off'];
     } else {
-      lead.tags = tags.filter(t => t !== 'automation_off');
+      lead.tags = tags.filter((t) => t !== 'automation_off');
     }
     // Track whether this is a deliberate manager pause (vs a temporary snooze).
     // resumeExpiredSnoozes() only auto-clears automation_off when this is false.
@@ -2673,12 +3302,18 @@ export class LeadService implements OnModuleInit {
           created_by: user.id,
         }),
       );
-      void this.auditService.log(id, user.id, 'UPDATED', `Automation ${action}${reasonSuffix}`, ip);
+      void this.auditService.log(
+        id,
+        user.id,
+        'UPDATED',
+        `Automation ${action}${reasonSuffix}`,
+        ip,
+      );
       this.eventEmitter.emit('crm.lead.automation.toggled', {
-        lead_id:   id,
-        action:    paused ? 'PAUSED' : 'RESUMED',
-        reason:    reason?.trim() || null,
-        user_id:   user.id,
+        lead_id: id,
+        action: paused ? 'PAUSED' : 'RESUMED',
+        reason: reason?.trim() || null,
+        user_id: user.id,
         user_name: user.name ?? null,
       });
     }
@@ -2692,15 +3327,25 @@ export class LeadService implements OnModuleInit {
     user: any,
     ip?: string,
   ): Promise<Lead> {
-    if (!reason?.trim()) throw new BadRequestException('Reason is required to snooze automation');
-    if (!durationMins || durationMins <= 0) throw new BadRequestException('Duration must be a positive number of minutes');
-    if (durationMins > 10_080) throw new BadRequestException('Automation snooze cannot exceed 7 days (10,080 minutes)');
+    if (!reason?.trim())
+      throw new BadRequestException('Reason is required to snooze automation');
+    if (!durationMins || durationMins <= 0)
+      throw new BadRequestException(
+        'Duration must be a positive number of minutes',
+      );
+    if (durationMins > 10_080)
+      throw new BadRequestException(
+        'Automation snooze cannot exceed 7 days (10,080 minutes)',
+      );
 
-    const lead = await this.leadRepo.findOne({ where: { id, is_active: true } });
+    const lead = await this.leadRepo.findOne({
+      where: { id, is_active: true },
+    });
     if (!lead) throw new NotFoundException('Lead not found');
 
     const tags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
-    if (!tags.includes('automation_off')) lead.tags = [...tags, 'automation_off'];
+    if (!tags.includes('automation_off'))
+      lead.tags = [...tags, 'automation_off'];
 
     const snoozeUntil = new Date(Date.now() + durationMins * 60 * 1000);
     lead.automation_snooze_until = snoozeUntil;
@@ -2710,14 +3355,17 @@ export class LeadService implements OnModuleInit {
     lead.automation_manually_paused = false;
 
     // Snooze / callback abuse detection
-    const snoozeCountRows: Array<{ count: string }> = await this.ds.query(`
+    const snoozeCountRows: Array<{ count: string }> = await this.ds.query(
+      `
       SELECT COUNT(*) AS count
       FROM lead_audit_logs
       WHERE lead_id = $1
         AND action = 'UPDATED'
         AND detail LIKE 'Automation snoozed%'
         AND created_at > NOW() - INTERVAL '30 days'
-    `, [id]);
+    `,
+      [id],
+    );
     const recentSnoozeCount = parseInt(snoozeCountRows[0]?.count ?? '0', 10);
     const currentTags: string[] = Array.isArray(lead.tags) ? lead.tags : [];
     const hasAbuseTag = currentTags.includes('callback_abuse_risk');
@@ -2732,7 +3380,13 @@ export class LeadService implements OnModuleInit {
           created_by: user.id,
         }),
       );
-      void this.auditService.log(id, user.id, 'UPDATED', `[CALLBACK MOVED] snooze blocked (${recentSnoozeCount + 1} attempts)`, ip);
+      void this.auditService.log(
+        id,
+        user.id,
+        'UPDATED',
+        `[CALLBACK MOVED] snooze blocked (${recentSnoozeCount + 1} attempts)`,
+        ip,
+      );
       return lead; // abort without saving the snooze
     }
 
@@ -2753,19 +3407,23 @@ export class LeadService implements OnModuleInit {
     if (recentSnoozeCount >= 3) {
       this.eventEmitter.emit('crm.lead.escalated', {
         id,
-        name:             lead.name,
-        phone:            lead.phone ?? null,
-        assigned_to:      lead.assigned_to ?? null,
+        name: lead.name,
+        phone: lead.phone ?? null,
+        assigned_to: lead.assigned_to ?? null,
         product_interest: lead.product_interest ?? null,
-        reason:           `Callback abuse: ${recentSnoozeCount + 1} automation snoozes in the last 30 days`,
-        no_answer_count:  lead.no_answer_count ?? 0,
+        reason: `Callback abuse: ${recentSnoozeCount + 1} automation snoozes in the last 30 days`,
+        no_answer_count: lead.no_answer_count ?? 0,
       });
     }
 
     const saved = await this.leadRepo.save(lead);
 
     // Audit trail
-    const snoozeUntilStr = snoozeUntil.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' });
+    const snoozeUntilStr = snoozeUntil.toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
     await this.noteRepo.save(
       this.noteRepo.create({
         lead_id: id,
@@ -2774,14 +3432,20 @@ export class LeadService implements OnModuleInit {
         created_by: user.id,
       }),
     );
-    void this.auditService.log(id, user.id, 'UPDATED', `Automation snoozed ${durationMins}min: ${reason.trim()}`, ip);
+    void this.auditService.log(
+      id,
+      user.id,
+      'UPDATED',
+      `Automation snoozed ${durationMins}min: ${reason.trim()}`,
+      ip,
+    );
     this.eventEmitter.emit('crm.lead.automation.toggled', {
-      lead_id:      id,
-      action:       'SNOOZED',
-      reason:       reason.trim(),
+      lead_id: id,
+      action: 'SNOOZED',
+      reason: reason.trim(),
       snooze_until: snoozeUntilStr,
-      user_id:      user.id,
-      user_name:    user.name ?? null,
+      user_id: user.id,
+      user_name: user.name ?? null,
     });
     return saved;
   }

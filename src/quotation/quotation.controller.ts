@@ -22,6 +22,10 @@ import { Public } from '../auth/public.decorator';
 import { SendEmailDto } from '../shared/dto/send-email.dto';
 import { appConfig } from '../config/config';
 import { TransactionalEmailService } from '../email-transactional/transactional-email.service';
+import {
+  DocumentActionLogService,
+  DocumentActionType,
+} from '../shared/document-action-log.service';
 
 @Controller('quotations')
 export class QuotationController {
@@ -32,7 +36,22 @@ export class QuotationController {
     private readonly pdfService: PdfService,
     private readonly mailService: MailService,
     private readonly transactionalEmailService: TransactionalEmailService,
+    private readonly documentActionLogService: DocumentActionLogService,
   ) {}
+
+  @Post(':id/track')
+  @RequirePermission('quotation.view')
+  async track(
+    @Param('id') id: string,
+    @Body() body: { action: DocumentActionType },
+  ) {
+    await this.documentActionLogService.record(
+      'quotation',
+      Number(id),
+      body.action,
+    );
+    return { ok: true };
+  }
 
   @Post()
   @RequirePermission('quotation.create')
@@ -86,7 +105,7 @@ export class QuotationController {
   @RequirePermission('quotation.view')
   async getPdf(@Param('id') id: string, @Res() res: Response) {
     const numId = Number(id);
-    const data  = await this.quotationService.findOne(numId);
+    const data = await this.quotationService.findOne(numId);
 
     if (!data) {
       res.status(404).json({ message: 'Quotation not found' });
@@ -96,17 +115,23 @@ export class QuotationController {
     const items = (data as any).items;
     if (!Array.isArray(items) || items.length === 0) {
       this.logger.warn(`[PDF] Quotation ${numId} has no items`);
-      throw new BadRequestException('Quotation has no items — add items before generating a PDF');
+      throw new BadRequestException(
+        'Quotation has no items — add items before generating a PDF',
+      );
     }
 
-    this.logger.log(`[PDF] Generating PDF for quotation ${numId} (${(data as any).quotation_no})`);
+    this.logger.log(
+      `[PDF] Generating PDF for quotation ${numId} (${(data as any).quotation_no})`,
+    );
 
     const buffer = await this.pdfService.generateBuffer(
-      this.pdfService.quotationTemplate(data),
+      await this.pdfService.quotationTemplate(data),
     );
-    const filename = ((data as any).quotation_no || `QUO-${id}`).replace(/\//g, '-') + '.pdf';
+    await this.documentActionLogService.record('quotation', numId, 'pdf');
+    const filename =
+      ((data as any).quotation_no || `QUO-${id}`).replace(/\//g, '-') + '.pdf';
     res.set({
-      'Content-Type':        'application/pdf',
+      'Content-Type': 'application/pdf',
       'Content-Disposition': `attachment; filename="${filename}"`,
     });
     res.send(buffer);
@@ -114,7 +139,10 @@ export class QuotationController {
 
   @Get('public/:quotation_no/pdf')
   @Public()
-  async getPublicPdf(@Param('quotation_no') quotation_no: string, @Res() res: Response) {
+  async getPublicPdf(
+    @Param('quotation_no') quotation_no: string,
+    @Res() res: Response,
+  ) {
     const data = await this.quotationService.findByNo(quotation_no);
 
     if (!data) {
@@ -125,13 +153,18 @@ export class QuotationController {
     this.logger.log(`[PDF] Generating public PDF for ${quotation_no}`);
 
     const buffer = await this.pdfService.generateBuffer(
-      this.pdfService.quotationTemplate(data),
+      await this.pdfService.quotationTemplate(data),
+    );
+    await this.documentActionLogService.record(
+      'quotation',
+      (data as any).id,
+      'pdf',
     );
     const filename = quotation_no.replace(/\//g, '-') + '.pdf';
     res.set({
-      'Content-Type':        'application/pdf',
+      'Content-Type': 'application/pdf',
       'Content-Disposition': `inline; filename="${filename}"`,
-      'Cache-Control':       'public, max-age=300',
+      'Cache-Control': 'public, max-age=300',
     });
     res.send(buffer);
   }
@@ -143,8 +176,18 @@ export class QuotationController {
     @Body() body: SendEmailDto & { publicUrl?: string },
   ) {
     const data = await this.quotationService.findOne(Number(id));
+    // Built server-side (not trusted from the client) so the link in the
+    // email is always a publicly reachable host — the frontend may be
+    // running against a localhost/LAN API URL that means nothing off-device.
+    const publicUrl =
+      appConfig.publicAppUrl && (data as any).quotation_no
+        ? `${appConfig.publicAppUrl}/quotations/public/${encodeURIComponent((data as any).quotation_no)}/pdf`
+        : body.publicUrl;
     await this.transactionalEmailService.sendQuotationEmail(
-      Number(id), body.to, data, { publicUrl: body.publicUrl },
+      Number(id),
+      body.to,
+      data,
+      { publicUrl },
     );
     return { ok: true };
   }

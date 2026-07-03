@@ -9,41 +9,44 @@ import {
   NotificationCategory,
   PRIORITY_RANK,
 } from './notification.entity';
-import { ProductionJob, ACTIVE_STATUSES } from '../orders/entities/production-job.entity';
+import {
+  ProductionJob,
+  ACTIVE_STATUSES,
+} from '../orders/entities/production-job.entity';
 import { User } from '../users/entities/user.entity';
 
 const MAX_ACTIVE_PER_USER = 15;
-const CENTER_PAGE_SIZE    = 20;
+const CENTER_PAGE_SIZE = 20;
 
 export interface CreateNotificationPayload {
-  user_id:          number;
-  type:             NotificationType;
-  priority:         NotificationPriority;
-  title:            string;
-  message:          string;
-  category?:        NotificationCategory | string | null;
-  entity_type?:     string | null;
-  entity_id?:       number | null;
-  action_url?:      string | null;
-  role_targets?:    string[] | null;
-  metadata?:        Record<string, any> | null;
+  user_id: number;
+  type: NotificationType;
+  priority: NotificationPriority;
+  title: string;
+  message: string;
+  category?: NotificationCategory | string | null;
+  entity_type?: string | null;
+  entity_id?: number | null;
+  action_url?: string | null;
+  role_targets?: string[] | null;
+  metadata?: Record<string, any> | null;
   cooldownMinutes?: number;
-  is_automated?:    boolean;
+  is_automated?: boolean;
 }
 
 export interface CenterFilters {
-  unread?:   boolean;
+  unread?: boolean;
   category?: string;
   priority?: string;
-  page?:     number;
+  page?: number;
 }
 
 export interface NextBestAction {
-  action:    'COMPLETE_DELAYED' | 'START_URGENT' | 'START_NEXT' | 'ALL_CLEAR';
-  message:   string;
-  job_id?:   number;
+  action: 'COMPLETE_DELAYED' | 'START_URGENT' | 'START_NEXT' | 'ALL_CLEAR';
+  message: string;
+  job_id?: number;
   order_id?: number;
-  stage?:    string;
+  stage?: string;
 }
 
 @Injectable()
@@ -82,17 +85,34 @@ export class NotificationService implements OnModuleInit {
 
   // ── Core: create with dedup + cooldown + limit ───────────────────────────────
 
-  async createNotification(payload: CreateNotificationPayload): Promise<Notification | null> {
-    const { user_id, entity_type, entity_id, type, cooldownMinutes = 30 } = payload;
+  async createNotification(
+    payload: CreateNotificationPayload,
+  ): Promise<Notification | null> {
+    const {
+      user_id,
+      entity_type,
+      entity_id,
+      type,
+      cooldownMinutes = 30,
+    } = payload;
 
     // Dedup: same (user, entity_type, entity_id, type) within cooldown window
     if (entity_type && entity_id) {
-      const cutoff   = new Date(Date.now() - cooldownMinutes * 60_000);
+      const cutoff = new Date(Date.now() - cooldownMinutes * 60_000);
       const existing = await this.repo.findOne({
-        where: { user_id, entity_type, entity_id, type, is_active: true, created_at: MoreThan(cutoff) },
+        where: {
+          user_id,
+          entity_type,
+          entity_id,
+          type,
+          is_active: true,
+          created_at: MoreThan(cutoff),
+        },
       });
       if (existing) {
-        this.logger.debug(`Dedup: skipping ${type} for ${entity_type}:${entity_id} user=${user_id}`);
+        this.logger.debug(
+          `Dedup: skipping ${type} for ${entity_type}:${entity_id} user=${user_id}`,
+        );
         return null;
       }
     }
@@ -102,21 +122,24 @@ export class NotificationService implements OnModuleInit {
     const notif = this.repo.create({
       user_id,
       type,
-      priority:     payload.priority,
-      category:     (payload.category as NotificationCategory) ?? null,
-      title:        payload.title,
-      message:      payload.message,
-      entity_type:  entity_type ?? null,
-      entity_id:    entity_id  ?? null,
-      action_url:   payload.action_url ?? null,
+      priority: payload.priority,
+      category: (payload.category as NotificationCategory) ?? null,
+      title: payload.title,
+      message: payload.message,
+      entity_type: entity_type ?? null,
+      entity_id: entity_id ?? null,
+      action_url: payload.action_url ?? null,
       role_targets: payload.role_targets ?? null,
-      metadata:     payload.metadata ?? null,
+      metadata: payload.metadata ?? null,
       is_automated: payload.is_automated ?? false,
-      expires_at:   this.getExpiry(type),
+      expires_at: this.getExpiry(type),
     });
 
     const saved = await this.repo.save(notif);
-    this.eventEmitter.emit('notification.created', { userId: user_id, notification: saved });
+    this.eventEmitter.emit('notification.created', {
+      userId: user_id,
+      notification: saved,
+    });
     return saved;
   }
 
@@ -127,19 +150,23 @@ export class NotificationService implements OnModuleInit {
   ): Promise<void> {
     if (!roles.length) return;
     const users = await this.userRepo.find({
-      where: roles.map(role => ({ role, is_active: true })),
+      where: roles.map((role) => ({ role, is_active: true })),
       select: ['id'],
     });
     for (const user of users) {
-      await this.createNotification({ ...payload, user_id: user.id, role_targets: roles });
+      await this.createNotification({
+        ...payload,
+        user_id: user.id,
+        role_targets: roles,
+      });
     }
   }
 
   private getExpiry(type: NotificationType): Date {
     const HOURS: Record<NotificationType, number> = {
-      [NotificationType.ACTION]:     48,
-      [NotificationType.REMINDER]:    6,
-      [NotificationType.INFO]:       24,
+      [NotificationType.ACTION]: 48,
+      [NotificationType.REMINDER]: 6,
+      [NotificationType.INFO]: 24,
       [NotificationType.MOTIVATION]: 24,
     };
     return new Date(Date.now() + HOURS[type] * 3_600_000);
@@ -147,8 +174,13 @@ export class NotificationService implements OnModuleInit {
 
   // Drop the lowest-priority oldest when per-user limit is reached.
   // CRITICAL notifications are never evicted (weight = 99 in ORDER BY).
-  private async enforceLimit(userId: number, incomingPriority: NotificationPriority): Promise<void> {
-    const count = await this.repo.count({ where: { user_id: userId, is_active: true } });
+  private async enforceLimit(
+    userId: number,
+    incomingPriority: NotificationPriority,
+  ): Promise<void> {
+    const count = await this.repo.count({
+      where: { user_id: userId, is_active: true },
+    });
     if (count < MAX_ACTIVE_PER_USER) return;
 
     const [lowest]: Array<{ id: string; priority: NotificationPriority }> =
@@ -168,7 +200,8 @@ export class NotificationService implements OnModuleInit {
       );
 
     if (!lowest) return;
-    if (PRIORITY_RANK[incomingPriority] <= PRIORITY_RANK[lowest.priority]) return;
+    if (PRIORITY_RANK[incomingPriority] <= PRIORITY_RANK[lowest.priority])
+      return;
 
     await this.repo.update(lowest.id, { is_active: false });
   }
@@ -240,18 +273,21 @@ export class NotificationService implements OnModuleInit {
       .getCount();
   }
 
-  async getCountByCategory(userId: number): Promise<{ total: number; byCategory: Record<string, number> }> {
+  async getCountByCategory(
+    userId: number,
+  ): Promise<{ total: number; byCategory: Record<string, number> }> {
     const now = new Date();
-    const rows: Array<{ category: string | null; cnt: string }> = await this.repo.manager.query(
-      `SELECT category, COUNT(*) as cnt
+    const rows: Array<{ category: string | null; cnt: string }> =
+      await this.repo.manager.query(
+        `SELECT category, COUNT(*) as cnt
        FROM notifications
        WHERE user_id = $1
          AND is_read = false
          AND hidden_at IS NULL
          AND (expires_at IS NULL OR expires_at > $2)
        GROUP BY category`,
-      [userId, now],
-    );
+        [userId, now],
+      );
 
     const byCategory: Record<string, number> = {};
     let total = 0;
@@ -267,7 +303,10 @@ export class NotificationService implements OnModuleInit {
   // ── Mutations ────────────────────────────────────────────────────────────────
 
   async markAsRead(notificationId: string, userId: number): Promise<void> {
-    await this.repo.update({ id: notificationId, user_id: userId }, { is_read: true });
+    await this.repo.update(
+      { id: notificationId, user_id: userId },
+      { is_read: true },
+    );
   }
 
   async markAllRead(userId: number): Promise<void> {
@@ -278,7 +317,10 @@ export class NotificationService implements OnModuleInit {
     await this.repo.update({ id, user_id: userId }, { hidden_at: new Date() });
   }
 
-  async clearResolvedNotifications(entityType: string, entityId: number): Promise<void> {
+  async clearResolvedNotifications(
+    entityType: string,
+    entityId: number,
+  ): Promise<void> {
     await this.repo.update(
       { entity_type: entityType, entity_id: entityId, is_active: true },
       { is_active: false },
@@ -311,7 +353,9 @@ export class NotificationService implements OnModuleInit {
         .createQueryBuilder('job')
         .where('job.assigned_to = :userId', { userId })
         .andWhere('job.status IN (:...statuses)', { statuses: ACTIVE_STATUSES })
-        .andWhere('job.priority IN (:...urgent)', { urgent: ['HIGH', 'URGENT'] })
+        .andWhere('job.priority IN (:...urgent)', {
+          urgent: ['HIGH', 'URGENT'],
+        })
         .orderBy('job.created_at', 'ASC')
         .getOne(),
       this.jobRepo
@@ -324,31 +368,34 @@ export class NotificationService implements OnModuleInit {
 
     if (delayedJob) {
       return {
-        action:   'COMPLETE_DELAYED',
-        message:  `Complete delayed job #${delayedJob.id} — ${delayedJob.current_stage} stage is overdue`,
-        job_id:   delayedJob.id,
+        action: 'COMPLETE_DELAYED',
+        message: `Complete delayed job #${delayedJob.id} — ${delayedJob.current_stage} stage is overdue`,
+        job_id: delayedJob.id,
         order_id: delayedJob.order_id,
-        stage:    delayedJob.current_stage,
+        stage: delayedJob.current_stage,
       };
     }
     if (urgentJob) {
       return {
-        action:   'START_URGENT',
-        message:  `Start urgent job #${urgentJob.id} — ${urgentJob.current_stage} stage (${urgentJob.priority})`,
-        job_id:   urgentJob.id,
+        action: 'START_URGENT',
+        message: `Start urgent job #${urgentJob.id} — ${urgentJob.current_stage} stage (${urgentJob.priority})`,
+        job_id: urgentJob.id,
         order_id: urgentJob.order_id,
-        stage:    urgentJob.current_stage,
+        stage: urgentJob.current_stage,
       };
     }
     if (pendingJob) {
       return {
-        action:   'START_NEXT',
-        message:  `Start next job #${pendingJob.id} — ${pendingJob.current_stage} stage`,
-        job_id:   pendingJob.id,
+        action: 'START_NEXT',
+        message: `Start next job #${pendingJob.id} — ${pendingJob.current_stage} stage`,
+        job_id: pendingJob.id,
         order_id: pendingJob.order_id,
-        stage:    pendingJob.current_stage,
+        stage: pendingJob.current_stage,
       };
     }
-    return { action: 'ALL_CLEAR', message: 'All caught up! No pending jobs assigned to you.' };
+    return {
+      action: 'ALL_CLEAR',
+      message: 'All caught up! No pending jobs assigned to you.',
+    };
   }
 }

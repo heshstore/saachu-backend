@@ -18,7 +18,7 @@ export class TransactionalEmailController {
   @RequirePermission('order.view')
   getLogs(
     @Query('entity_type') entityType?: string,
-    @Query('entity_id')   entityId?: string,
+    @Query('entity_id') entityId?: string,
   ) {
     return this.emailService.getLogs(
       entityType,

@@ -26,15 +26,24 @@ import { AnalyticsController } from './analytics.controller';
 @Module({
   imports: [
     TypeOrmModule.forFeature([
-      Lead, LeadNote, LeadFollowUp, CrmSettings,
-      LeadAuditLog, LeadAlert,
+      Lead,
+      LeadNote,
+      LeadFollowUp,
+      CrmSettings,
+      LeadAuditLog,
+      LeadAlert,
       User,
     ]),
     QuotationModule,
     CrmWhatsAppModule,
     NotificationsModule,
   ],
-  controllers: [LeadController, WebhookController, ShopifyApiController, AnalyticsController],
+  controllers: [
+    LeadController,
+    WebhookController,
+    ShopifyApiController,
+    AnalyticsController,
+  ],
   providers: [
     LeadService,
     LeadAuditService,

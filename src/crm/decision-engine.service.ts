@@ -1,5 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { Lead, LeadSource, LeadStatus, WorkflowState } from './entities/lead.entity';
+import {
+  Lead,
+  LeadSource,
+  LeadStatus,
+  WorkflowState,
+} from './entities/lead.entity';
 
 export type ActionKey =
   | 'CALL'
@@ -24,7 +29,12 @@ export interface OutcomeHistory {
   callAttempts: number;
   noAnswerCount: number;
   laterCount: number;
-  lastOutcomeType: 'INTERESTED' | 'NO_ANSWER' | 'LATER' | 'NOT_INTERESTED' | null;
+  lastOutcomeType:
+    | 'INTERESTED'
+    | 'NO_ANSWER'
+    | 'LATER'
+    | 'NOT_INTERESTED'
+    | null;
   lastCallAt: Date | null;
   lastObjectionType: string | null;
   callbackPromisedAt: Date | null;
@@ -47,7 +57,10 @@ export interface DecisionContext {
 // Mirrors NO_ANSWER_RETRY_MINS exactly — do not drift these values.
 
 const HOT_FIRST_CALL_SOURCES: string[] = [
-  LeadSource.META, LeadSource.GOOGLE, LeadSource.WHATSAPP, LeadSource.SHOPIFY,
+  LeadSource.META,
+  LeadSource.GOOGLE,
+  LeadSource.WHATSAPP,
+  LeadSource.SHOPIFY,
 ];
 
 export function computeNextActionDue(
@@ -65,17 +78,23 @@ export function computeNextActionDue(
     case WorkflowState.FOLLOW_UP:
       return followUpDate && followUpDate > now ? followUpDate : h(24);
 
-    case WorkflowState.NO_ANSWER_1:      return h(8);
-    case WorkflowState.NO_ANSWER_2:      return h(24);
-    case WorkflowState.NO_ANSWER_ESC:    return h(48);
+    case WorkflowState.NO_ANSWER_1:
+      return h(8);
+    case WorkflowState.NO_ANSWER_2:
+      return h(24);
+    case WorkflowState.NO_ANSWER_ESC:
+      return h(48);
 
     case WorkflowState.CALLBACK_WAIT:
       // followUpDate IS the promised callback time — use it as the SLA clock
       return followUpDate ?? h(24);
 
-    case WorkflowState.SEND_QUOTATION:   return h(2);
-    case WorkflowState.CHASE_QUOTATION:  return h(72);
-    case WorkflowState.NEGOTIATING:      return h(48);
+    case WorkflowState.SEND_QUOTATION:
+      return h(2);
+    case WorkflowState.CHASE_QUOTATION:
+      return h(72);
+    case WorkflowState.NEGOTIATING:
+      return h(48);
 
     case WorkflowState.NURTURE:
       return followUpDate && followUpDate > now ? followUpDate : h(24 * 30);
@@ -96,10 +115,10 @@ export function computeSlaStatus(
 ): 'NONE' | 'ON_TIME' | 'DUE_SOON' | 'OVERDUE' | 'CRITICAL' {
   if (!nextActionDueAt) return 'NONE';
   const diffMs = new Date(nextActionDueAt).getTime() - now.getTime(); // positive = future
-  if (diffMs > 2 * 3_600_000)    return 'ON_TIME';    // >2h away
-  if (diffMs >= 0)               return 'DUE_SOON';   // 0–2h
-  if (diffMs >= -24 * 3_600_000) return 'OVERDUE';    // <24h past
-  return 'CRITICAL';                                   // >24h past
+  if (diffMs > 2 * 3_600_000) return 'ON_TIME'; // >2h away
+  if (diffMs >= 0) return 'DUE_SOON'; // 0–2h
+  if (diffMs >= -24 * 3_600_000) return 'OVERDUE'; // <24h past
+  return 'CRITICAL'; // >24h past
 }
 
 // ── Queue tier classifier ─────────────────────────────────────────────────────
@@ -108,12 +127,18 @@ export function computeSlaStatus(
 // Pure function — no I/O, called once per lead in getQueue().
 
 export function computeQueueTier(lead: Lead, nowMs: number): number {
-  const state  = lead.workflow_state as WorkflowState | null;
-  const dueMs  = lead.next_action_due_at ? new Date(lead.next_action_due_at).getTime() : null;
-  const tags   = Array.isArray(lead.tags) ? (lead.tags as string[]) : [];
+  const state = lead.workflow_state;
+  const dueMs = lead.next_action_due_at
+    ? new Date(lead.next_action_due_at).getTime()
+    : null;
+  const tags = Array.isArray(lead.tags) ? lead.tags : [];
 
   // Tier 1 — Callback imminent: promised callback is due within 30 min, or already overdue
-  if (state === WorkflowState.CALLBACK_WAIT && dueMs !== null && dueMs <= nowMs + 30 * 60_000) {
+  if (
+    state === WorkflowState.CALLBACK_WAIT &&
+    dueMs !== null &&
+    dueMs <= nowMs + 30 * 60_000
+  ) {
     return 1;
   }
 
@@ -125,24 +150,36 @@ export function computeQueueTier(lead: Lead, nowMs: number): number {
   // Tier 3 — SLA breach for standard workflow states
   // NO_ANSWER_ESC is intentionally excluded — it is an escalation state (tier 4)
   const breachable = new Set<WorkflowState>([
-    WorkflowState.FIRST_CALL, WorkflowState.FOLLOW_UP,
-    WorkflowState.NO_ANSWER_1, WorkflowState.NO_ANSWER_2,
-    WorkflowState.CHASE_QUOTATION, WorkflowState.NEGOTIATING,
+    WorkflowState.FIRST_CALL,
+    WorkflowState.FOLLOW_UP,
+    WorkflowState.NO_ANSWER_1,
+    WorkflowState.NO_ANSWER_2,
+    WorkflowState.CHASE_QUOTATION,
+    WorkflowState.NEGOTIATING,
     WorkflowState.CALLBACK_WAIT,
   ]);
-  if (breachable.has(state as WorkflowState) && dueMs !== null && dueMs < nowMs) {
+  if (
+    breachable.has(state as WorkflowState) &&
+    dueMs !== null &&
+    dueMs < nowMs
+  ) {
     return 3;
   }
 
   // Tier 4 — Escalation: requires manager attention regardless of SLA status
-  if (state === WorkflowState.NO_ANSWER_ESC || tags.includes('needs_manager_review')) {
+  if (
+    state === WorkflowState.NO_ANSWER_ESC ||
+    tags.includes('needs_manager_review')
+  ) {
     return 4;
   }
 
   // Tier 5 — Active pipeline: within SLA, needs routine action
   const active = new Set<WorkflowState>([
-    WorkflowState.FIRST_CALL, WorkflowState.FOLLOW_UP,
-    WorkflowState.CHASE_QUOTATION, WorkflowState.NEGOTIATING,
+    WorkflowState.FIRST_CALL,
+    WorkflowState.FOLLOW_UP,
+    WorkflowState.CHASE_QUOTATION,
+    WorkflowState.NEGOTIATING,
   ]);
   if (active.has(state as WorkflowState)) {
     return 5;
@@ -164,35 +201,96 @@ export function computeQueueTier(lead: Lead, nowMs: number): number {
 // a lower-ranked workflow state is silently skipped for non-bypass roles.
 
 export const WORKFLOW_RANK: Record<WorkflowState, number> = {
-  [WorkflowState.FIRST_CALL]:      1,
-  [WorkflowState.NO_ANSWER_1]:     2,
-  [WorkflowState.FOLLOW_UP]:       2,
-  [WorkflowState.NURTURE]:         2,
-  [WorkflowState.NO_ANSWER_2]:     3,
-  [WorkflowState.CALLBACK_WAIT]:   3,
-  [WorkflowState.NO_ANSWER_ESC]:   4,
-  [WorkflowState.SEND_QUOTATION]:  5,
+  [WorkflowState.FIRST_CALL]: 1,
+  [WorkflowState.NO_ANSWER_1]: 2,
+  [WorkflowState.FOLLOW_UP]: 2,
+  [WorkflowState.NURTURE]: 2,
+  [WorkflowState.NO_ANSWER_2]: 3,
+  [WorkflowState.CALLBACK_WAIT]: 3,
+  [WorkflowState.NO_ANSWER_ESC]: 4,
+  [WorkflowState.SEND_QUOTATION]: 5,
   [WorkflowState.CHASE_QUOTATION]: 6,
-  [WorkflowState.NEGOTIATING]:     7,
-  [WorkflowState.CONVERTED]:       10,
-  [WorkflowState.LOST]:            10,
+  [WorkflowState.NEGOTIATING]: 7,
+  [WorkflowState.CONVERTED]: 10,
+  [WorkflowState.LOST]: 10,
 };
 
 // Allowed forward transitions per state.
 // Admin/COO roles bypass all transition checks (isBypassRole = true).
 const WORKFLOW_TRANSITIONS: Partial<Record<WorkflowState, WorkflowState[]>> = {
-  [WorkflowState.FIRST_CALL]:      [WorkflowState.FOLLOW_UP, WorkflowState.NO_ANSWER_1, WorkflowState.CALLBACK_WAIT, WorkflowState.SEND_QUOTATION, WorkflowState.NURTURE, WorkflowState.LOST],
-  [WorkflowState.FOLLOW_UP]:       [WorkflowState.SEND_QUOTATION, WorkflowState.CALLBACK_WAIT, WorkflowState.NO_ANSWER_1, WorkflowState.NURTURE, WorkflowState.LOST],
-  [WorkflowState.NO_ANSWER_1]:     [WorkflowState.NO_ANSWER_2, WorkflowState.FOLLOW_UP, WorkflowState.SEND_QUOTATION, WorkflowState.CALLBACK_WAIT, WorkflowState.NURTURE, WorkflowState.LOST],
-  [WorkflowState.NO_ANSWER_2]:     [WorkflowState.NO_ANSWER_ESC, WorkflowState.FOLLOW_UP, WorkflowState.SEND_QUOTATION, WorkflowState.CALLBACK_WAIT, WorkflowState.NURTURE, WorkflowState.LOST],
-  [WorkflowState.NO_ANSWER_ESC]:   [WorkflowState.FOLLOW_UP, WorkflowState.SEND_QUOTATION, WorkflowState.CALLBACK_WAIT, WorkflowState.NURTURE, WorkflowState.LOST],
-  [WorkflowState.CALLBACK_WAIT]:   [WorkflowState.FOLLOW_UP, WorkflowState.SEND_QUOTATION, WorkflowState.NO_ANSWER_1, WorkflowState.NURTURE, WorkflowState.LOST],
-  [WorkflowState.SEND_QUOTATION]:  [WorkflowState.CHASE_QUOTATION, WorkflowState.NEGOTIATING, WorkflowState.CALLBACK_WAIT, WorkflowState.NURTURE, WorkflowState.LOST],
-  [WorkflowState.CHASE_QUOTATION]: [WorkflowState.NEGOTIATING, WorkflowState.CALLBACK_WAIT, WorkflowState.SEND_QUOTATION, WorkflowState.NURTURE, WorkflowState.LOST],
-  [WorkflowState.NEGOTIATING]:     [WorkflowState.CONVERTED, WorkflowState.CHASE_QUOTATION, WorkflowState.NURTURE, WorkflowState.LOST],
-  [WorkflowState.NURTURE]:         [WorkflowState.FIRST_CALL, WorkflowState.FOLLOW_UP, WorkflowState.SEND_QUOTATION, WorkflowState.LOST],
-  [WorkflowState.CONVERTED]:       [],
-  [WorkflowState.LOST]:            [WorkflowState.FIRST_CALL, WorkflowState.FOLLOW_UP],
+  [WorkflowState.FIRST_CALL]: [
+    WorkflowState.FOLLOW_UP,
+    WorkflowState.NO_ANSWER_1,
+    WorkflowState.CALLBACK_WAIT,
+    WorkflowState.SEND_QUOTATION,
+    WorkflowState.NURTURE,
+    WorkflowState.LOST,
+  ],
+  [WorkflowState.FOLLOW_UP]: [
+    WorkflowState.SEND_QUOTATION,
+    WorkflowState.CALLBACK_WAIT,
+    WorkflowState.NO_ANSWER_1,
+    WorkflowState.NURTURE,
+    WorkflowState.LOST,
+  ],
+  [WorkflowState.NO_ANSWER_1]: [
+    WorkflowState.NO_ANSWER_2,
+    WorkflowState.FOLLOW_UP,
+    WorkflowState.SEND_QUOTATION,
+    WorkflowState.CALLBACK_WAIT,
+    WorkflowState.NURTURE,
+    WorkflowState.LOST,
+  ],
+  [WorkflowState.NO_ANSWER_2]: [
+    WorkflowState.NO_ANSWER_ESC,
+    WorkflowState.FOLLOW_UP,
+    WorkflowState.SEND_QUOTATION,
+    WorkflowState.CALLBACK_WAIT,
+    WorkflowState.NURTURE,
+    WorkflowState.LOST,
+  ],
+  [WorkflowState.NO_ANSWER_ESC]: [
+    WorkflowState.FOLLOW_UP,
+    WorkflowState.SEND_QUOTATION,
+    WorkflowState.CALLBACK_WAIT,
+    WorkflowState.NURTURE,
+    WorkflowState.LOST,
+  ],
+  [WorkflowState.CALLBACK_WAIT]: [
+    WorkflowState.FOLLOW_UP,
+    WorkflowState.SEND_QUOTATION,
+    WorkflowState.NO_ANSWER_1,
+    WorkflowState.NURTURE,
+    WorkflowState.LOST,
+  ],
+  [WorkflowState.SEND_QUOTATION]: [
+    WorkflowState.CHASE_QUOTATION,
+    WorkflowState.NEGOTIATING,
+    WorkflowState.CALLBACK_WAIT,
+    WorkflowState.NURTURE,
+    WorkflowState.LOST,
+  ],
+  [WorkflowState.CHASE_QUOTATION]: [
+    WorkflowState.NEGOTIATING,
+    WorkflowState.CALLBACK_WAIT,
+    WorkflowState.SEND_QUOTATION,
+    WorkflowState.NURTURE,
+    WorkflowState.LOST,
+  ],
+  [WorkflowState.NEGOTIATING]: [
+    WorkflowState.CONVERTED,
+    WorkflowState.CHASE_QUOTATION,
+    WorkflowState.NURTURE,
+    WorkflowState.LOST,
+  ],
+  [WorkflowState.NURTURE]: [
+    WorkflowState.FIRST_CALL,
+    WorkflowState.FOLLOW_UP,
+    WorkflowState.SEND_QUOTATION,
+    WorkflowState.LOST,
+  ],
+  [WorkflowState.CONVERTED]: [],
+  [WorkflowState.LOST]: [WorkflowState.FIRST_CALL, WorkflowState.FOLLOW_UP],
 };
 
 /**
@@ -211,25 +309,25 @@ export function isValidWorkflowTransition(
 }
 
 const SOURCE_SCORES: Record<string, number> = {
-  OLD_CUSTOMER:     38,
-  REFERRAL:         35,
-  WALK_IN:          32,
-  EXHIBITION:       30,
-  FIELD_VISIT:      30,
+  OLD_CUSTOMER: 38,
+  REFERRAL: 35,
+  WALK_IN: 32,
+  EXHIBITION: 30,
+  FIELD_VISIT: 30,
   DEALER_REFERENCE: 28,
-  BUSINESS_CARD:    25,
-  IMPORTED:         18,
-  INDIAMART:        30,
-  DIRECT:           28,
-  META:             25,
-  GOOGLE:           22,
-  LINKEDIN:         22,
-  WHATSAPP:         20,
-  SHOPIFY:          15,
-  MANUAL:           28,
-  META_ADS:         25,
-  GOOGLE_ADS:       22,
-  DIRECT_CALL:      28,
+  BUSINESS_CARD: 25,
+  IMPORTED: 18,
+  INDIAMART: 30,
+  DIRECT: 28,
+  META: 25,
+  GOOGLE: 22,
+  LINKEDIN: 22,
+  WHATSAPP: 20,
+  SHOPIFY: 15,
+  MANUAL: 28,
+  META_ADS: 25,
+  GOOGLE_ADS: 22,
+  DIRECT_CALL: 28,
 };
 
 const PRIORITY_BONUS: Record<string, number> = {
@@ -239,38 +337,49 @@ const PRIORITY_BONUS: Record<string, number> = {
 };
 
 const SOURCE_LABELS: Record<string, string> = {
-  INDIAMART:        'IndiaMart',
-  META:             'Facebook',
-  GOOGLE:           'Google',
-  LINKEDIN:         'LinkedIn',
-  SHOPIFY:          'our website',
-  WHATSAPP:         'WhatsApp',
-  DIRECT:           'Direct',
-  WALK_IN:          'Walk-In',
-  REFERRAL:         'Reference',
-  EXHIBITION:       'Exhibition',
-  FIELD_VISIT:      'Field Visit',
-  OLD_CUSTOMER:     'Old Customer',
+  INDIAMART: 'IndiaMart',
+  META: 'Facebook',
+  GOOGLE: 'Google',
+  LINKEDIN: 'LinkedIn',
+  SHOPIFY: 'our website',
+  WHATSAPP: 'WhatsApp',
+  DIRECT: 'Direct',
+  WALK_IN: 'Walk-In',
+  REFERRAL: 'Reference',
+  EXHIBITION: 'Exhibition',
+  FIELD_VISIT: 'Field Visit',
+  OLD_CUSTOMER: 'Old Customer',
   DEALER_REFERENCE: 'Dealer Reference',
-  BUSINESS_CARD:    'Business Card',
-  IMPORTED:         'Imported',
-  MANUAL:           'Direct',
-  META_ADS:         'Facebook',
-  GOOGLE_ADS:       'Google',
-  DIRECT_CALL:      'Direct',
+  BUSINESS_CARD: 'Business Card',
+  IMPORTED: 'Imported',
+  MANUAL: 'Direct',
+  META_ADS: 'Facebook',
+  GOOGLE_ADS: 'Google',
+  DIRECT_CALL: 'Direct',
 };
 
 const URGENCY_WORDS = [
-  'urgent', 'urgently', 'immediately', 'asap', 'today', 'tomorrow',
-  'this week', 'quick', 'fast', 'quickly', 'rush', 'early', 'need now',
+  'urgent',
+  'urgently',
+  'immediately',
+  'asap',
+  'today',
+  'tomorrow',
+  'this week',
+  'quick',
+  'fast',
+  'quickly',
+  'rush',
+  'early',
+  'need now',
 ];
 
 // Retry timing rotation for NO_ANSWER — each attempt uses a different time slot
 // so we don't always call at the same time the customer missed
 const NO_ANSWER_RETRY_MINS = [
-  24 * 60,       // attempt 1 → tomorrow 9am (handled by caller as preset)
-  8 * 60,        // attempt 2 → same day 4pm slot (~8h later)
-  36 * 60,       // attempt 3 → day after tomorrow 9am
+  24 * 60, // attempt 1 → tomorrow 9am (handled by caller as preset)
+  8 * 60, // attempt 2 → same day 4pm slot (~8h later)
+  36 * 60, // attempt 3 → day after tomorrow 9am
 ];
 
 function noAnswerNextAction(
@@ -451,7 +560,8 @@ function notInterestedNextAction(
 @Injectable()
 export class DecisionEngineService {
   detectUrgencyKeywords(lead: Lead): string[] {
-    const text = `${lead.notes ?? ''} ${lead.product_interest ?? ''}`.toLowerCase();
+    const text =
+      `${lead.notes ?? ''} ${lead.product_interest ?? ''}`.toLowerCase();
     return URGENCY_WORDS.filter((w) => text.includes(w));
   }
 
@@ -463,7 +573,8 @@ export class DecisionEngineService {
 
     if (this.detectUrgencyKeywords(lead).length > 0) score += 15;
 
-    const ageHours = (Date.now() - new Date(lead.created_at).getTime()) / 3_600_000;
+    const ageHours =
+      (Date.now() - new Date(lead.created_at).getTime()) / 3_600_000;
     if (ageHours < 1) score += 15;
     else if (ageHours < 24) score += 8;
     else if (ageHours > 168) score -= 10;
@@ -476,7 +587,11 @@ export class DecisionEngineService {
     }
 
     // Stage value bonus — workflow_state preferred over status for precision
-    if (lead.workflow_state === WorkflowState.SEND_QUOTATION || lead.workflow_state === WorkflowState.NEGOTIATING) score += 15;
+    if (
+      lead.workflow_state === WorkflowState.SEND_QUOTATION ||
+      lead.workflow_state === WorkflowState.NEGOTIATING
+    )
+      score += 15;
     else if (lead.workflow_state === WorkflowState.CHASE_QUOTATION) score += 10;
     else if (lead.status === LeadStatus.INTERESTED) score += 10;
     else if (lead.status === LeadStatus.CONTACTED) score += 5;
@@ -489,7 +604,8 @@ export class DecisionEngineService {
     const product = lead.product_interest ?? 'our products';
     const sourceLabel = SOURCE_LABELS[lead.source] ?? lead.source;
     const isOverdue =
-      !!lead.follow_up_date && new Date(lead.follow_up_date).getTime() < Date.now();
+      !!lead.follow_up_date &&
+      new Date(lead.follow_up_date).getTime() < Date.now();
 
     const wfState = history?.workflowState ?? null;
 
@@ -538,25 +654,40 @@ export class DecisionEngineService {
           return noAnswerNextAction(2, firstName, product);
 
         case WorkflowState.NO_ANSWER_ESC:
-          return noAnswerNextAction(history?.noAnswerCount ?? 3, firstName, product);
+          return noAnswerNextAction(
+            history?.noAnswerCount ?? 3,
+            firstName,
+            product,
+          );
 
         case WorkflowState.CALLBACK_WAIT: {
-          const cb = history?.callbackPromisedAt ? new Date(history.callbackPromisedAt) : null;
-          const diffMins = cb ? Math.round((cb.getTime() - Date.now()) / 60_000) : 0;
+          const cb = history?.callbackPromisedAt
+            ? new Date(history.callbackPromisedAt)
+            : null;
+          const diffMins = cb
+            ? Math.round((cb.getTime() - Date.now()) / 60_000)
+            : 0;
           const isCallbackOverdue = diffMins < 0;
           const diffLabel =
             diffMins <= 0
               ? 'now'
               : diffMins < 60
-              ? `${diffMins}m`
-              : diffMins < 1440
-              ? `${Math.floor(diffMins / 60)}h`
-              : `${Math.floor(diffMins / 1440)}d`;
+                ? `${diffMins}m`
+                : diffMins < 1440
+                  ? `${Math.floor(diffMins / 60)}h`
+                  : `${Math.floor(diffMins / 1440)}d`;
           return {
             action: 'CALL',
-            label: isCallbackOverdue ? '⚠️ Callback Overdue' : `⏰ Callback in ${diffLabel}`,
+            label: isCallbackOverdue
+              ? '⚠️ Callback Overdue'
+              : `⏰ Callback in ${diffLabel}`,
             buttonText: 'Log Callback',
-            urgency: isCallbackOverdue || diffMins < 60 ? 'HIGH' : diffMins < 360 ? 'MEDIUM' : 'LOW',
+            urgency:
+              isCallbackOverdue || diffMins < 60
+                ? 'HIGH'
+                : diffMins < 360
+                  ? 'MEDIUM'
+                  : 'LOW',
             nextStatusOnComplete: null,
             script:
               `Namaste ${firstName}! Calling as promised regarding ${product}.\n\n` +
@@ -585,7 +716,9 @@ export class DecisionEngineService {
         case WorkflowState.CHASE_QUOTATION:
           return {
             action: 'CHASE_QUOTE',
-            label: isOverdue ? '⚠️ Quote Follow-up Overdue' : 'Follow Up on Quotation',
+            label: isOverdue
+              ? '⚠️ Quote Follow-up Overdue'
+              : 'Follow Up on Quotation',
             buttonText: 'Log Response → Close Deal',
             urgency: isOverdue ? 'HIGH' : 'MEDIUM',
             nextStatusOnComplete: LeadStatus.CONVERTED,
@@ -613,7 +746,11 @@ export class DecisionEngineService {
           };
 
         case WorkflowState.NURTURE:
-          return notInterestedNextAction(history?.lastObjectionType ?? null, firstName, product);
+          return notInterestedNextAction(
+            history?.lastObjectionType ?? null,
+            firstName,
+            product,
+          );
 
         case WorkflowState.CONVERTED:
           return {
@@ -622,7 +759,8 @@ export class DecisionEngineService {
             buttonText: 'View Order',
             urgency: 'LOW',
             nextStatusOnComplete: null,
-            script: 'This lead has been successfully converted. No further action required.',
+            script:
+              'This lead has been successfully converted. No further action required.',
           };
 
         case WorkflowState.LOST:
@@ -644,7 +782,7 @@ export class DecisionEngineService {
     // ── Fallback: status-based routing for pre-migration leads ────────────────
     // Only reached when workflow_state is NULL (lead created before this phase).
     const noAnswerCount = history?.noAnswerCount ?? 0;
-    const lastOutcome  = history?.lastOutcomeType ?? null;
+    const lastOutcome = history?.lastOutcomeType ?? null;
 
     if (
       history?.callbackPromisedAt &&
@@ -653,7 +791,12 @@ export class DecisionEngineService {
     ) {
       const cb = new Date(history.callbackPromisedAt);
       const diffMins = Math.round((cb.getTime() - Date.now()) / 60_000);
-      const diffLabel = diffMins < 60 ? `${diffMins}m` : diffMins < 1440 ? `${Math.floor(diffMins / 60)}h` : `${Math.floor(diffMins / 1440)}d`;
+      const diffLabel =
+        diffMins < 60
+          ? `${diffMins}m`
+          : diffMins < 1440
+            ? `${Math.floor(diffMins / 60)}h`
+            : `${Math.floor(diffMins / 1440)}d`;
       return {
         action: 'CALL',
         label: `⏰ Callback due in ${diffLabel}`,
@@ -664,7 +807,11 @@ export class DecisionEngineService {
       };
     }
     if (lastOutcome === 'NOT_INTERESTED' && history?.lastObjectionType) {
-      return notInterestedNextAction(history.lastObjectionType, firstName, product);
+      return notInterestedNextAction(
+        history.lastObjectionType,
+        firstName,
+        product,
+      );
     }
     if (lastOutcome === 'NO_ANSWER' && noAnswerCount > 0) {
       return noAnswerNextAction(noAnswerCount, firstName, product);
@@ -701,7 +848,9 @@ export class DecisionEngineService {
       case LeadStatus.QUOTATION:
         return {
           action: 'CHASE_QUOTE',
-          label: isOverdue ? '⚠️ Quote Follow-up Overdue' : 'Follow Up on Quotation',
+          label: isOverdue
+            ? '⚠️ Quote Follow-up Overdue'
+            : 'Follow Up on Quotation',
           buttonText: 'Log Response → Close Deal',
           urgency: isOverdue ? 'HIGH' : 'MEDIUM',
           nextStatusOnComplete: LeadStatus.CONVERTED,
@@ -723,7 +872,8 @@ export class DecisionEngineService {
           buttonText: 'View Order',
           urgency: 'LOW',
           nextStatusOnComplete: null,
-          script: 'This lead has been successfully converted. No further action required.',
+          script:
+            'This lead has been successfully converted. No further action required.',
         };
     }
   }
@@ -743,14 +893,25 @@ export class DecisionEngineService {
     const score = this.scoreLead(lead);
     const nextAction = this.getNextAction(lead, h);
     const urgencyKeywords = this.detectUrgencyKeywords(lead);
-    const ageHours = Math.round((Date.now() - new Date(lead.created_at).getTime()) / 3_600_000);
+    const ageHours = Math.round(
+      (Date.now() - new Date(lead.created_at).getTime()) / 3_600_000,
+    );
     const followUpOverdueDays = lead.follow_up_date
       ? Math.max(
           0,
-          Math.round((Date.now() - new Date(lead.follow_up_date).getTime()) / 86_400_000),
+          Math.round(
+            (Date.now() - new Date(lead.follow_up_date).getTime()) / 86_400_000,
+          ),
         )
       : null;
 
-    return { score, nextAction, urgencyKeywords, ageHours, followUpOverdueDays, outcomeHistory: h };
+    return {
+      score,
+      nextAction,
+      urgencyKeywords,
+      ageHours,
+      followUpOverdueDays,
+      outcomeHistory: h,
+    };
   }
 }

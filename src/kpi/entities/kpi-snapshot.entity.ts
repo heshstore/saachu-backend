@@ -7,17 +7,24 @@ import {
   Unique,
 } from 'typeorm';
 
-export type KpiScope  = 'USER' | 'TEAM' | 'SYSTEM';
+export type KpiScope = 'USER' | 'TEAM' | 'SYSTEM';
 export type KpiPeriod = 'DAILY' | 'WEEKLY' | 'MONTHLY';
 
 @Entity('kpi_snapshots')
-@Index('idx_kpi_scope',        ['scope', 'scope_id'])
-@Index('idx_kpi_module',       ['module'])
-@Index('idx_kpi_metric',       ['metric_key'])
-@Index('idx_kpi_period',       ['period'])
+@Index('idx_kpi_scope', ['scope', 'scope_id'])
+@Index('idx_kpi_module', ['module'])
+@Index('idx_kpi_metric', ['metric_key'])
+@Index('idx_kpi_period', ['period'])
 @Index('idx_kpi_period_start', ['period_start'])
 // Unique prevents duplicate snapshots for the same metric/scope/period
-@Unique('uq_kpi_snapshot', ['scope', 'scope_id', 'module', 'metric_key', 'period', 'period_start'])
+@Unique('uq_kpi_snapshot', [
+  'scope',
+  'scope_id',
+  'module',
+  'metric_key',
+  'period',
+  'period_start',
+])
 export class KpiSnapshot {
   @PrimaryGeneratedColumn('uuid')
   id: string;

@@ -30,7 +30,7 @@ export class Item {
   @Column({ nullable: true })
   shopifyVariantId: string;
 
-  @Column({ default: "Nos" })
+  @Column({ default: 'Nos' })
   unit: string;
 
   @Column({ nullable: true })

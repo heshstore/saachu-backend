@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { CRM_FULL_ACCESS_ROLES, CRM_OPERATIONAL_QUALITY_SQL } from './crm.constants';
+import {
+  CRM_FULL_ACCESS_ROLES,
+  CRM_OPERATIONAL_QUALITY_SQL,
+} from './crm.constants';
 
 @Injectable()
 export class AnalyticsService {
@@ -30,7 +33,9 @@ export class AnalyticsService {
 
     let rows: any[];
     if (this.isFullAccess(user)) {
-      rows = await this.ds.query(`${selectClause} WHERE l.is_active = true`, [today]);
+      rows = await this.ds.query(`${selectClause} WHERE l.is_active = true`, [
+        today,
+      ]);
     } else {
       rows = await this.ds.query(
         `${selectClause} WHERE l.is_active = true AND (l.assigned_to = $2 OR l.created_by = $2)`,
@@ -66,7 +71,9 @@ export class AnalyticsService {
 
     let rows: any[];
     if (this.isFullAccess(user)) {
-      rows = await this.ds.query(`${selectClause} WHERE l.is_active = true ${tail}`);
+      rows = await this.ds.query(
+        `${selectClause} WHERE l.is_active = true ${tail}`,
+      );
     } else {
       rows = await this.ds.query(
         `${selectClause} WHERE l.is_active = true AND (l.assigned_to = $1 OR l.created_by = $1) ${tail}`,
@@ -79,12 +86,14 @@ export class AnalyticsService {
       total: +r.total,
       toQuotation: +r.to_quotation,
       converted: +r.converted,
-      conversionPct: r.total > 0 ? Math.round((r.converted / r.total) * 100) : 0,
+      conversionPct:
+        r.total > 0 ? Math.round((r.converted / r.total) * 100) : 0,
     }));
   }
 
   async getMyStats(user: any) {
-    const rows = await this.ds.query(`
+    const rows = await this.ds.query(
+      `
       SELECT
         COUNT(*) AS total,
         COUNT(*) FILTER (WHERE l.status = 'CONVERTED') AS converted,
@@ -94,16 +103,21 @@ export class AnalyticsService {
       FROM leads l
       WHERE l.is_active = true
         AND (l.assigned_to = $1 OR l.created_by = $1)
-    `, [user.id]);
+    `,
+      [user.id],
+    );
 
-    const pendingFu = await this.ds.query(`
+    const pendingFu = await this.ds.query(
+      `
       SELECT COUNT(*) AS cnt
       FROM lead_followups f
       JOIN leads l ON l.id = f.lead_id
       WHERE f.is_completed = false
         AND f.due_date <= now() + INTERVAL '24 hours'
         AND l.assigned_to = $1
-    `, [user.id]);
+    `,
+      [user.id],
+    );
 
     const r = rows[0];
     return {
@@ -161,34 +175,44 @@ export class AnalyticsService {
     }
 
     // 1. Lead totals
-    const [leadsRow] = await this.ds.query(`
+    const [leadsRow] = await this.ds.query(
+      `
       SELECT
         COUNT(*) AS total_leads,
         COUNT(*) FILTER (WHERE status = 'CONVERTED') AS conversions,
         COUNT(*) FILTER (WHERE status = 'LOST') AS lost
       FROM leads
       WHERE (assigned_to = $1 OR created_by = $1) AND is_active = true
-    `, [targetUserId]);
+    `,
+      [targetUserId],
+    );
 
     // 2. CALLED actions from audit log (only counts logged calls via logAction)
-    const [callsRow] = await this.ds.query(`
+    const [callsRow] = await this.ds.query(
+      `
       SELECT COUNT(*) AS calls_made
       FROM lead_audit_logs
       WHERE user_id = $1 AND action = 'CALLED'
-    `, [targetUserId]);
+    `,
+      [targetUserId],
+    );
 
     // 3. Follow-up completion rate across their assigned leads
-    const [fuRow] = await this.ds.query(`
+    const [fuRow] = await this.ds.query(
+      `
       SELECT
         COUNT(*) FILTER (WHERE f.is_completed = true) AS fu_completed,
         COUNT(*) AS fu_total
       FROM lead_followups f
       JOIN leads l ON l.id = f.lead_id
       WHERE l.assigned_to = $1 AND l.is_active = true
-    `, [targetUserId]);
+    `,
+      [targetUserId],
+    );
 
     // 4. Avg first-response time (minutes from lead creation to first note)
-    const [responseRow] = await this.ds.query(`
+    const [responseRow] = await this.ds.query(
+      `
       SELECT ROUND(AVG(response_min)::numeric, 1) AS avg_response_min
       FROM (
         SELECT EXTRACT(EPOCH FROM (MIN(n.created_at) - l.created_at)) / 60 AS response_min
@@ -197,7 +221,9 @@ export class AnalyticsService {
         WHERE l.assigned_to = $1 AND l.is_active = true
         GROUP BY l.id
       ) sub
-    `, [targetUserId]);
+    `,
+      [targetUserId],
+    );
 
     const fuTotal = +fuRow.fu_total;
     return {
@@ -206,9 +232,8 @@ export class AnalyticsService {
       conversions: +leadsRow.conversions,
       lost: +leadsRow.lost,
       callsMade: +callsRow.calls_made,
-      followUpCompletionPct: fuTotal > 0
-        ? Math.round((+fuRow.fu_completed / fuTotal) * 100)
-        : null,
+      followUpCompletionPct:
+        fuTotal > 0 ? Math.round((+fuRow.fu_completed / fuTotal) * 100) : null,
       avgResponseMin: responseRow.avg_response_min
         ? +responseRow.avg_response_min
         : null,
@@ -233,7 +258,9 @@ export class AnalyticsService {
 
     let rows: any[];
     if (this.isFullAccess(user)) {
-      rows = await this.ds.query(`${selectClause} WHERE l.is_active = true ${tail}`);
+      rows = await this.ds.query(
+        `${selectClause} WHERE l.is_active = true ${tail}`,
+      );
     } else {
       rows = await this.ds.query(
         `${selectClause} WHERE l.is_active = true AND (l.assigned_to = $1 OR l.created_by = $1) ${tail}`,
@@ -246,7 +273,8 @@ export class AnalyticsService {
       total: +r.total,
       toQuotation: +r.to_quotation,
       converted: +r.converted,
-      conversionPct: r.total > 0 ? Math.round((r.converted / r.total) * 100) : 0,
+      conversionPct:
+        r.total > 0 ? Math.round((r.converted / r.total) * 100) : 0,
     }));
   }
 
@@ -289,7 +317,8 @@ export class AnalyticsService {
   }
 
   async getTelecallerStats(telecallerId: number, user: any) {
-    const rows = await this.ds.query(`
+    const rows = await this.ds.query(
+      `
       SELECT
         l.status,
         l.source,
@@ -297,7 +326,9 @@ export class AnalyticsService {
       FROM leads l
       WHERE l.assigned_to = $1 AND l.is_active = true
       GROUP BY l.status, l.source
-    `, [telecallerId]);
+    `,
+      [telecallerId],
+    );
 
     const user_row = await this.ds.query(
       `SELECT id, name FROM "user" WHERE id = $1`,
@@ -316,7 +347,8 @@ export class AnalyticsService {
       : `WHERE is_active = true AND (assigned_to = $1 OR created_by = $1)`;
     const params = this.isFullAccess(user) ? [] : [user.id];
 
-    const [r] = await this.ds.query(`
+    const [r] = await this.ds.query(
+      `
       SELECT
         COUNT(*) FILTER (WHERE last_customer_reply_at IS NOT NULL) AS total_with_reply,
         COUNT(*) FILTER (
@@ -339,15 +371,23 @@ export class AnalyticsService {
         ) AS currently_unanswered
       FROM leads l
       ${where}
-    `, params);
+    `,
+      params,
+    );
 
     const totalWithReply = +r.total_with_reply;
     return {
       totalWithReply,
       within30MinCount: +r.within_30min,
       within2hCount: +r.within_2h,
-      within30MinPct: totalWithReply > 0 ? Math.round((+r.within_30min / totalWithReply) * 100) : null,
-      within2hPct: totalWithReply > 0 ? Math.round((+r.within_2h / totalWithReply) * 100) : null,
+      within30MinPct:
+        totalWithReply > 0
+          ? Math.round((+r.within_30min / totalWithReply) * 100)
+          : null,
+      within2hPct:
+        totalWithReply > 0
+          ? Math.round((+r.within_2h / totalWithReply) * 100)
+          : null,
       avgReplyMin: r.avg_reply_min ? +r.avg_reply_min : null,
       currentlyUnanswered: +r.currently_unanswered,
     };
@@ -359,7 +399,8 @@ export class AnalyticsService {
       : `WHERE is_active = true AND (assigned_to = $1 OR created_by = $1)`;
     const params = this.isFullAccess(user) ? [] : [user.id];
 
-    const [r] = await this.ds.query(`
+    const [r] = await this.ds.query(
+      `
       SELECT
         COUNT(*) AS total,
         COUNT(*) FILTER (WHERE status IN ('CONTACTED','INTERESTED','QUOTATION','CONVERTED')) AS contacted,
@@ -369,7 +410,9 @@ export class AnalyticsService {
         COUNT(*) FILTER (WHERE status = 'LOST') AS lost
       FROM leads l
       ${where}
-    `, params);
+    `,
+      params,
+    );
 
     const total = +r.total || 1;
     return {
@@ -394,7 +437,8 @@ export class AnalyticsService {
       : `WHERE is_active = true AND (assigned_to = $1 OR created_by = $1)`;
     const params = this.isFullAccess(user) ? [] : [user.id];
 
-    const [r] = await this.ds.query(`
+    const [r] = await this.ds.query(
+      `
       SELECT
         COUNT(*) FILTER (
           WHERE last_customer_reply_at IS NOT NULL
@@ -419,7 +463,9 @@ export class AnalyticsService {
         ) AS stale_interested_count
       FROM leads l
       ${where}
-    `, params);
+    `,
+      params,
+    );
 
     return {
       overdueCount: +r.overdue_count,
@@ -439,7 +485,8 @@ export class AnalyticsService {
     // ROI per source: for leads that converted, sum order values via customer_id join.
     // Note: if the same customer has multiple converted leads, order values may appear
     // across multiple source rows — this is intentional for channel attribution.
-    const rows = await this.ds.query(`
+    const rows = await this.ds.query(
+      `
       SELECT
         l.source,
         COUNT(DISTINCT l.id) AS converted_leads,
@@ -453,33 +500,39 @@ export class AnalyticsService {
       ${where}
       GROUP BY l.source
       ORDER BY total_order_value DESC, converted_leads DESC
-    `, params);
+    `,
+      params,
+    );
 
     // Also get total lead count per source (all statuses, not just CONVERTED)
     const allWhere = this.isFullAccess(user)
       ? `WHERE l.is_active = true`
       : `WHERE l.is_active = true AND (l.assigned_to = $1 OR l.created_by = $1)`;
-    const totalRows = await this.ds.query(`
+    const totalRows = await this.ds.query(
+      `
       SELECT source, COUNT(*) AS total_leads
       FROM leads l
       ${allWhere}
       GROUP BY source
-    `, params);
+    `,
+      params,
+    );
 
     const totalMap: Record<string, number> = {};
     for (const r of totalRows) totalMap[r.source] = +r.total_leads;
 
     return rows.map((r: any) => ({
-      source:          r.source,
-      totalLeads:      totalMap[r.source] ?? 0,
-      convertedLeads:  +r.converted_leads,
-      conversionPct:   (totalMap[r.source] ?? 0) > 0
-        ? Math.round((+r.converted_leads / totalMap[r.source]) * 100)
-        : 0,
-      orderCount:      +r.order_count,
+      source: r.source,
+      totalLeads: totalMap[r.source] ?? 0,
+      convertedLeads: +r.converted_leads,
+      conversionPct:
+        (totalMap[r.source] ?? 0) > 0
+          ? Math.round((+r.converted_leads / totalMap[r.source]) * 100)
+          : 0,
+      orderCount: +r.order_count,
       totalOrderValue: Math.round(+r.total_order_value),
-      totalPaid:       Math.round(+r.total_paid),
-      avgOrderValue:   +r.avg_order_value ? Math.round(+r.avg_order_value) : 0,
+      totalPaid: Math.round(+r.total_paid),
+      avgOrderValue: +r.avg_order_value ? Math.round(+r.avg_order_value) : 0,
     }));
   }
 
@@ -489,7 +542,8 @@ export class AnalyticsService {
       : `WHERE last_customer_reply_at IS NOT NULL AND is_active = true AND (assigned_to = $1 OR created_by = $1)`;
     const params = this.isFullAccess(user) ? [] : [user.id];
 
-    const rows = await this.ds.query(`
+    const rows = await this.ds.query(
+      `
       SELECT
         CASE
           WHEN last_salesman_reply_at IS NULL OR last_salesman_reply_at < last_customer_reply_at THEN 'unanswered'
@@ -511,7 +565,9 @@ export class AnalyticsService {
           WHEN 'over_4h'     THEN 4
           WHEN 'unanswered'  THEN 5
         END
-    `, params);
+    `,
+      params,
+    );
 
     const BUCKET_LABELS: Record<string, string> = {
       under_30min: '< 30 min',
@@ -526,13 +582,15 @@ export class AnalyticsService {
       label: BUCKET_LABELS[r.bucket] || r.bucket,
       total: +r.total,
       converted: +r.converted,
-      conversionPct: +r.total > 0 ? Math.round((+r.converted / +r.total) * 100) : 0,
+      conversionPct:
+        +r.total > 0 ? Math.round((+r.converted / +r.total) * 100) : 0,
     }));
   }
 
   // ── Operational lead quality guard ────────────────────────────────────────────
   // Sourced from crm.constants.ts — single definition for all operational filters.
-  private static readonly OPERATIONAL_QUALITY_FILTER = CRM_OPERATIONAL_QUALITY_SQL;
+  private static readonly OPERATIONAL_QUALITY_FILTER =
+    CRM_OPERATIONAL_QUALITY_SQL;
 
   // ── Part 1: Objection Intelligence ────────────────────────────────────────────
 
@@ -542,7 +600,8 @@ export class AnalyticsService {
       : `WHERE l.last_objection_type IS NOT NULL AND l.is_active = true AND ${AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality')} AND (l.assigned_to = $1 OR l.created_by = $1)`;
     const params = this.isFullAccess(user) ? [] : [user.id];
 
-    const rows: any[] = await this.ds.query(`
+    const rows: any[] = await this.ds.query(
+      `
       SELECT
         l.last_objection_type                                      AS objection,
         COUNT(DISTINCT l.id)                                       AS total_count,
@@ -566,17 +625,28 @@ export class AnalyticsService {
       ${where}
       GROUP BY l.last_objection_type
       ORDER BY total_count DESC
-    `, params);
+    `,
+      params,
+    );
 
     return rows.map((r: any) => ({
-      objection:           r.objection,
-      totalCount:          +r.total_count,
-      convertedCount:      +r.converted_count,
-      conversionPct:       +r.total_count > 0 ? Math.round((+r.converted_count / +r.total_count) * 100) : 0,
-      avgDaysToConversion: r.avg_days_to_conversion !== null ? +r.avg_days_to_conversion : null,
-      avgQuotationValue:   r.avg_quotation_value !== null ? Math.round(+r.avg_quotation_value) : null,
-      commonExitState:     r.common_exit_state ?? null,
-      isFatal:             +r.total_count > 0 && Math.round((+r.converted_count / +r.total_count) * 100) < 10,
+      objection: r.objection,
+      totalCount: +r.total_count,
+      convertedCount: +r.converted_count,
+      conversionPct:
+        +r.total_count > 0
+          ? Math.round((+r.converted_count / +r.total_count) * 100)
+          : 0,
+      avgDaysToConversion:
+        r.avg_days_to_conversion !== null ? +r.avg_days_to_conversion : null,
+      avgQuotationValue:
+        r.avg_quotation_value !== null
+          ? Math.round(+r.avg_quotation_value)
+          : null,
+      commonExitState: r.common_exit_state ?? null,
+      isFatal:
+        +r.total_count > 0 &&
+        Math.round((+r.converted_count / +r.total_count) * 100) < 10,
     }));
   }
 
@@ -584,11 +654,16 @@ export class AnalyticsService {
 
   async getWorkflowFunnel(user: any) {
     const assignFilter = this.isFullAccess(user)
-      ? '' : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
+      ? ''
+      : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
     const params = this.isFullAccess(user) ? [] : [user.id];
-    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality');
+    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(
+      /lead_quality/g,
+      'l.lead_quality',
+    );
 
-    const stateRows: any[] = await this.ds.query(`
+    const stateRows: any[] = await this.ds.query(
+      `
       SELECT
         l.workflow_state                                                  AS state,
         COUNT(*)                                                          AS current_count,
@@ -619,19 +694,27 @@ export class AnalyticsService {
           WHEN 'LOST'            THEN 12
           ELSE 99
         END
-    `, params);
+    `,
+      params,
+    );
 
-    const totalActive = stateRows.reduce((s: number, r: any) =>
-      ['CONVERTED', 'LOST'].includes(r.state) ? s : s + +r.current_count, 0);
+    const totalActive = stateRows.reduce(
+      (s: number, r: any) =>
+        ['CONVERTED', 'LOST'].includes(r.state) ? s : s + +r.current_count,
+      0,
+    );
 
     return stateRows.map((r: any) => ({
-      state:           r.state,
-      currentCount:    +r.current_count,
-      overdueCount:    +r.overdue_count,
-      avgHoursInState: r.avg_hours_in_state !== null ? +r.avg_hours_in_state : null,
-      staleCount:      +r.stale_count,
-      pctOfActive:     totalActive > 0 && !['CONVERTED', 'LOST'].includes(r.state)
-        ? Math.round((+r.current_count / totalActive) * 100) : null,
+      state: r.state,
+      currentCount: +r.current_count,
+      overdueCount: +r.overdue_count,
+      avgHoursInState:
+        r.avg_hours_in_state !== null ? +r.avg_hours_in_state : null,
+      staleCount: +r.stale_count,
+      pctOfActive:
+        totalActive > 0 && !['CONVERTED', 'LOST'].includes(r.state)
+          ? Math.round((+r.current_count / totalActive) * 100)
+          : null,
     }));
   }
 
@@ -639,11 +722,16 @@ export class AnalyticsService {
 
   async getQuotationPerformance(user: any) {
     const assignFilter = this.isFullAccess(user)
-      ? '' : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
+      ? ''
+      : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
     const params = this.isFullAccess(user) ? [] : [user.id];
-    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality');
+    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(
+      /lead_quality/g,
+      'l.lead_quality',
+    );
 
-    const [r]: any[] = await this.ds.query(`
+    const [r]: any[] = await this.ds.query(
+      `
       SELECT
         COUNT(DISTINCT q.id)                                                           AS total,
         COUNT(DISTINCT q.id) FILTER (WHERE q.status = 'DRAFT')                         AS draft,
@@ -672,23 +760,34 @@ export class AnalyticsService {
       JOIN leads l ON l.id = q.lead_id
       LEFT JOIN orders o ON o.lead_id = l.id AND o.status != 'CANCELLED'
       WHERE l.is_active = true AND ${qualFilter} ${assignFilter}
-    `, params);
+    `,
+      params,
+    );
 
     const total = +r.total || 0;
     return {
       total,
-      draft:            +r.draft,
-      generated:        +r.generated,
-      converted:        +r.converted,
-      cancelled:        +r.cancelled,
-      negotiating:      +r.negotiating,
-      stalled:          +r.stalled,
-      conversionPct:    total > 0 ? Math.round((+r.converted / total) * 100) : 0,
-      conversionPctOfSent: r.conversion_pct_of_sent !== null ? Math.round(+r.conversion_pct_of_sent) : 0,
-      avgHoursToQuote:  r.avg_hours_to_quote !== null ? +r.avg_hours_to_quote : null,
-      avgDaysToConvert: r.avg_days_to_convert !== null ? +r.avg_days_to_convert : null,
-      avgConvertedValue: r.avg_converted_value !== null ? Math.round(+r.avg_converted_value) : null,
-      avgAllValue:      r.avg_all_value !== null ? Math.round(+r.avg_all_value) : null,
+      draft: +r.draft,
+      generated: +r.generated,
+      converted: +r.converted,
+      cancelled: +r.cancelled,
+      negotiating: +r.negotiating,
+      stalled: +r.stalled,
+      conversionPct: total > 0 ? Math.round((+r.converted / total) * 100) : 0,
+      conversionPctOfSent:
+        r.conversion_pct_of_sent !== null
+          ? Math.round(+r.conversion_pct_of_sent)
+          : 0,
+      avgHoursToQuote:
+        r.avg_hours_to_quote !== null ? +r.avg_hours_to_quote : null,
+      avgDaysToConvert:
+        r.avg_days_to_convert !== null ? +r.avg_days_to_convert : null,
+      avgConvertedValue:
+        r.avg_converted_value !== null
+          ? Math.round(+r.avg_converted_value)
+          : null,
+      avgAllValue:
+        r.avg_all_value !== null ? Math.round(+r.avg_all_value) : null,
     };
   }
 
@@ -696,11 +795,16 @@ export class AnalyticsService {
 
   async getProductConversion(user: any) {
     const assignFilter = this.isFullAccess(user)
-      ? '' : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
+      ? ''
+      : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
     const params = this.isFullAccess(user) ? [] : [user.id];
-    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality');
+    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(
+      /lead_quality/g,
+      'l.lead_quality',
+    );
 
-    const rows: any[] = await this.ds.query(`
+    const rows: any[] = await this.ds.query(
+      `
       SELECT
         TRIM(LOWER(l.product_interest))                                     AS product,
         COUNT(DISTINCT l.id)                                                AS lead_count,
@@ -731,16 +835,23 @@ export class AnalyticsService {
       HAVING COUNT(DISTINCT l.id) >= 2
       ORDER BY converted_count DESC, lead_count DESC
       LIMIT 20
-    `, params);
+    `,
+      params,
+    );
 
     return rows.map((r: any) => ({
-      product:            r.product,
-      leadCount:          +r.lead_count,
-      quotationCount:     +r.quotation_count,
-      convertedCount:     +r.converted_count,
-      conversionPct:      +r.lead_count > 0 ? Math.round((+r.converted_count / +r.lead_count) * 100) : 0,
-      avgOrderValue:      r.avg_order_value !== null ? Math.round(+r.avg_order_value) : null,
-      avgSalesCycleDays:  r.avg_sales_cycle_days !== null ? +r.avg_sales_cycle_days : null,
+      product: r.product,
+      leadCount: +r.lead_count,
+      quotationCount: +r.quotation_count,
+      convertedCount: +r.converted_count,
+      conversionPct:
+        +r.lead_count > 0
+          ? Math.round((+r.converted_count / +r.lead_count) * 100)
+          : 0,
+      avgOrderValue:
+        r.avg_order_value !== null ? Math.round(+r.avg_order_value) : null,
+      avgSalesCycleDays:
+        r.avg_sales_cycle_days !== null ? +r.avg_sales_cycle_days : null,
       mostCommonObjection: r.most_common_objection ?? null,
     }));
   }
@@ -830,25 +941,29 @@ export class AnalyticsService {
 
     return rows.map((r: any) => {
       const totalLeads = +r.total_leads || 0;
-      const converted  = +r.converted || 0;
+      const converted = +r.converted || 0;
       const leadsWithQ = +r.leads_with_quotation || 0;
-      const cbSucc     = +r.callback_successes || 0;
-      const cbTotal    = +r.callback_total || 1;
-      const objRecov   = +r.objection_recoveries || 0;
-      const objTotal   = +r.objection_total || 1;
+      const cbSucc = +r.callback_successes || 0;
+      const cbTotal = +r.callback_total || 1;
+      const objRecov = +r.objection_recoveries || 0;
+      const objTotal = +r.objection_total || 1;
       return {
-        userId:                   +r.user_id,
-        userName:                 r.user_name,
+        userId: +r.user_id,
+        userName: r.user_name,
         totalLeads,
         converted,
-        lost:                     +r.lost,
-        conversionRate:           totalLeads > 0 ? Math.round((converted / totalLeads) * 100) : 0,
-        quotationGenerationRate:  totalLeads > 0 ? Math.round((leadsWithQ / totalLeads) * 100) : 0,
-        avgHoursToQuotation:      r.avg_hours_to_quotation !== null ? +r.avg_hours_to_quotation : null,
-        callbackSuccessRate:      Math.round((cbSucc / cbTotal) * 100),
-        objectionRecoveryRate:    Math.round((objRecov / objTotal) * 100),
-        staleLeadCount:           +r.stale_count,
-        staleLeadRate:            totalLeads > 0 ? Math.round((+r.stale_count / totalLeads) * 100) : 0,
+        lost: +r.lost,
+        conversionRate:
+          totalLeads > 0 ? Math.round((converted / totalLeads) * 100) : 0,
+        quotationGenerationRate:
+          totalLeads > 0 ? Math.round((leadsWithQ / totalLeads) * 100) : 0,
+        avgHoursToQuotation:
+          r.avg_hours_to_quotation !== null ? +r.avg_hours_to_quotation : null,
+        callbackSuccessRate: Math.round((cbSucc / cbTotal) * 100),
+        objectionRecoveryRate: Math.round((objRecov / objTotal) * 100),
+        staleLeadCount: +r.stale_count,
+        staleLeadRate:
+          totalLeads > 0 ? Math.round((+r.stale_count / totalLeads) * 100) : 0,
       };
     });
   }
@@ -857,9 +972,13 @@ export class AnalyticsService {
 
   async getPipelineLeaks(user: any) {
     const assignFilter = this.isFullAccess(user)
-      ? '' : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
+      ? ''
+      : `AND (l.assigned_to = $1 OR l.created_by = $1)`;
     const params = this.isFullAccess(user) ? [] : [user.id];
-    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(/lead_quality/g, 'l.lead_quality');
+    const qualFilter = AnalyticsService.OPERATIONAL_QUALITY_FILTER.replace(
+      /lead_quality/g,
+      'l.lead_quality',
+    );
 
     const leaks: Array<{
       stage: string;
@@ -871,21 +990,30 @@ export class AnalyticsService {
     }> = [];
 
     // 1. NO_ANSWER_ESC accumulation → slow first response
-    const [naEsc]: any = await this.ds.query(`
+    const [naEsc]: any = await this.ds.query(
+      `
       SELECT COUNT(*) AS cnt,
              ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0)::numeric, 1) AS avg_hours
       FROM leads l
       WHERE l.workflow_state = 'NO_ANSWER_ESC' AND l.is_active = true AND ${qualFilter} ${assignFilter}
-    `, params);
-    if (+naEsc.cnt > 0) leaks.push({
-      stage: 'NO_ANSWER_ESC', leakReason: 'Unreachable leads accumulating',
-      affectedCount: +naEsc.cnt, avgAgingHours: naEsc.avg_hours !== null ? +naEsc.avg_hours : null,
-      operationalCause: 'Slow first response or wrong contact hours — increase call attempt spread',
-      severity: +naEsc.cnt >= 10 ? 'HIGH' : +naEsc.cnt >= 5 ? 'MEDIUM' : 'LOW',
-    });
+    `,
+      params,
+    );
+    if (+naEsc.cnt > 0)
+      leaks.push({
+        stage: 'NO_ANSWER_ESC',
+        leakReason: 'Unreachable leads accumulating',
+        affectedCount: +naEsc.cnt,
+        avgAgingHours: naEsc.avg_hours !== null ? +naEsc.avg_hours : null,
+        operationalCause:
+          'Slow first response or wrong contact hours — increase call attempt spread',
+        severity:
+          +naEsc.cnt >= 10 ? 'HIGH' : +naEsc.cnt >= 5 ? 'MEDIUM' : 'LOW',
+      });
 
     // 2. SEND_QUOTATION aging >4h with no quotation sent
-    const [sqStale]: any = await this.ds.query(`
+    const [sqStale]: any = await this.ds.query(
+      `
       SELECT COUNT(*) AS cnt,
              ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0)::numeric, 1) AS avg_hours
       FROM leads l
@@ -893,96 +1021,145 @@ export class AnalyticsService {
         AND l.quotation_id IS NULL
         AND COALESCE(l.workflow_state_entered_at, l.created_at) < NOW() - INTERVAL '4 hours'
         AND l.is_active = true AND ${qualFilter} ${assignFilter}
-    `, params);
-    if (+sqStale.cnt > 0) leaks.push({
-      stage: 'SEND_QUOTATION', leakReason: 'Quotation not sent after interest confirmed',
-      affectedCount: +sqStale.cnt, avgAgingHours: sqStale.avg_hours !== null ? +sqStale.avg_hours : null,
-      operationalCause: 'Quotation turnaround delay — assign pricing authority or pre-built templates',
-      severity: +sqStale.cnt >= 5 ? 'HIGH' : +sqStale.cnt >= 2 ? 'MEDIUM' : 'LOW',
-    });
+    `,
+      params,
+    );
+    if (+sqStale.cnt > 0)
+      leaks.push({
+        stage: 'SEND_QUOTATION',
+        leakReason: 'Quotation not sent after interest confirmed',
+        affectedCount: +sqStale.cnt,
+        avgAgingHours: sqStale.avg_hours !== null ? +sqStale.avg_hours : null,
+        operationalCause:
+          'Quotation turnaround delay — assign pricing authority or pre-built templates',
+        severity:
+          +sqStale.cnt >= 5 ? 'HIGH' : +sqStale.cnt >= 2 ? 'MEDIUM' : 'LOW',
+      });
 
     // 3. CHASE_QUOTATION aging >72h
-    const [cqStale]: any = await this.ds.query(`
+    const [cqStale]: any = await this.ds.query(
+      `
       SELECT COUNT(*) AS cnt,
              ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0)::numeric, 1) AS avg_hours
       FROM leads l
       WHERE l.workflow_state = 'CHASE_QUOTATION'
         AND COALESCE(l.workflow_state_entered_at, l.created_at) < NOW() - INTERVAL '72 hours'
         AND l.is_active = true AND ${qualFilter} ${assignFilter}
-    `, params);
-    if (+cqStale.cnt > 0) leaks.push({
-      stage: 'CHASE_QUOTATION', leakReason: 'Quotation follow-up gap >72h',
-      affectedCount: +cqStale.cnt, avgAgingHours: cqStale.avg_hours !== null ? +cqStale.avg_hours : null,
-      operationalCause: 'Post-quotation follow-up gap — call 3 days post-send, lead goes cold otherwise',
-      severity: +cqStale.cnt >= 5 ? 'HIGH' : +cqStale.cnt >= 2 ? 'MEDIUM' : 'LOW',
-    });
+    `,
+      params,
+    );
+    if (+cqStale.cnt > 0)
+      leaks.push({
+        stage: 'CHASE_QUOTATION',
+        leakReason: 'Quotation follow-up gap >72h',
+        affectedCount: +cqStale.cnt,
+        avgAgingHours: cqStale.avg_hours !== null ? +cqStale.avg_hours : null,
+        operationalCause:
+          'Post-quotation follow-up gap — call 3 days post-send, lead goes cold otherwise',
+        severity:
+          +cqStale.cnt >= 5 ? 'HIGH' : +cqStale.cnt >= 2 ? 'MEDIUM' : 'LOW',
+      });
 
     // 4. CALLBACK_WAIT overdue (promised callback missed)
-    const [cbOver]: any = await this.ds.query(`
+    const [cbOver]: any = await this.ds.query(
+      `
       SELECT COUNT(*) AS cnt,
              ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - l.next_action_due_at)) / 3600.0)::numeric, 1) AS avg_hours
       FROM leads l
       WHERE l.workflow_state = 'CALLBACK_WAIT'
         AND l.next_action_due_at < NOW()
         AND l.is_active = true AND ${qualFilter} ${assignFilter}
-    `, params);
-    if (+cbOver.cnt > 0) leaks.push({
-      stage: 'CALLBACK_WAIT', leakReason: 'Promised callbacks not honored',
-      affectedCount: +cbOver.cnt, avgAgingHours: cbOver.avg_hours !== null ? +cbOver.avg_hours : null,
-      operationalCause: 'Callback discipline issue — customer expectation not met, trust erodes fast',
-      severity: +cbOver.cnt >= 3 ? 'HIGH' : +cbOver.cnt >= 1 ? 'MEDIUM' : 'LOW',
-    });
+    `,
+      params,
+    );
+    if (+cbOver.cnt > 0)
+      leaks.push({
+        stage: 'CALLBACK_WAIT',
+        leakReason: 'Promised callbacks not honored',
+        affectedCount: +cbOver.cnt,
+        avgAgingHours: cbOver.avg_hours !== null ? +cbOver.avg_hours : null,
+        operationalCause:
+          'Callback discipline issue — customer expectation not met, trust erodes fast',
+        severity:
+          +cbOver.cnt >= 3 ? 'HIGH' : +cbOver.cnt >= 1 ? 'MEDIUM' : 'LOW',
+      });
 
     // 5. Stale lead accumulation (tagged stale_lead)
-    const [staleLds]: any = await this.ds.query(`
+    const [staleLds]: any = await this.ds.query(
+      `
       SELECT COUNT(*) AS cnt,
              ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0)::numeric, 1) AS avg_hours
       FROM leads l
       WHERE COALESCE(l.tags,'[]'::jsonb) @> '["stale_lead"]'
         AND l.status NOT IN ('CONVERTED', 'LOST')
         AND l.is_active = true AND ${qualFilter} ${assignFilter}
-    `, params);
-    if (+staleLds.cnt > 0) leaks.push({
-      stage: 'PIPELINE', leakReason: 'Leads stagnating with no call activity',
-      affectedCount: +staleLds.cnt, avgAgingHours: staleLds.avg_hours !== null ? +staleLds.avg_hours : null,
-      operationalCause: 'Telecaller inactivity — missed SLA×2 call window, leads going cold',
-      severity: +staleLds.cnt >= 10 ? 'HIGH' : +staleLds.cnt >= 5 ? 'MEDIUM' : 'LOW',
-    });
+    `,
+      params,
+    );
+    if (+staleLds.cnt > 0)
+      leaks.push({
+        stage: 'PIPELINE',
+        leakReason: 'Leads stagnating with no call activity',
+        affectedCount: +staleLds.cnt,
+        avgAgingHours: staleLds.avg_hours !== null ? +staleLds.avg_hours : null,
+        operationalCause:
+          'Telecaller inactivity — missed SLA×2 call window, leads going cold',
+        severity:
+          +staleLds.cnt >= 10 ? 'HIGH' : +staleLds.cnt >= 5 ? 'MEDIUM' : 'LOW',
+      });
 
     // 6. NEGOTIATING stall >96h
-    const [negStale]: any = await this.ds.query(`
+    const [negStale]: any = await this.ds.query(
+      `
       SELECT COUNT(*) AS cnt,
              ROUND(AVG(EXTRACT(EPOCH FROM (NOW() - COALESCE(l.workflow_state_entered_at, l.created_at))) / 3600.0)::numeric, 1) AS avg_hours
       FROM leads l
       WHERE l.workflow_state = 'NEGOTIATING'
         AND COALESCE(l.workflow_state_entered_at, l.created_at) < NOW() - INTERVAL '96 hours'
         AND l.is_active = true AND ${qualFilter} ${assignFilter}
-    `, params);
-    if (+negStale.cnt > 0) leaks.push({
-      stage: 'NEGOTIATING', leakReason: 'Negotiation stall >96h',
-      affectedCount: +negStale.cnt, avgAgingHours: negStale.avg_hours !== null ? +negStale.avg_hours : null,
-      operationalCause: 'Negotiation stall — involve senior, offer alternative pricing, set hard close date',
-      severity: +negStale.cnt >= 3 ? 'HIGH' : +negStale.cnt >= 1 ? 'MEDIUM' : 'LOW',
-    });
+    `,
+      params,
+    );
+    if (+negStale.cnt > 0)
+      leaks.push({
+        stage: 'NEGOTIATING',
+        leakReason: 'Negotiation stall >96h',
+        affectedCount: +negStale.cnt,
+        avgAgingHours: negStale.avg_hours !== null ? +negStale.avg_hours : null,
+        operationalCause:
+          'Negotiation stall — involve senior, offer alternative pricing, set hard close date',
+        severity:
+          +negStale.cnt >= 3 ? 'HIGH' : +negStale.cnt >= 1 ? 'MEDIUM' : 'LOW',
+      });
 
     // 7. Callback abuse risk — leads looping through LATER outcomes
-    const [cbAbuse]: any = await this.ds.query(`
+    const [cbAbuse]: any = await this.ds.query(
+      `
       SELECT COUNT(*) AS cnt
       FROM leads l
       WHERE COALESCE(l.tags,'[]'::jsonb) @> '["callback_abuse_risk"]'
         AND l.status NOT IN ('CONVERTED', 'LOST')
         AND l.is_active = true AND ${qualFilter} ${assignFilter}
-    `, params);
-    if (+cbAbuse.cnt > 0) leaks.push({
-      stage: 'CALLBACK_WAIT', leakReason: 'Callback abuse — repeated deferrals',
-      affectedCount: +cbAbuse.cnt, avgAgingHours: null,
-      operationalCause: 'Leads being pushed repeatedly without qualification — review and close or disqualify',
-      severity: +cbAbuse.cnt >= 5 ? 'HIGH' : +cbAbuse.cnt >= 2 ? 'MEDIUM' : 'LOW',
-    });
+    `,
+      params,
+    );
+    if (+cbAbuse.cnt > 0)
+      leaks.push({
+        stage: 'CALLBACK_WAIT',
+        leakReason: 'Callback abuse — repeated deferrals',
+        affectedCount: +cbAbuse.cnt,
+        avgAgingHours: null,
+        operationalCause:
+          'Leads being pushed repeatedly without qualification — review and close or disqualify',
+        severity:
+          +cbAbuse.cnt >= 5 ? 'HIGH' : +cbAbuse.cnt >= 2 ? 'MEDIUM' : 'LOW',
+      });
 
     return leaks.sort((a, b) => {
       const rank = { HIGH: 0, MEDIUM: 1, LOW: 2 };
-      return (rank[a.severity] - rank[b.severity]) || (b.affectedCount - a.affectedCount);
+      return (
+        rank[a.severity] - rank[b.severity] || b.affectedCount - a.affectedCount
+      );
     });
   }
 
@@ -990,7 +1167,10 @@ export class AnalyticsService {
   // Restricted to manager roles — operator-facing dashboard card.
   // Returns flat { SOURCE: count } maps for direct consumption.
 
-  async getTodayBySource(): Promise<{ today: Record<string, number>; last7Days: Record<string, number> }> {
+  async getTodayBySource(): Promise<{
+    today: Record<string, number>;
+    last7Days: Record<string, number>;
+  }> {
     const [todayRows, weekRows] = await Promise.all([
       this.ds.query(`
         SELECT source, COUNT(*) AS cnt
@@ -1028,8 +1208,10 @@ export class AnalyticsService {
     noiseRate: number,
     archivedInvalidCount: number,
   ): 'HEALTHY' | 'WARNING' | 'CRITICAL' {
-    if (identityRate < 20 || noiseRate > 50 || archivedInvalidCount > 5) return 'CRITICAL';
-    if (identityRate < 60 || noiseRate > 20 || archivedInvalidCount > 0) return 'WARNING';
+    if (identityRate < 20 || noiseRate > 50 || archivedInvalidCount > 5)
+      return 'CRITICAL';
+    if (identityRate < 60 || noiseRate > 20 || archivedInvalidCount > 0)
+      return 'WARNING';
     return 'HEALTHY';
   }
 
@@ -1094,7 +1276,8 @@ export class AnalyticsService {
     `);
     const responseMap: Record<string, number | null> = {};
     for (const r of responseRows) {
-      responseMap[r.source] = r.avg_response_min !== null ? +r.avg_response_min : null;
+      responseMap[r.source] =
+        r.avg_response_min !== null ? +r.avg_response_min : null;
     }
 
     // ── 3. Duplicate phone pattern detection ──────────────────────────────────
@@ -1116,41 +1299,55 @@ export class AnalyticsService {
 
     // ── 4. Build enriched source objects + issues ─────────────────────────────
     const sources = sourceRows.map((r: any) => {
-      const total              = +r.total || 0;
-      const activeCount        = +r.active_count || 0;
-      const convertedCount     = +r.converted_count || 0;
-      const lostCount          = +r.lost_count || 0;
-      const archivedInvalid    = +r.archived_invalid_count || 0;
-      const trackingOnlyCount  = +r.tracking_only_count || 0;
-      const junkCount          = +r.junk_count || 0;
-      const duplicateCount     = +r.duplicate_count || 0;
-      const autoCapturedCount  = +r.auto_captured_count || 0;
-      const identifiedCount    = +r.identified_count || 0;
-      const phoneCount         = +r.phone_count || 0;
-      const emailCount         = +r.email_count || 0;
-      const staleCount         = +r.stale_count || 0;
-      const noAnswerEscCount   = +r.no_answer_esc_count || 0;
+      const total = +r.total || 0;
+      const activeCount = +r.active_count || 0;
+      const convertedCount = +r.converted_count || 0;
+      const lostCount = +r.lost_count || 0;
+      const archivedInvalid = +r.archived_invalid_count || 0;
+      const trackingOnlyCount = +r.tracking_only_count || 0;
+      const junkCount = +r.junk_count || 0;
+      const duplicateCount = +r.duplicate_count || 0;
+      const autoCapturedCount = +r.auto_captured_count || 0;
+      const identifiedCount = +r.identified_count || 0;
+      const phoneCount = +r.phone_count || 0;
+      const emailCount = +r.email_count || 0;
+      const staleCount = +r.stale_count || 0;
+      const noAnswerEscCount = +r.no_answer_esc_count || 0;
       const callbackAbuseCount = +r.callback_abuse_count || 0;
 
-      const identityRate     = total > 0 ? Math.round((identifiedCount / total) * 100) : 0;
-      const phoneRate        = total > 0 ? Math.round((phoneCount / total) * 100) : 0;
-      const emailRate        = total > 0 ? Math.round((emailCount / total) * 100) : 0;
-      const conversionRate   = total > 0 ? Math.round((convertedCount / total) * 100) : 0;
-      const noiseRate        = total > 0 ? Math.round(((trackingOnlyCount + junkCount) / total) * 100) : 0;
-      const staleRate        = activeCount > 0 ? Math.round((staleCount / activeCount) * 100) : 0;
-      const noAnswerEscRate  = activeCount > 0 ? Math.round((noAnswerEscCount / activeCount) * 100) : 0;
-      const callbackAbuseRate= activeCount > 0 ? Math.round((callbackAbuseCount / activeCount) * 100) : 0;
+      const identityRate =
+        total > 0 ? Math.round((identifiedCount / total) * 100) : 0;
+      const phoneRate = total > 0 ? Math.round((phoneCount / total) * 100) : 0;
+      const emailRate = total > 0 ? Math.round((emailCount / total) * 100) : 0;
+      const conversionRate =
+        total > 0 ? Math.round((convertedCount / total) * 100) : 0;
+      const noiseRate =
+        total > 0
+          ? Math.round(((trackingOnlyCount + junkCount) / total) * 100)
+          : 0;
+      const staleRate =
+        activeCount > 0 ? Math.round((staleCount / activeCount) * 100) : 0;
+      const noAnswerEscRate =
+        activeCount > 0
+          ? Math.round((noAnswerEscCount / activeCount) * 100)
+          : 0;
+      const callbackAbuseRate =
+        activeCount > 0
+          ? Math.round((callbackAbuseCount / activeCount) * 100)
+          : 0;
 
       const reliability = AnalyticsService.computeSourceReliability(
-        identityRate, noiseRate, archivedInvalid,
+        identityRate,
+        noiseRate,
+        archivedInvalid,
       );
 
       return {
-        source:              r.source,
-        totalLeadCount:      total,
-        activeLeadCount:     activeCount,
-        convertedLeadCount:  convertedCount,
-        lostLeadCount:       lostCount,
+        source: r.source,
+        totalLeadCount: total,
+        activeLeadCount: activeCount,
+        convertedLeadCount: convertedCount,
+        lostLeadCount: lostCount,
         archivedInvalidCount: archivedInvalid,
         trackingOnlyCount,
         junkCount,
@@ -1161,60 +1358,93 @@ export class AnalyticsService {
         emailRate,
         conversionRate,
         noiseRate,
-        staleLeadRate:          staleRate,
+        staleLeadRate: staleRate,
         noAnswerEscalationRate: noAnswerEscRate,
         callbackAbuseRate,
-        avgResponseMinutes:     responseMap[r.source] ?? null,
-        avgDaysToConversion:    r.avg_days_to_conversion !== null ? +r.avg_days_to_conversion : null,
+        avgResponseMinutes: responseMap[r.source] ?? null,
+        avgDaysToConversion:
+          r.avg_days_to_conversion !== null ? +r.avg_days_to_conversion : null,
         reliability,
       };
     });
 
     // ── 5. Generate deterministic issues list ─────────────────────────────────
-    const issues: Array<{ severity: 'CRITICAL'|'WARNING'; source: string; message: string }> = [];
+    const issues: Array<{
+      severity: 'CRITICAL' | 'WARNING';
+      source: string;
+      message: string;
+    }> = [];
     for (const s of sources) {
       if (s.totalLeadCount === 0) continue;
       if (s.identityRate < 20) {
-        issues.push({ severity: 'CRITICAL', source: s.source,
-          message: `${s.source}: ${s.identityRate}% identity rate — most ingested leads have no phone or email. Webhook field mapping may be broken.` });
+        issues.push({
+          severity: 'CRITICAL',
+          source: s.source,
+          message: `${s.source}: ${s.identityRate}% identity rate — most ingested leads have no phone or email. Webhook field mapping may be broken.`,
+        });
       } else if (s.identityRate < 60) {
-        issues.push({ severity: 'WARNING', source: s.source,
-          message: `${s.source}: low identity rate (${s.identityRate}%) — integration is missing contact fields on many leads.` });
+        issues.push({
+          severity: 'WARNING',
+          source: s.source,
+          message: `${s.source}: low identity rate (${s.identityRate}%) — integration is missing contact fields on many leads.`,
+        });
       }
       if (s.noiseRate > 50) {
-        issues.push({ severity: 'CRITICAL', source: s.source,
-          message: `${s.source}: ${s.noiseRate}% tracking/junk ratio — platform is generating mostly non-actionable anonymous traffic.` });
+        issues.push({
+          severity: 'CRITICAL',
+          source: s.source,
+          message: `${s.source}: ${s.noiseRate}% tracking/junk ratio — platform is generating mostly non-actionable anonymous traffic.`,
+        });
       } else if (s.noiseRate > 20) {
-        issues.push({ severity: 'WARNING', source: s.source,
-          message: `${s.source}: ${s.noiseRate}% of leads are tracking-only or junk — high noise ratio.` });
+        issues.push({
+          severity: 'WARNING',
+          source: s.source,
+          message: `${s.source}: ${s.noiseRate}% of leads are tracking-only or junk — high noise ratio.`,
+        });
       }
       if (s.archivedInvalidCount > 5) {
-        issues.push({ severity: 'CRITICAL', source: s.source,
-          message: `${s.source}: ${s.archivedInvalidCount} leads archived for missing identity — repeated ingestion without contact data.` });
+        issues.push({
+          severity: 'CRITICAL',
+          source: s.source,
+          message: `${s.source}: ${s.archivedInvalidCount} leads archived for missing identity — repeated ingestion without contact data.`,
+        });
       } else if (s.archivedInvalidCount > 0) {
-        issues.push({ severity: 'WARNING', source: s.source,
-          message: `${s.source}: ${s.archivedInvalidCount} lead(s) archived for missing identity — verify webhook payload mapping.` });
+        issues.push({
+          severity: 'WARNING',
+          source: s.source,
+          message: `${s.source}: ${s.archivedInvalidCount} lead(s) archived for missing identity — verify webhook payload mapping.`,
+        });
       }
       if (s.duplicateCount > 10) {
-        issues.push({ severity: 'WARNING', source: s.source,
-          message: `${s.source}: ${s.duplicateCount} duplicate phone collisions — platform is re-submitting existing contacts.` });
+        issues.push({
+          severity: 'WARNING',
+          source: s.source,
+          message: `${s.source}: ${s.duplicateCount} duplicate phone collisions — platform is re-submitting existing contacts.`,
+        });
       }
       if (s.noAnswerEscalationRate > 30) {
-        issues.push({ severity: 'WARNING', source: s.source,
-          message: `${s.source}: ${s.noAnswerEscalationRate}% of active leads have escalated no-answers — contact quality or timing issue.` });
+        issues.push({
+          severity: 'WARNING',
+          source: s.source,
+          message: `${s.source}: ${s.noAnswerEscalationRate}% of active leads have escalated no-answers — contact quality or timing issue.`,
+        });
       }
     }
     // CRITICAL first, then WARNING
-    issues.sort((a, b) => (a.severity === 'CRITICAL' ? -1 : 1) - (b.severity === 'CRITICAL' ? -1 : 1));
+    issues.sort(
+      (a, b) =>
+        (a.severity === 'CRITICAL' ? -1 : 1) -
+        (b.severity === 'CRITICAL' ? -1 : 1),
+    );
 
     // ── 6. Duplicate pattern summary ──────────────────────────────────────────
     const patterns = dupRows.map((r: any) => ({
-      phone:           r.phone,
+      phone: r.phone,
       occurrenceCount: +r.occurrence_count,
-      sourceCount:     +r.source_count,
-      sources:         r.sources,
-      firstSeen:       r.first_seen,
-      lastSeen:        r.last_seen,
+      sourceCount: +r.source_count,
+      sources: r.sources,
+      firstSeen: r.first_seen,
+      lastSeen: r.last_seen,
     }));
 
     return {
@@ -1313,22 +1543,28 @@ export class AnalyticsService {
     `);
 
     return rows.map((r: any) => ({
-      userId:                  +r.user_id,
-      userName:                r.user_name,
-      overdueLeadCount:        +r.overdue_lead_count,
-      staleLeadCount:          +r.stale_lead_count,
-      callbackAbuseCount:      +r.callback_abuse_count,
-      noAnswerEscalations:     +r.no_answer_escalations,
-      avgFirstResponseMinutes: r.avg_first_response_minutes !== null ? Math.round(+r.avg_first_response_minutes) : null,
-      reassignmentCount:       +r.reassignment_count,
-      snoozeAbuseCount:        +r.snooze_abuse_count,
+      userId: +r.user_id,
+      userName: r.user_name,
+      overdueLeadCount: +r.overdue_lead_count,
+      staleLeadCount: +r.stale_lead_count,
+      callbackAbuseCount: +r.callback_abuse_count,
+      noAnswerEscalations: +r.no_answer_escalations,
+      avgFirstResponseMinutes:
+        r.avg_first_response_minutes !== null
+          ? Math.round(+r.avg_first_response_minutes)
+          : null,
+      reassignmentCount: +r.reassignment_count,
+      snoozeAbuseCount: +r.snooze_abuse_count,
     }));
   }
 
   // ── Top campaigns by UTM ──────────────────────────────────────────────────────
 
-  async getTopCampaigns(days = 30): Promise<{ campaign: string; source: string; count: number }[]> {
-    const rows = await this.ds.query(`
+  async getTopCampaigns(
+    days = 30,
+  ): Promise<{ campaign: string; source: string; count: number }[]> {
+    const rows = await this.ds.query(
+      `
       SELECT
         COALESCE(raw_payload->>'utm_campaign', '(direct)') AS campaign,
         COALESCE(raw_payload->>'utm_source', source)       AS source,
@@ -1339,13 +1575,23 @@ export class AnalyticsService {
       GROUP BY campaign, source
       ORDER BY count DESC
       LIMIT 20
-    `, [days]);
-    return rows.map((r: any) => ({ campaign: r.campaign, source: r.source, count: +r.count }));
+    `,
+      [days],
+    );
+    return rows.map((r: any) => ({
+      campaign: r.campaign,
+      source: r.source,
+      count: +r.count,
+    }));
   }
 
   // ── Conversion funnel: Leads → Quotations → Orders ───────────────────────────
 
-  async getConversionFunnel(): Promise<{ leads: number; quotations: number; orders: number }> {
+  async getConversionFunnel(): Promise<{
+    leads: number;
+    quotations: number;
+    orders: number;
+  }> {
     const [r] = await this.ds.query(`
       SELECT
         (SELECT COUNT(*) FROM leads WHERE is_active = true)                     AS leads,
@@ -1353,9 +1599,9 @@ export class AnalyticsService {
         (SELECT COUNT(*) FROM orders  WHERE status NOT IN ('CANCELLED','DRAFT')) AS orders
     `);
     return {
-      leads:      +r.leads,
+      leads: +r.leads,
       quotations: +r.quotations,
-      orders:     +r.orders,
+      orders: +r.orders,
     };
   }
 }

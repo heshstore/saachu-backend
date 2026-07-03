@@ -7,10 +7,7 @@ import { NotificationsModule } from '../notifications/notification.module';
 import { User } from '../users/entities/user.entity';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([SlaEvent, User]),
-    NotificationsModule,
-  ],
+  imports: [TypeOrmModule.forFeature([SlaEvent, User]), NotificationsModule],
   controllers: [SlaController],
   providers: [SlaEngineService],
   exports: [SlaEngineService],

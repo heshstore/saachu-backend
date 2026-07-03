@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MarketingCampaign } from '../entities/marketing-campaign.entity';
@@ -8,12 +13,12 @@ import { MarketingWhatsAppService } from '../marketing-whatsapp.service';
 
 // Fixed rules applied to every promotion campaign — immutable at create time.
 const PROMOTION_RULES = {
-  campaign_type:      'promotion',
-  send_window_start:  '10:00',
-  send_window_end:    '18:00',
-  random_delay_min:   30,
-  random_delay_max:   120,
-  daily_target:       9999, // system-managed; queue generation drives actual volume
+  campaign_type: 'promotion',
+  send_window_start: '10:00',
+  send_window_end: '18:00',
+  random_delay_min: 30,
+  random_delay_max: 120,
+  daily_target: 9999, // system-managed; queue generation drives actual volume
 } as const;
 
 @Injectable()
@@ -52,7 +57,12 @@ export class CampaignsService {
   private static _generatePromoId(): string {
     const d = new Date();
     const date = d.toISOString().slice(0, 10).replace(/-/g, '');
-    const rand = Math.random().toString(36).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4).padEnd(4, '0');
+    const rand = Math.random()
+      .toString(36)
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '')
+      .slice(0, 4)
+      .padEnd(4, '0');
     return `PROMO-${date}-${rand}`;
   }
 
@@ -61,16 +71,25 @@ export class CampaignsService {
    * Format: PROMO-T{index}-YYYYMMDD-{seq:03}
    * e.g. PROMO-T1-20260607-001
    */
-  static generateDailyPromoId(telecallerIndex: number, date: Date, seq = 1): string {
+  static generateDailyPromoId(
+    telecallerIndex: number,
+    date: Date,
+    seq = 1,
+  ): string {
     const dateStr = date.toISOString().slice(0, 10).replace(/-/g, '');
     return `PROMO-T${telecallerIndex}-${dateStr}-${String(seq).padStart(3, '0')}`;
   }
 
-  async update(id: string, dto: Partial<MarketingCampaign>): Promise<MarketingCampaign> {
+  async update(
+    id: string,
+    dto: Partial<MarketingCampaign>,
+  ): Promise<MarketingCampaign> {
     const existing = await this.findOne(id);
     // Promotion rule fields cannot be overridden after creation.
     if (existing.is_promotion) {
-      for (const key of Object.keys(PROMOTION_RULES) as (keyof typeof PROMOTION_RULES)[]) {
+      for (const key of Object.keys(
+        PROMOTION_RULES,
+      ) as (keyof typeof PROMOTION_RULES)[]) {
         delete (dto as any)[key];
       }
     }
@@ -81,17 +100,25 @@ export class CampaignsService {
   async remove(id: string): Promise<void> {
     const c = await this.findOne(id);
     if (c.status === CampaignStatus.RUNNING) {
-      throw new BadRequestException('Pause or cancel the campaign before deleting');
+      throw new BadRequestException(
+        'Pause or cancel the campaign before deleting',
+      );
     }
     await this.repo.delete(id);
   }
 
-  async launch(id: string): Promise<{ campaign: MarketingCampaign; queued: number }> {
+  async launch(
+    id: string,
+  ): Promise<{ campaign: MarketingCampaign; queued: number }> {
     const campaign = await this.findOne(id);
 
     const launchable = [
-      CampaignStatus.DRAFT, CampaignStatus.PAUSED, CampaignStatus.SCHEDULED,
-      CampaignStatus.COMPLETED, CampaignStatus.PARTIALLY_COMPLETED, CampaignStatus.FAILED,
+      CampaignStatus.DRAFT,
+      CampaignStatus.PAUSED,
+      CampaignStatus.SCHEDULED,
+      CampaignStatus.COMPLETED,
+      CampaignStatus.PARTIALLY_COMPLETED,
+      CampaignStatus.FAILED,
     ];
     if (!launchable.includes(campaign.status)) {
       throw new BadRequestException(
@@ -99,7 +126,9 @@ export class CampaignsService {
       );
     }
     if (!campaign.template_id) {
-      throw new BadRequestException('Set a template_id on the campaign before launching');
+      throw new BadRequestException(
+        'Set a template_id on the campaign before launching',
+      );
     }
 
     // Launch gate: at least one WA number must be connected.
@@ -110,21 +139,24 @@ export class CampaignsService {
     }
 
     await this.repo.update(id, { status: CampaignStatus.RUNNING });
-    const queued = await this.queueService.buildFromCampaign({ ...campaign, status: CampaignStatus.RUNNING });
+    const queued = await this.queueService.buildFromCampaign({
+      ...campaign,
+      status: CampaignStatus.RUNNING,
+    });
 
     this.logger.log(
       `[CAMPAIGN_LAUNCH] id=${id} name="${campaign.campaign_name}" ` +
-      `is_promotion=${campaign.is_promotion} test_mode=${campaign.test_mode} queued=${queued}`,
+        `is_promotion=${campaign.is_promotion} test_mode=${campaign.test_mode} queued=${queued}`,
     );
     this.logger.log(
       `[CAMPAIGN_AUDIT] launch_complete: id=${id} name="${campaign.campaign_name}" ` +
-      `template_id=${campaign.template_id ?? 'none'} test_mode=${campaign.test_mode} ` +
-      `is_promotion=${campaign.is_promotion} queued_items=${queued}`,
+        `template_id=${campaign.template_id ?? 'none'} test_mode=${campaign.test_mode} ` +
+        `is_promotion=${campaign.is_promotion} queued_items=${queued}`,
     );
     if (queued === 0) {
       this.logger.warn(
         `[CAMPAIGN_AUDIT] launch_zero_queue: id=${id} name="${campaign.campaign_name}" — ` +
-        `campaign launched but ZERO items were queued. Check: audience eligibility, number connectivity, daily_target cap.`,
+          `campaign launched but ZERO items were queued. Check: audience eligibility, number connectivity, daily_target cap.`,
       );
     }
 
@@ -137,7 +169,9 @@ export class CampaignsService {
    * the sender tick continues processing them until the queue drains.
    * Use cancel() to immediately stop all sends (marks PENDING items as SKIPPED).
    */
-  async pause(id: string): Promise<{ campaign: MarketingCampaign; warning: string }> {
+  async pause(
+    id: string,
+  ): Promise<{ campaign: MarketingCampaign; warning: string }> {
     const campaign = await this.findOne(id);
     if (campaign.status !== CampaignStatus.RUNNING) {
       throw new BadRequestException('Campaign is not running');
@@ -146,16 +180,19 @@ export class CampaignsService {
     const updated = await this.findOne(id);
     this.logger.warn(
       `[CAMPAIGN_PAUSED] id=${id} name="${campaign.campaign_name}" — ` +
-      `status=PAUSED. Existing PENDING queue items WILL CONTINUE TO SEND. ` +
-      `Use Cancel to immediately stop all sends (marks PENDING as SKIPPED).`,
+        `status=PAUSED. Existing PENDING queue items WILL CONTINUE TO SEND. ` +
+        `Use Cancel to immediately stop all sends (marks PENDING as SKIPPED).`,
     );
     return {
       campaign: updated,
-      warning: 'Pause stops future queue creation. Existing pending messages will continue to send. Use Cancel to immediately stop all sends.',
+      warning:
+        'Pause stops future queue creation. Existing pending messages will continue to send. Use Cancel to immediately stop all sends.',
     };
   }
 
-  async resume(id: string): Promise<{ campaign: MarketingCampaign; queued: number }> {
+  async resume(
+    id: string,
+  ): Promise<{ campaign: MarketingCampaign; queued: number }> {
     return this.launch(id);
   }
 
@@ -206,14 +243,14 @@ export class CampaignsService {
       // No action needed — the campaign is already in its correct terminal state.
       this.logger.log(
         `[CAMPAIGN_COMPLETION_RACE_GUARD] id=${campaignId} — WHERE status=running matched 0 rows; ` +
-        `concurrent evaluation already transitioned campaign (no-op)`,
+          `concurrent evaluation already transitioned campaign (no-op)`,
       );
       return;
     }
     this.logger.log(
       `[CAMPAIGN_COMPLETION] id=${campaignId} name="${campaign.campaign_name}" ` +
-      `→ ${terminal} (sent=${counts.sent} failed=${counts.failed} skipped=${counts.skipped} ` +
-      `affected=${affected ?? 'unknown'})`,
+        `→ ${terminal} (sent=${counts.sent} failed=${counts.failed} skipped=${counts.skipped} ` +
+        `affected=${affected ?? 'unknown'})`,
     );
   }
 }

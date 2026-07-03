@@ -1,6 +1,12 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column, CreateDateColumn,
-  UpdateDateColumn, ManyToOne, JoinColumn, Index,
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
+  Index,
 } from 'typeorm';
 
 /**
@@ -9,84 +15,84 @@ import {
  * Only mutated by logAction() (outcome-driven) and update() (status-driven).
  */
 export enum WorkflowState {
-  FIRST_CALL      = 'FIRST_CALL',       // New lead, no calls made yet
-  FOLLOW_UP       = 'FOLLOW_UP',        // Contacted positively, standard follow-up
-  NO_ANSWER_1     = 'NO_ANSWER_1',      // 1 no-answer, retry at different time
-  NO_ANSWER_2     = 'NO_ANSWER_2',      // 2 no-answers, try different slot + WA
-  NO_ANSWER_ESC   = 'NO_ANSWER_ESC',    // 3+ no-answers, escalate to manager
-  CALLBACK_WAIT   = 'CALLBACK_WAIT',    // Customer requested callback at specific time
-  SEND_QUOTATION  = 'SEND_QUOTATION',   // Interested — create and send quotation now
-  CHASE_QUOTATION = 'CHASE_QUOTATION',  // Quotation sent, follow up on decision
-  NEGOTIATING     = 'NEGOTIATING',      // Post-quotation price/term discussion
-  NURTURE         = 'NURTURE',          // Not interested now, re-engage scheduled
-  CONVERTED       = 'CONVERTED',        // Deal closed
-  LOST            = 'LOST',             // Permanently closed
+  FIRST_CALL = 'FIRST_CALL', // New lead, no calls made yet
+  FOLLOW_UP = 'FOLLOW_UP', // Contacted positively, standard follow-up
+  NO_ANSWER_1 = 'NO_ANSWER_1', // 1 no-answer, retry at different time
+  NO_ANSWER_2 = 'NO_ANSWER_2', // 2 no-answers, try different slot + WA
+  NO_ANSWER_ESC = 'NO_ANSWER_ESC', // 3+ no-answers, escalate to manager
+  CALLBACK_WAIT = 'CALLBACK_WAIT', // Customer requested callback at specific time
+  SEND_QUOTATION = 'SEND_QUOTATION', // Interested — create and send quotation now
+  CHASE_QUOTATION = 'CHASE_QUOTATION', // Quotation sent, follow up on decision
+  NEGOTIATING = 'NEGOTIATING', // Post-quotation price/term discussion
+  NURTURE = 'NURTURE', // Not interested now, re-engage scheduled
+  CONVERTED = 'CONVERTED', // Deal closed
+  LOST = 'LOST', // Permanently closed
 }
 
 export enum OutcomeType {
-  INTERESTED     = 'INTERESTED',
-  NO_ANSWER      = 'NO_ANSWER',
-  LATER          = 'LATER',
+  INTERESTED = 'INTERESTED',
+  NO_ANSWER = 'NO_ANSWER',
+  LATER = 'LATER',
   NOT_INTERESTED = 'NOT_INTERESTED',
 }
 
 export enum LeadQuality {
-  QUALIFIED     = 'QUALIFIED',     // has phone + email
-  PARTIAL       = 'PARTIAL',       // has phone OR email (not both)
+  QUALIFIED = 'QUALIFIED', // has phone + email
+  PARTIAL = 'PARTIAL', // has phone OR email (not both)
   TRACKING_ONLY = 'TRACKING_ONLY', // no contact info but has product interest
-  DUPLICATE     = 'DUPLICATE',     // phone matched an existing lead
-  JUNK          = 'JUNK',          // no phone, no email, no product interest
+  DUPLICATE = 'DUPLICATE', // phone matched an existing lead
+  JUNK = 'JUNK', // no phone, no email, no product interest
   AUTO_CAPTURED = 'AUTO_CAPTURED', // is_phone_valid=false (bot/fake number)
 }
 
 export enum LeadSource {
   // Digital / inbound (auto-captured)
-  SHOPIFY          = 'SHOPIFY',
-  META             = 'META',
-  GOOGLE           = 'GOOGLE',
-  INDIAMART        = 'INDIAMART',
-  LINKEDIN         = 'LINKEDIN',
-  WHATSAPP         = 'WHATSAPP',
-  DIRECT           = 'DIRECT',
+  SHOPIFY = 'SHOPIFY',
+  META = 'META',
+  GOOGLE = 'GOOGLE',
+  INDIAMART = 'INDIAMART',
+  LINKEDIN = 'LINKEDIN',
+  WHATSAPP = 'WHATSAPP',
+  DIRECT = 'DIRECT',
   // High-trust manual sources (phone optional — physical context)
-  WALK_IN          = 'WALK_IN',
-  REFERRAL         = 'REFERRAL',
-  EXHIBITION       = 'EXHIBITION',
-  FIELD_VISIT      = 'FIELD_VISIT',
-  OLD_CUSTOMER     = 'OLD_CUSTOMER',
+  WALK_IN = 'WALK_IN',
+  REFERRAL = 'REFERRAL',
+  EXHIBITION = 'EXHIBITION',
+  FIELD_VISIT = 'FIELD_VISIT',
+  OLD_CUSTOMER = 'OLD_CUSTOMER',
   DEALER_REFERENCE = 'DEALER_REFERENCE',
-  BUSINESS_CARD    = 'BUSINESS_CARD',
-  IMPORTED         = 'IMPORTED',
+  BUSINESS_CARD = 'BUSINESS_CARD',
+  IMPORTED = 'IMPORTED',
 }
 
 export enum LeadStatus {
-  NEW        = 'NEW',
-  CONTACTED  = 'CONTACTED',
+  NEW = 'NEW',
+  CONTACTED = 'CONTACTED',
   INTERESTED = 'INTERESTED',
-  QUOTATION  = 'QUOTATION',
-  CONVERTED  = 'CONVERTED',
-  LOST       = 'LOST',
+  QUOTATION = 'QUOTATION',
+  CONVERTED = 'CONVERTED',
+  LOST = 'LOST',
 }
 
 export enum LeadPriority {
-  LOW    = 'LOW',
+  LOW = 'LOW',
   MEDIUM = 'MEDIUM',
-  HIGH   = 'HIGH',
+  HIGH = 'HIGH',
 }
 
 export enum LeadChannel {
   WHATSAPP = 'WHATSAPP',
-  CALL     = 'CALL',
-  FORM     = 'FORM',
+  CALL = 'CALL',
+  FORM = 'FORM',
 }
 
 export enum LeadStage {
-  NEW       = 'NEW',
+  NEW = 'NEW',
   CONTACTED = 'CONTACTED',
   QUALIFIED = 'QUALIFIED',
-  QUOTED    = 'QUOTED',
-  WON       = 'WON',
-  LOST      = 'LOST',
+  QUOTED = 'QUOTED',
+  WON = 'WON',
+  LOST = 'LOST',
 }
 
 @Index(['phone'])

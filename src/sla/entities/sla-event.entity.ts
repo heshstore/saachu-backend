@@ -6,14 +6,14 @@ import {
   Index,
 } from 'typeorm';
 
-export type SlaStatus   = 'ACTIVE' | 'WARNING' | 'ESCALATED' | 'RESOLVED';
-export type SlaModule   = 'CRM' | 'PRODUCTION' | 'ACCOUNTS' | 'DISPATCH';
+export type SlaStatus = 'ACTIVE' | 'WARNING' | 'ESCALATED' | 'RESOLVED';
+export type SlaModule = 'CRM' | 'PRODUCTION' | 'ACCOUNTS' | 'DISPATCH';
 export type SlaPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
 @Entity('sla_events')
-@Index('idx_sla_status',   ['status'])
-@Index('idx_sla_entity',   ['entity_type', 'entity_id'])
-@Index('idx_sla_user',     ['assigned_user_id'])
+@Index('idx_sla_status', ['status'])
+@Index('idx_sla_entity', ['entity_type', 'entity_id'])
+@Index('idx_sla_user', ['assigned_user_id'])
 @Index('idx_sla_deadline', ['sla_deadline'])
 export class SlaEvent {
   @PrimaryGeneratedColumn('uuid')

@@ -5,9 +5,7 @@ import { FinanceOpsController } from './finance-ops.controller';
 import { FinanceOpsListener } from './finance-ops.listener';
 
 @Module({
-  imports: [
-    OrdersModule,
-  ],
+  imports: [OrdersModule],
   controllers: [FinanceOpsController],
   providers: [FinanceOpsService, FinanceOpsListener],
   exports: [FinanceOpsService],

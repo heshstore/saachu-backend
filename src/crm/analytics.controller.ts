@@ -1,4 +1,12 @@
-import { Controller, ForbiddenException, Get, Param, ParseIntPipe, Query, Request } from '@nestjs/common';
+import {
+  Controller,
+  ForbiddenException,
+  Get,
+  Param,
+  ParseIntPipe,
+  Query,
+  Request,
+} from '@nestjs/common';
 import { AnalyticsService } from './analytics.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 import { CRM_FULL_ACCESS_ROLES } from './crm.constants';
@@ -33,7 +41,10 @@ export class AnalyticsController {
 
   @Get('performance/:userId')
   @RequirePermission('crm.analytics.self')
-  getPerformance(@Param('userId', ParseIntPipe) userId: number, @Request() req) {
+  getPerformance(
+    @Param('userId', ParseIntPipe) userId: number,
+    @Request() req,
+  ) {
     return this.analyticsService.getPerformance(userId, req.user);
   }
 
@@ -48,7 +59,10 @@ export class AnalyticsController {
   @Get('daily')
   @RequirePermission('crm.analytics.team')
   getDateBreakdown(@Query('days') days: string, @Request() req) {
-    return this.analyticsService.getDateBreakdown(parseInt(days) || 30, req.user);
+    return this.analyticsService.getDateBreakdown(
+      parseInt(days) || 30,
+      req.user,
+    );
   }
 
   @Get('telecaller/:id')
@@ -90,7 +104,9 @@ export class AnalyticsController {
   @Get('telecaller-metrics')
   @RequirePermission('crm.analytics.all')
   getTelecallerMetrics(@Request() req) {
-    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)) {
+    if (
+      !(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)
+    ) {
       throw new ForbiddenException('Telecaller metrics require manager access');
     }
     return this.analyticsService.getTelecallerMetrics(req.user);
@@ -125,8 +141,12 @@ export class AnalyticsController {
   @Get('telecaller-effectiveness')
   @RequirePermission('crm.analytics.all')
   getTelecallerEffectiveness(@Request() req) {
-    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)) {
-      throw new ForbiddenException('Telecaller effectiveness requires manager access');
+    if (
+      !(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)
+    ) {
+      throw new ForbiddenException(
+        'Telecaller effectiveness requires manager access',
+      );
     }
     return this.analyticsService.getTelecallerEffectiveness(req.user);
   }
@@ -141,8 +161,12 @@ export class AnalyticsController {
   @Get('today-by-source')
   @RequirePermission('crm.analytics.team')
   getTodayBySource(@Request() req) {
-    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)) {
-      throw new ForbiddenException('Today by source requires manager-level access');
+    if (
+      !(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)
+    ) {
+      throw new ForbiddenException(
+        'Today by source requires manager-level access',
+      );
     }
     return this.analyticsService.getTodayBySource();
   }
@@ -154,8 +178,12 @@ export class AnalyticsController {
   @Get('source-health')
   @RequirePermission('crm.analytics.all')
   getSourceHealth(@Request() req) {
-    if (!(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)) {
-      throw new ForbiddenException('Source health requires manager-level access');
+    if (
+      !(CRM_FULL_ACCESS_ROLES as readonly string[]).includes(req.user?.role)
+    ) {
+      throw new ForbiddenException(
+        'Source health requires manager-level access',
+      );
     }
     return this.analyticsService.getSourceHealth();
   }

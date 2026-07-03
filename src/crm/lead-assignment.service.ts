@@ -10,9 +10,9 @@ import { LeadSource } from './entities/lead.entity';
 // If a user exists but leads are never assigned to them, check that their role
 // exactly matches one of these strings (case-sensitive).
 const ELIGIBLE_ROLES = [
-  'Tele calling Executive',   // primary telecalling pool
-  'Territory Manager',        // handles regional leads
-  'Field Executive',          // on-ground field assignments
+  'Tele calling Executive', // primary telecalling pool
+  'Territory Manager', // handles regional leads
+  'Field Executive', // on-ground field assignments
 ];
 
 // crm_settings key for the global round-robin pointer.
@@ -64,7 +64,10 @@ export class LeadAssignmentService {
    * Designed to be called once per lead creation. The round-robin pointer is
    * advanced atomically inside a transaction to survive concurrent requests.
    */
-  async getNextAssignee(source: LeadSource, context?: Partial<AssignmentContext>): Promise<number | null> {
+  async getNextAssignee(
+    source: LeadSource,
+    context?: Partial<AssignmentContext>,
+  ): Promise<number | null> {
     const allEligible = await this.loadEligibleUsers();
     if (!allEligible.length) {
       this.logger.warn(
@@ -87,7 +90,7 @@ export class LeadAssignmentService {
     const assignedUser = candidates.find((c) => c.id === assignedId);
     this.logger.log(
       `[Assignment] source=${source} → user_id=${assignedId} (${assignedUser?.name ?? '?'})` +
-      (ctx.region ? ` region=${ctx.region}` : ''),
+        (ctx.region ? ` region=${ctx.region}` : ''),
     );
 
     return assignedId;
@@ -166,9 +169,10 @@ export class LeadAssignmentService {
       }
 
       const lastUserId = row.value ? parseInt(row.value, 10) : null;
-      const lastPos = (lastUserId && !isNaN(lastUserId))
-        ? candidates.findIndex((c) => c.id === lastUserId)
-        : -1;
+      const lastPos =
+        lastUserId && !isNaN(lastUserId)
+          ? candidates.findIndex((c) => c.id === lastUserId)
+          : -1;
 
       const nextIndex = (lastPos + 1) % candidates.length;
       const next = candidates[nextIndex];

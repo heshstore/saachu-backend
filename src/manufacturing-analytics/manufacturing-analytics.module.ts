@@ -11,7 +11,7 @@ import { ManufacturingAnalyticsController } from './manufacturing-analytics.cont
     TypeOrmModule.forFeature([DepartmentCostMaster, ProductionCostSnapshot]),
   ],
   controllers: [ManufacturingAnalyticsController],
-  providers:   [ManufacturingAnalyticsService, CostingSnapshotService],
-  exports:     [ManufacturingAnalyticsService, CostingSnapshotService],
+  providers: [ManufacturingAnalyticsService, CostingSnapshotService],
+  exports: [ManufacturingAnalyticsService, CostingSnapshotService],
 })
 export class ManufacturingAnalyticsModule {}

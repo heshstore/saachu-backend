@@ -1,10 +1,22 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  BadRequestException,
+} from '@nestjs/common';
+import { IsNull } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Order } from '../orders/entities/order.entity';
 import { Invoice } from './entities/invoice.entity';
 import { appConfig } from '../config/config';
-import { ORDER_SALESMAN_JOINS, ORDER_SALESMAN_SELECT } from '../shared/ownership.util';
+import {
+  ORDER_SALESMAN_JOINS,
+  ORDER_SALESMAN_SELECT,
+  enrichRowsWithCustomerEmail,
+  enrichRowsWithEmailCount,
+  enrichRowsWithActionCounts,
+} from '../shared/ownership.util';
 
 @Injectable()
 export class InvoiceService {
@@ -97,6 +109,7 @@ export class InvoiceService {
   async findOne(id: number) {
     const rows = await this.invoiceRepository.manager.query<any[]>(
       `SELECT inv.*, o.order_no, o.status AS order_status,
+              o.customer_id, o.customer_name, o.customer_phone,
               ${ORDER_SALESMAN_SELECT}
        FROM invoice inv
        JOIN orders o ON o.id = inv.order_id
@@ -106,6 +119,9 @@ export class InvoiceService {
       [id],
     );
     if (!rows.length) throw new NotFoundException('Invoice not found');
+    await enrichRowsWithCustomerEmail(this.invoiceRepository.manager.connection, rows);
+    await enrichRowsWithEmailCount(this.invoiceRepository.manager.connection, rows, 'invoice');
+    await enrichRowsWithActionCounts(this.invoiceRepository.manager.connection, rows, 'invoice');
     return rows[0];
   }
 
@@ -115,5 +131,105 @@ export class InvoiceService {
 
   applySplit(id: number, body: any) {
     return { id, body };
+  }
+
+  // ── Split billing extension ──────────────────────────────────────────────────
+  // New methods added inside the existing service class.
+  // All existing methods above are completely untouched.
+
+  private async generateSplitInvoiceNo(
+    billingCompany: 'PRODUCTION' | 'TRADING',
+  ): Promise<string> {
+    const seqName =
+      billingCompany === 'PRODUCTION'
+        ? 'production_invoice_no_seq'
+        : 'trading_invoice_no_seq';
+    const prefix = billingCompany === 'PRODUCTION' ? 'PINV' : 'TINV';
+    const rows = await this.invoiceRepository.manager.query<{ next: string }[]>(
+      `SELECT nextval($1) AS next`,
+      [seqName],
+    );
+    return `${prefix}-${new Date().getFullYear()}-${String(Number(rows[0].next)).padStart(4, '0')}`;
+  }
+
+  async createSplitFromOrder(
+    orderId: number,
+    billingCompany: 'PRODUCTION' | 'TRADING',
+    type: 'TALLY' | 'ESTIMATE' = 'TALLY',
+  ): Promise<Invoice> {
+    const order = await this.orderRepository.findOne({
+      where: { id: orderId },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+
+    // Guard: refuse to create a split invoice if a legacy (single) invoice already exists
+    const legacy = await this.invoiceRepository.findOne({
+      where: { order_id: orderId, billing_company: IsNull() },
+    });
+    if (legacy) {
+      throw new ConflictException(
+        `Order ${orderId} already has a legacy invoice. Use the standard invoice endpoint or void the legacy invoice first.`,
+      );
+    }
+
+    // Idempotency — return existing split invoice if already created
+    const existing = await this.invoiceRepository.findOne({
+      where: { order_id: orderId, billing_company: billingCompany },
+    });
+    if (existing) return existing;
+
+    // Filter items to this billing company only
+    const items = (order.items || []).filter(
+      (i) => i.billing_category === billingCompany,
+    );
+    if (items.length === 0) {
+      throw new BadRequestException(
+        `No items classified as ${billingCompany} on order ${orderId}. ` +
+          `Assign billing_category to order items before generating a split invoice.`,
+      );
+    }
+
+    // Total from filtered items only (not order.total_amount which aggregates both)
+    const total = items.reduce((s, i) => s + Number(i.amount), 0);
+
+    // Customer state for GST split — same logic as createFromOrder()
+    let customer: any = null;
+    if (order.customer_id) {
+      const rows = await this.orderRepository.manager.query<any[]>(
+        `SELECT id, "creditLimit", state FROM customer WHERE id = $1 LIMIT 1`,
+        [order.customer_id],
+      );
+      customer = rows[0] ?? null;
+    }
+    const customerState = (customer?.state || '').toLowerCase();
+    const isSameState = customerState === appConfig.companyState.toLowerCase();
+    const gstAmount = (total * 18) / 100;
+    const cgst = isSameState ? gstAmount / 2 : 0;
+    const sgst = isSameState ? gstAmount / 2 : 0;
+    const igst = isSameState ? 0 : gstAmount;
+
+    const invoice_no = await this.generateSplitInvoiceNo(billingCompany);
+
+    const invoice = this.invoiceRepository.create({
+      order_id: orderId,
+      billing_company: billingCompany,
+      invoice_no,
+      type,
+      total_amount: total,
+      status: 'PENDING',
+      gst_type: isSameState ? 'CGST_SGST' : 'IGST',
+      cgst,
+      sgst,
+      igst,
+    });
+
+    return this.invoiceRepository.save(invoice);
+  }
+
+  async findSplitByOrder(orderId: number): Promise<Invoice[]> {
+    return this.invoiceRepository.find({
+      where: { order_id: orderId },
+      order: { billing_company: 'ASC' },
+    });
   }
 }

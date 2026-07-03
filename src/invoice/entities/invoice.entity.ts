@@ -1,4 +1,9 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn } from 'typeorm';
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+} from 'typeorm';
 
 @Entity()
 export class Invoice {
@@ -46,4 +51,7 @@ export class Invoice {
 
   @CreateDateColumn()
   created_at: Date;
+
+  @Column({ nullable: true })
+  billing_company: string;
 }

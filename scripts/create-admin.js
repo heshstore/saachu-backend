@@ -1,13 +1,14 @@
+/* eslint-disable no-console */
+'use strict';
+const { resolveScriptDb } = require('./lib/script-db');
+const { url, ssl } = resolveScriptDb();
 const bcrypt = require('bcrypt');
 const { Client } = require('pg');
 
 async function run() {
   const hash = await bcrypt.hash('Saachu@2026', 10);
 
-  const client = new Client({
-    connectionString: 'postgresql://neondb_owner:npg_hlAOPvN2r6po@ep-noisy-pond-a1nmenkk-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require',
-    ssl: { rejectUnauthorized: false },
-  });
+  const client = new Client({ connectionString: url, ssl });
 
   await client.connect();
 

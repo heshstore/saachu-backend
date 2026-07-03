@@ -1,4 +1,12 @@
-import { Controller, Get, Post, Patch, Param, Body, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Param,
+  Body,
+  Query,
+} from '@nestjs/common';
 import { QueueService } from './queue.service';
 import { WhatsappMessageQueue } from '../entities/whatsapp-message-queue.entity';
 
@@ -16,7 +24,10 @@ export class QueueController {
     @Param('campaignId') campaignId: string,
     @Query('limit') limit?: string,
   ) {
-    return this.queueService.findByCampaign(campaignId, limit ? parseInt(limit, 10) : 200);
+    return this.queueService.findByCampaign(
+      campaignId,
+      limit ? parseInt(limit, 10) : 200,
+    );
   }
 
   @Post('enqueue')

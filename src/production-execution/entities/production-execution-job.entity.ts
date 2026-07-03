@@ -1,11 +1,21 @@
 import {
-  Entity, PrimaryGeneratedColumn, Column,
-  CreateDateColumn, UpdateDateColumn, OneToMany,
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  OneToMany,
 } from 'typeorm';
 import { ProductionJobStage } from './production-job-stage.entity';
 
 // PENDING → READY → IN_PROGRESS → COMPLETED | HOLD | CANCELLED
-export type ExecJobStatus = 'PENDING' | 'READY' | 'IN_PROGRESS' | 'HOLD' | 'COMPLETED' | 'CANCELLED';
+export type ExecJobStatus =
+  | 'PENDING'
+  | 'READY'
+  | 'IN_PROGRESS'
+  | 'HOLD'
+  | 'COMPLETED'
+  | 'CANCELLED';
 export type ExecJobPriority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
 
 @Entity('production_execution_jobs')

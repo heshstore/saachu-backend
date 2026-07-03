@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ShopifyCatalogItem } from './entities/shopify-catalog-item.entity';
+import { clearItemsCache } from '../items/items.service';
 
 export interface SyncVariantData {
   shopifyProductId: string;
@@ -72,11 +73,23 @@ export class ShopifyCatalogService {
       FROM shopify_catalog_items
     `);
     return {
-      syncTotal:      { items: Number(row.total_items ?? 0),              variants: Number(row.total_variants ?? 0) },
-      quotationReady: { items: Number(row.quot_ready_items ?? 0),         variants: Number(row.quot_ready_variants ?? 0) },
-      boqReady:       { items: Number(row.boq_ready_items ?? 0),          variants: Number(row.boq_ready_variants ?? 0) },
+      syncTotal: {
+        items: Number(row.total_items ?? 0),
+        variants: Number(row.total_variants ?? 0),
+      },
+      quotationReady: {
+        items: Number(row.quot_ready_items ?? 0),
+        variants: Number(row.quot_ready_variants ?? 0),
+      },
+      boqReady: {
+        items: Number(row.boq_ready_items ?? 0),
+        variants: Number(row.boq_ready_variants ?? 0),
+      },
       hiddenVariants: Number(row.hidden_variants ?? 0),
-      wholesaleReady: { items: Number(row.wholesale_ready_items ?? 0),    variants: Number(row.wholesale_ready_variants ?? 0) },
+      wholesaleReady: {
+        items: Number(row.wholesale_ready_items ?? 0),
+        variants: Number(row.wholesale_ready_variants ?? 0),
+      },
     };
   }
 
@@ -88,58 +101,89 @@ export class ShopifyCatalogService {
     return this.repo.findOneBy({ sku });
   }
 
-  async configure(id: number, data: {
-    hsnCode?: string; costPrice?: number; gst?: number;
-    mainCategoryType?: string | null; serviceSubtype?: string | null;
-  }) {
+  async configure(
+    id: number,
+    data: {
+      hsnCode?: string;
+      costPrice?: number;
+      gst?: number;
+      mainCategoryType?: string | null;
+      serviceSubtype?: string | null;
+    },
+  ) {
     if (data.gst !== undefined && data.gst !== null) {
       const n = Number(data.gst);
       if (n !== 0 && !ALLOWED_GST.includes(n)) {
-        throw new BadRequestException(`Invalid GST rate ${data.gst}. Allowed values: ${ALLOWED_GST.join(', ')}%`);
+        throw new BadRequestException(
+          `Invalid GST rate ${data.gst}. Allowed values: ${ALLOWED_GST.join(', ')}%`,
+        );
       }
     }
     const update: Partial<ShopifyCatalogItem> = {};
-    if (data.hsnCode          !== undefined) update.hsnCode          = data.hsnCode;
-    if (data.costPrice        !== undefined) update.costPrice        = Number(data.costPrice) || 0;
-    if (data.gst              !== undefined) update.gst              = Number(data.gst) || 0;
-    if (data.mainCategoryType !== undefined) update.mainCategoryType = data.mainCategoryType || null;
-    if (data.serviceSubtype   !== undefined) update.serviceSubtype   = data.serviceSubtype   || null;
+    if (data.hsnCode !== undefined) update.hsnCode = data.hsnCode;
+    if (data.costPrice !== undefined)
+      update.costPrice = Number(data.costPrice) || 0;
+    if (data.gst !== undefined) update.gst = Number(data.gst) || 0;
+    if (data.mainCategoryType !== undefined)
+      update.mainCategoryType = data.mainCategoryType || null;
+    if (data.serviceSubtype !== undefined)
+      update.serviceSubtype = data.serviceSubtype || null;
     await this.repo.update(id, update);
+    clearItemsCache();
     return this.repo.findOneBy({ id });
   }
 
   async ignoreSync(id: number) {
     await this.repo.update(id, { syncIgnored: true });
-    return { message: 'Item hidden from catalog and excluded from future syncs' };
+    clearItemsCache();
+    return {
+      message: 'Item hidden from catalog and excluded from future syncs',
+    };
   }
 
   async restore(id: number) {
     await this.repo.update(id, { syncIgnored: false });
+    clearItemsCache();
     return { message: 'Item restored' };
   }
 
   /** Bulk upsert called by Shopify sync — matches by shopifyVariantId */
-  async upsertFromSync(variants: SyncVariantData[]): Promise<{ inserted: number; updated: number; skipped: number; errors: number }> {
-    let inserted = 0, updated = 0, skipped = 0, errors = 0;
+  async upsertFromSync(variants: SyncVariantData[]): Promise<{
+    inserted: number;
+    updated: number;
+    skipped: number;
+    errors: number;
+  }> {
+    let inserted = 0,
+      updated = 0,
+      skipped = 0,
+      errors = 0;
 
     for (const v of variants) {
       try {
-        const existing = await this.repo.findOneBy({ shopifyVariantId: v.variantId });
+        const existing = await this.repo.findOneBy({
+          shopifyVariantId: v.variantId,
+        });
 
         if (existing) {
           if (existing.syncIgnored) {
-            this.logger.log(`[SYNC] Skipping sync-ignored item id=${existing.id} sku="${existing.sku}"`);
+            this.logger.log(
+              `[SYNC] Skipping sync-ignored item id=${existing.id} sku="${existing.sku}"`,
+            );
             skipped++;
             continue;
           }
-          await this.repo.update({ id: existing.id }, {
-            itemName:    v.title,
-            sku:         v.sku,
-            sellingPrice: v.price,
-            retailPrice:  v.price,
-            image:        v.image || existing.image || '',
-            shopifyProductId: v.shopifyProductId,
-          });
+          await this.repo.update(
+            { id: existing.id },
+            {
+              itemName: v.title,
+              sku: v.sku,
+              sellingPrice: v.price,
+              retailPrice: v.price,
+              image: v.image || existing.image || '',
+              shopifyProductId: v.shopifyProductId,
+            },
+          );
           updated++;
         } else {
           const itemCode = `SP_${v.shopifyProductId}_${v.variantId}`;
@@ -147,18 +191,18 @@ export class ShopifyCatalogService {
             itemCode,
             shopifyProductId: v.shopifyProductId,
             shopifyVariantId: v.variantId,
-            itemName:    v.title,
-            sku:         v.sku,
+            itemName: v.title,
+            sku: v.sku,
             sellingPrice: v.price,
-            retailPrice:  v.price,
+            retailPrice: v.price,
             wholesalePrice: 0,
-            image:        v.image || '',
-            unit:         'Nos',
-            hsnCode:      '',
-            gst:          0,
-            costPrice:    0,
-            syncIgnored:  false,
-            source:       'SHOPIFY',
+            image: v.image || '',
+            unit: 'Nos',
+            hsnCode: '',
+            gst: 0,
+            costPrice: 0,
+            syncIgnored: false,
+            source: 'SHOPIFY',
           });
           inserted++;
         }
@@ -168,31 +212,42 @@ export class ShopifyCatalogService {
       }
     }
 
+    clearItemsCache();
     return { inserted, updated, skipped, errors };
   }
 
   /** Called by ShopifyItems page bulk-configure flow */
-  async bulkConfigure(items: Array<{
-    sku: string; hsnCode: string; gst: number; costPrice: number;
-    wholesalePrice?: number; unit?: string;
-    mainCategoryType?: string | null; serviceSubtype?: string | null;
-  }>) {
+  async bulkConfigure(
+    items: Array<{
+      sku: string;
+      hsnCode: string;
+      gst: number;
+      costPrice: number;
+      wholesalePrice?: number;
+      unit?: string;
+      mainCategoryType?: string | null;
+      serviceSubtype?: string | null;
+    }>,
+  ) {
     const results = [];
     for (const item of items) {
       const existing = await this.repo.findOneBy({ sku: item.sku });
       if (!existing) continue;
       const update: Partial<ShopifyCatalogItem> = {
-        hsnCode:        item.hsnCode,
-        gst:            item.gst,
-        costPrice:      item.costPrice,
+        hsnCode: item.hsnCode,
+        gst: item.gst,
+        costPrice: item.costPrice,
         wholesalePrice: item.wholesalePrice ?? existing.wholesalePrice,
-        unit:           item.unit ?? existing.unit,
+        unit: item.unit ?? existing.unit,
       };
-      if (item.mainCategoryType !== undefined) update.mainCategoryType = item.mainCategoryType || null;
-      if (item.serviceSubtype   !== undefined) update.serviceSubtype   = item.serviceSubtype   || null;
+      if (item.mainCategoryType !== undefined)
+        update.mainCategoryType = item.mainCategoryType || null;
+      if (item.serviceSubtype !== undefined)
+        update.serviceSubtype = item.serviceSubtype || null;
       await this.repo.update({ id: existing.id }, update);
       results.push({ ...existing, ...item });
     }
+    clearItemsCache();
     return results;
   }
 }
