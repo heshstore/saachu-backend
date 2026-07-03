@@ -23,7 +23,7 @@ function sslOption(url) {
 async function abortIfInvalidIndexes(client, names) {
   const placeholders = names.map((_, i) => `$${i + 1}`).join(', ');
   const { rows } = await client.query(
-    `SELECT indexname FROM pg_index
+    `SELECT pg_class.relname AS indexname FROM pg_index
        JOIN pg_class ON pg_class.oid = pg_index.indexrelid
       WHERE pg_class.relname IN (${placeholders})
         AND NOT pg_index.indisvalid`,
