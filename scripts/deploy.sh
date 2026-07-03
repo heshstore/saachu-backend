@@ -251,16 +251,30 @@ else
 
   ECO_FILE="$BACKEND_ROOT/ecosystem.config.js"
   cp "$ECO_FILE" "${ECO_FILE}.pre-deploy.bak"
+
+  # Restore ecosystem.config.js if the script exits for ANY reason (including
+  # health-check failure in Step 6) before we've confirmed the deploy is good.
+  # Without this, a failed deploy leaves the local file stamped with the new
+  # version but uncommitted — a dirty tree that blocks the next deploy's
+  # pre-flight check (this exact bug bit the v2026.07.15 attempt).
+  restore_eco_on_failure() {
+    if [[ -f "${ECO_FILE}.pre-deploy.bak" ]]; then
+      mv "${ECO_FILE}.pre-deploy.bak" "$ECO_FILE"
+      log "Restored ecosystem.config.js (deploy did not complete successfully)"
+    fi
+  }
+  trap restore_eco_on_failure EXIT
+
   sed -i.bak "s/APP_VERSION: '[^']*'/APP_VERSION: '${VERSION}'/" "$ECO_FILE"
   sed -i.bak "s/DEPLOYED_AT: '[^']*'/DEPLOYED_AT: '${DEPLOYED_AT}'/" "$ECO_FILE"
   rm -f "${ECO_FILE}.bak"
 
   rsync -avz --delete "$BACKEND_ROOT/dist/" "${VPS_HOST}:${VPS_BACKEND_PATH}/dist/" \
-    || { mv "${ECO_FILE}.pre-deploy.bak" "$ECO_FILE"; fail "Backend dist rsync failed"; }
+    || fail "Backend dist rsync failed"
   rsync -avz "$BACKEND_ROOT/ecosystem.config.js" "${VPS_HOST}:${VPS_BACKEND_PATH}/" \
-    || { mv "${ECO_FILE}.pre-deploy.bak" "$ECO_FILE"; fail "ecosystem.config.js rsync failed"; }
+    || fail "ecosystem.config.js rsync failed"
   rsync -avz --delete "$FRONTEND_ROOT/build/" "${VPS_HOST}:${VPS_FRONTEND_PATH}/" \
-    || { mv "${ECO_FILE}.pre-deploy.bak" "$ECO_FILE"; fail "Frontend rsync failed"; }
+    || fail "Frontend rsync failed"
 
   # Sync register-deployment.js to VPS — required for deployment registration
   rsync -az "$SCRIPT_DIR/register-deployment.js" \
@@ -268,9 +282,7 @@ else
     || fail "Could not sync register-deployment.js to VPS — deployment aborted"
 
   ssh "$VPS_HOST" "source ~/.nvm/nvm.sh 2>/dev/null; cd ${VPS_BACKEND_PATH} && pm2 reload ecosystem.config.js --env production" \
-    || { mv "${ECO_FILE}.pre-deploy.bak" "$ECO_FILE"; fail "pm2 reload failed"; }
-
-  rm -f "${ECO_FILE}.pre-deploy.bak"
+    || fail "pm2 reload failed"
 fi
 
 # ── 6. Health verification (Phase 1: retry loop, 120s timeout) ───────────────
@@ -302,6 +314,12 @@ else
     fail "Health check failed after ${HEALTH_MAX_WAIT}s — backend did not report ${VERSION}. Last response: ${HEALTH}"
   fi
   log "Health OK after ${ELAPSED}s: $HEALTH"
+
+  # Health confirmed — the version bump in ecosystem.config.js is now the
+  # intended, permanent state. Disarm the restore-on-failure trap and drop
+  # the backup; Step 7 will commit this file as-is.
+  trap - EXIT
+  rm -f "${ECO_FILE}.pre-deploy.bak"
 fi
 
 # ── 7. Git tags — create, push (hard-fail), verify on remote ─────────────────
