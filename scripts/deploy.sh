@@ -35,7 +35,10 @@ DEPLOYED_AT="$(TZ=Asia/Kolkata date '+%Y-%m-%d %H:%M IST')"
 REHEARSE_ID="$(date +%Y%m%d-%H%M%S)"
 
 # Phase 1: health check tuning
-HEALTH_MAX_WAIT=120   # seconds — backend takes ~90s to start
+# 120s was too tight for `pm2 reload`'s graceful drain-then-start — a real,
+# healthy v2026.07.15 deploy was marked FAILED (no tags/DB registration) for
+# starting ~130s in. Widened with headroom.
+HEALTH_MAX_WAIT=240   # seconds
 HEALTH_POLL=10        # seconds between retries
 
 log()  { echo "[deploy] $*"; }
