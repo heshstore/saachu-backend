@@ -173,7 +173,19 @@ rsync -az "$SCRIPT_DIR/pg-dump-neon.sh" "$SCRIPT_DIR/install-pg17-client.sh" \
 BACKUP_CMD=$(cat <<EOS
 set -euo pipefail
 DEST="${VPS_BACKUP_ROOT}/${SNAPSHOT}"
-if [[ -d "\$DEST" ]]; then echo "Backup dir already exists: \$DEST"; exit 1; fi
+if [[ -d "\$DEST" ]]; then
+  MISSING=()
+  for f in manifest.json db-snapshot.sql backend-dist.tar.gz frontend-build.tar.gz ecosystem.config.js; do
+    [[ -f "\$DEST/\$f" ]] || MISSING+=("\$f")
+  done
+  if [[ \${#MISSING[@]} -eq 0 ]]; then
+    echo "Backup already exists and is complete — reusing: \$DEST"
+    echo "Backup OK — reused existing snapshot"
+    exit 0
+  fi
+  echo "Backup dir exists but is incomplete (missing: \${MISSING[*]}) — refusing to overwrite: \$DEST"
+  exit 1
+fi
 mkdir -p "\$DEST"
 
 # Ensure PG 17 client for Neon
