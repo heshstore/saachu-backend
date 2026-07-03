@@ -19,6 +19,14 @@ VPS_BACKEND_PATH="${VPS_BACKEND_PATH:-/root/Saachu-app}"
 VPS_FRONTEND_PATH="${VPS_FRONTEND_PATH:-/var/www/html}"
 VPS_BACKUP_ROOT="${VPS_BACKUP_ROOT:-/root/backups}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:4000/health/version}"
+# CRA loads .env.local for EVERY build (dev and prod) if it's present on the
+# machine running the build, and it takes precedence over .env.production.
+# frontend/.env.local is a gitignored local-dev convenience file that points
+# at http://localhost:4000 — force the real production API URL as an actual
+# shell env var here, since CRA's dotenv loader never overrides a variable
+# that's already set in the process environment. This makes the build
+# correct regardless of what .env.local happens to contain on any machine.
+PROD_FRONTEND_API_URL="${PROD_FRONTEND_API_URL:-https://crmhesh.duckdns.org}"
 REHEARSAL="${REHEARSAL:-0}"
 VALIDATE_ONLY="${VALIDATE_ONLY:-0}"
 VERSION=""
@@ -105,12 +113,19 @@ fi
 log "Step 2/8 — Build backend + frontend"
 
 (cd "$BACKEND_ROOT" && npm run build) || fail "Backend build failed"
-(cd "$FRONTEND_ROOT" && npm run build) || fail "Frontend build failed"
+(cd "$FRONTEND_ROOT" && REACT_APP_API_URL="$PROD_FRONTEND_API_URL" npm run build) \
+  || fail "Frontend build failed"
 
 [[ -f "$BACKEND_ROOT/dist/main.js" ]] || fail "Backend dist/main.js missing after build"
 MAIN_JS="$(ls "$FRONTEND_ROOT/build/static/js/main."*.js 2>/dev/null | head -1)"
 [[ -n "$MAIN_JS" ]] || fail "Frontend main.*.js bundle missing after build"
 BUNDLE_HASH="$(basename "$MAIN_JS" .js | sed 's/^main\.//')"
+
+# Guard: a localhost API URL baked into the production bundle means .env.local
+# (or similar) leaked into this build — this exact bug shipped v2026.07.12-14.
+if grep -q "localhost:4000\|127\.0\.0\.1:4000" "$MAIN_JS"; then
+  fail "Frontend bundle contains a localhost API URL — build environment is contaminated (check .env.local)"
+fi
 
 # ── 3. Capture SHAs + tag collision check ─────────────────────────────────────
 log "Step 3/8 — Capture commit SHAs"
