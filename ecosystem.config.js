@@ -11,8 +11,8 @@ module.exports = {
 
       env_production: {
         NODE_ENV: 'production',
-        APP_VERSION: 'v2026.07.18',
-        DEPLOYED_AT: '2026-07-04 19:57 IST',
+        APP_VERSION: 'v2026.07.19',
+        DEPLOYED_AT: '2026-07-04 22:05 IST',
         PORT: 4000,
         TZ: 'Asia/Kolkata',
         // Set CHROME_PATH here if google-chrome-stable is not at the default path.
