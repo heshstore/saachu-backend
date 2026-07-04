@@ -473,7 +473,7 @@ export class PdfService {
                       labelVal('Validity:',         validity),
                       { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 160, y2: 0, lineWidth: 0.4, lineColor: RULE }], margin: [0, 2, 0, 5] },
                       labelVal('Payment Terms:',    'Advance 70% & Before Dispatch 30%'),
-                      labelVal('Delivery Type:',    safe(data?.delivery_type || data?.delivery_by, ''), 0),
+                      labelVal('Delivery Location:', safe(data?.delivery_type || data?.delivery_by, ''), 0),
                     ],
                     margin: [5, 5, 5, 5],
                   },
@@ -568,7 +568,7 @@ export class PdfService {
                   ['Booking At',           qBookingAt           || '—'],
                   ['Goods Sent By',        qGoodsSentBy         || '—'],
                   ['Transport Payment By', qTransportPaymentBy  || '—'],
-                  ['Delivery Type',        qDeliveryType        || '—'],
+                  ['Delivery Location',    qDeliveryType        || '—'],
                   ['Delivery Instruction', qDeliveryInstructions|| '—'],
                 ].map(([label, value]) => ({
                   columns: [
@@ -958,7 +958,7 @@ export class PdfService {
                   ['Booking At',           bookingAt           || '—'],
                   ['Goods Sent By',        goodsSentBy         || '—'],
                   ['Transport Payment By', transportPaymentBy  || '—'],
-                  ['Delivery Type',        deliveryType        || '—'],
+                  ['Delivery Location',    deliveryType        || '—'],
                   ['Delivery Instruction', deliveryInstructions|| '—'],
                 ].map(([label, value]) => ({
                   columns: [
