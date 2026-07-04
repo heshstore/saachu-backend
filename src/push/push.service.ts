@@ -5,7 +5,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getMessaging, Messaging } from 'firebase-admin/messaging';
 import { PushToken } from './push-token.entity';
-import { Notification } from '../notifications/notification.entity';
+import { NotificationPayload } from '../notifications/notification.service';
 
 @Injectable()
 export class PushService implements OnModuleInit {
@@ -61,7 +61,7 @@ export class PushService implements OnModuleInit {
   @OnEvent('notification.created')
   async handleNotificationCreated(payload: {
     userId: number;
-    notification: Notification;
+    notification: NotificationPayload;
   }): Promise<void> {
     if (!this.messaging) return;
     await this.sendToUser(payload.userId, payload.notification);
@@ -69,7 +69,7 @@ export class PushService implements OnModuleInit {
 
   // ── FCM send ──────────────────────────────────────────────────────────────────
 
-  async sendToUser(userId: number, notification: Notification): Promise<void> {
+  async sendToUser(userId: number, notification: NotificationPayload): Promise<void> {
     if (!this.messaging) return;
 
     const rows = await this.tokenRepo.find({

@@ -126,7 +126,6 @@ export class NotificationEngineService {
 
   @OnEvent('job.completed')
   async onJobCompleted(job: ProductionJob): Promise<void> {
-    await this.notifService.clearResolvedNotifications('job', job.id);
     const managers = await this.userRepo.find({
       where: { role: 'Production Manager', is_active: true },
       select: ['id'],
@@ -232,10 +231,6 @@ export class NotificationEngineService {
     orderId: number;
     salesmanId?: number;
   }): Promise<void> {
-    await this.notifService.clearResolvedNotifications(
-      'order',
-      payload.orderId,
-    );
     if (!payload.salesmanId) return;
     const rule = NOTIFICATION_RULES['order.completed'];
     await this.notifService.createNotification({
@@ -511,24 +506,6 @@ export class NotificationEngineService {
       }
     } catch (err: any) {
       this.dbHealth.handleError(err, 'NotificationEngine.endOfDaySummary');
-    } finally {
-      this._running = false;
-    }
-  }
-
-  // ── Cron: Nightly Cleanup @ 02:00 ───────────────────────────────────────────
-
-  @Cron('0 2 * * *')
-  async cleanupNotifications(): Promise<void> {
-    if (this._running) return;
-    this._running = true;
-    try {
-      const removed = await this.notifService.deleteExpiredAndInactive();
-      this.logger.log(
-        `Cleanup: removed ${removed} expired/inactive notifications`,
-      );
-    } catch (err: any) {
-      this.dbHealth.handleError(err, 'NotificationEngine.cleanupNotifications');
     } finally {
       this._running = false;
     }
