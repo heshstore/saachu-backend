@@ -120,10 +120,13 @@ export class QuotationService {
     base_rate: number;
     billing_category: string | null;
     image: string | null;
+    unit: string | null;
   }> {
-    if (!sku) return { base_rate: 0, billing_category: null, image: null };
+    if (!sku)
+      return { base_rate: 0, billing_category: null, image: null, unit: null };
     const master = await this.itemsService.findBySku(sku);
-    if (!master) return { base_rate: 0, billing_category: null, image: null };
+    if (!master)
+      return { base_rate: 0, billing_category: null, image: null, unit: null };
     const base_rate = isWholesaler
       ? Number(master.wholesale_price || master.sellingPrice)
       : Number(master.retail_price || master.sellingPrice);
@@ -133,7 +136,12 @@ export class QuotationService {
         : master.mainCategoryType === 'TRADING'
           ? 'TRADING'
           : null;
-    return { base_rate, billing_category, image: master.image ?? null };
+    return {
+      base_rate,
+      billing_category,
+      image: master.image ?? null,
+      unit: master.unit ?? null,
+    };
   }
 
   /**
@@ -168,8 +176,12 @@ export class QuotationService {
     for (const item of rawItems || []) {
       const sku = (item.sku || '').trim();
       const rate = Number(item.rate) || 0;
-      const { base_rate, billing_category: masterCategory, image } =
-        await this.resolveBaseRate(sku, isWholesaler);
+      const {
+        base_rate,
+        billing_category: masterCategory,
+        image,
+        unit: masterUnit,
+      } = await this.resolveBaseRate(sku, isWholesaler);
 
       if (base_rate > 0 && rate < base_rate) {
         throw new BadRequestException(
@@ -198,6 +210,10 @@ export class QuotationService {
         (item.billing_category as string | null | undefined) ??
         masterCategory ??
         null;
+      // Unit of measure — frontend override takes precedence, else snapshot from
+      // the service-item/Shopify catalog master resolved above.
+      qi.unit =
+        (item.unit as string | null | undefined) ?? masterUnit ?? null;
 
       const lineTotal = qi.qty * qi.rate;
       // Flat ("fixed") discount is a per-piece rupee amount — must scale by
@@ -636,6 +652,7 @@ export class QuotationService {
       instruction: i.instruction,
       billing_category: i.billing_category ?? null,
       image_url: i.image_url ?? null,
+      unit: i.unit ?? null,
     }));
 
     const order = await this.ordersService.create(

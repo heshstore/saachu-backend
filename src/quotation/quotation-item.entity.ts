@@ -61,4 +61,8 @@ export class QuotationItem {
   /** Snapshot of the item master's photo URL at creation time. */
   @Column({ type: 'text', nullable: true })
   image_url: string;
+
+  /** Unit of measure — snapshot from the service-item/Shopify catalog master at creation time. */
+  @Column({ type: 'text', nullable: true })
+  unit: string;
 }

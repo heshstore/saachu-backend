@@ -281,6 +281,7 @@ export class OrdersService {
       // this is a pass-through snapshot of whatever image URL the client
       // (order form, or quotation-to-order conversion) already resolved.
       image_url: input.image_url || null,
+      unit: input.unit || null,
     };
   }
 

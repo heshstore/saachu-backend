@@ -56,6 +56,10 @@ export class OrderItem {
   @Column({ type: 'text', nullable: true })
   image_url: string;
 
+  /** Unit of measure — snapshot from the service-item/Shopify catalog master at creation time. */
+  @Column({ type: 'text', nullable: true })
+  unit: string;
+
   @Index('idx_order_item_order')
   @Column({ name: 'orderId', nullable: true })
   order_id: number;
