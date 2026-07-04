@@ -214,7 +214,7 @@ export class PdfService {
     const logoPath = this.resolveStaticImage('logo.png');
     const qrPath = this.resolveStaticImage('QR.jpg');
 
-    // Items table rows: S.No | Photo | Item/SKU/HSN | Instruction | Qty | UOM | [Disc] | Rate | GST | Amount
+    // Items table rows: S.No | Photo | Item/SKU/HSN | Instruction | Qty | Unit | [Disc] | Rate | GST | Amount
     // The Disc column only appears at all if at least one line item actually has a discount.
     const hasAnyDiscount = rows.some((it: any) => Number(it?.discount_value) > 0);
     const COLS = hasAnyDiscount ? 10 : 9;
@@ -289,7 +289,7 @@ export class PdfService {
         },
         { text: safe(it?.instruction || it?.instructions || it?.notes, ''), fontSize: 7, color: SLATE, margin: [0, 3, 0, 3] },
         { text: String(qty), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
-        { text: safe(it?.uom || it?.unit || '', ''), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
+        { text: safe(it?.unit || '', ''), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
         ...(hasAnyDiscount ? [discCell] : []),
         { text: inr(discVal > 0 ? discountedRate : rate), alignment: 'right', fontSize: 7.5, margin: [0, 5, 0, 0] },
         gstPct > 0
@@ -507,7 +507,7 @@ export class PdfService {
                 { text: 'Item / Name / HSN',  style: 'th' },
                 { text: 'Instruction',        style: 'th' },
                 { text: 'Qty',                style: 'th', alignment: 'center',  noWrap: true },
-                { text: 'UOM',                style: 'th', alignment: 'center',  noWrap: true },
+                { text: 'Unit',               style: 'th', alignment: 'center',  noWrap: true },
                 ...(hasAnyDiscount ? [{ text: 'Disc', style: 'th', alignment: 'center', noWrap: true }] : []),
                 { text: 'Rate (₹)',           style: 'th', alignment: 'right',   noWrap: true },
                 { text: 'GST Tax',            style: 'th', alignment: 'center',  noWrap: true },
@@ -698,7 +698,7 @@ export class PdfService {
     const logoPath = this.resolveStaticImage('logo.png');
     const qrPath = this.resolveStaticImage('QR.jpg');
 
-    // Items table: [S.No, Item Name, Instructions, Qty, UOM, [Disc], Rate, GST, Amount]
+    // Items table: [S.No, Item Name, Instructions, Qty, Unit, [Disc], Rate, GST, Amount]
     // The Disc column only appears at all if at least one line item actually has a discount.
     const hasAnyDiscount = rows.some((it: any) => Number(it?.discount_value) > 0);
     const itemRows: any[] = rows.map((it: any, i: number) => {
@@ -725,7 +725,7 @@ export class PdfService {
           color: SLATE,
         },
         { text: String(Number(it?.qty) || 0), alignment: 'center', fontSize: 9 },
-        { text: safe(it?.uom || it?.unit || '', ''), alignment: 'center', fontSize: 9 },
+        { text: safe(it?.unit || '', ''), alignment: 'center', fontSize: 9 },
         ...(hasAnyDiscount ? [{ text: disc, alignment: 'center', fontSize: 9 }] : []),
         { text: inr(it?.rate), alignment: 'right', fontSize: 9 },
         { text: gstPct > 0 ? `${gstPct}%` : '', alignment: 'center', fontSize: 9 },
@@ -896,7 +896,7 @@ export class PdfService {
                 { text: 'Item Name', style: 'th' },
                 { text: 'Instructions', style: 'th' },
                 { text: 'Qty', style: 'th', alignment: 'center' },
-                { text: 'UOM', style: 'th', alignment: 'center' },
+                { text: 'Unit', style: 'th', alignment: 'center' },
                 ...(hasAnyDiscount ? [{ text: 'Disc.', style: 'th', alignment: 'center' }] : []),
                 { text: 'Rate (₹)', style: 'th', alignment: 'right' },
                 { text: 'GST Tax', style: 'th', alignment: 'center' },
