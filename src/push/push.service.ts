@@ -2,17 +2,15 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
+import { initializeApp, getApps, cert } from 'firebase-admin/app';
+import { getMessaging, Messaging } from 'firebase-admin/messaging';
 import { PushToken } from './push-token.entity';
 import { Notification } from '../notifications/notification.entity';
-
-// Imported lazily so the module loads even when firebase-admin is not configured.
-
-const admin = require('firebase-admin');
 
 @Injectable()
 export class PushService implements OnModuleInit {
   private readonly logger = new Logger(PushService.name);
-  private messaging: any = null;
+  private messaging: Messaging | null = null;
 
   constructor(
     @InjectRepository(PushToken)
@@ -29,12 +27,10 @@ export class PushService implements OnModuleInit {
     }
     try {
       const serviceAccount = JSON.parse(raw);
-      if (!admin.apps.length) {
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
-        });
-      }
-      this.messaging = admin.messaging();
+      const app = getApps().length
+        ? getApps()[0]
+        : initializeApp({ credential: cert(serviceAccount) });
+      this.messaging = getMessaging(app);
       this.logger.log('Firebase Admin SDK initialized — FCM push enabled');
     } catch (e: any) {
       this.logger.warn(
