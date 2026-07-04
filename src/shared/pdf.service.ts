@@ -242,9 +242,12 @@ export class PdfService {
         discCell = {
           stack: [
             { text: isFlatDisc ? `₹${fmt2(discVal)}` : `${discVal}%`, fontSize: 7, bold: true, color: INK },
-            { text: `on ₹${fmt2(rate)}`, fontSize: 6, color: SLATE, margin: [0, 2, 0, 0] },
+            // Non-breaking space keeps "on ₹..." / "= ₹..." glued together —
+            // a regular space lets pdfmake wrap right after "on"/"=" when the
+            // amount is large, isolating the symbol on its own line.
+            { text: `on ₹${fmt2(rate)}`, fontSize: 6, color: SLATE, margin: [0, 2, 0, 0] },
             {
-              text: `= ₹${fmt2(isFlatDisc ? discountedRate : perUnitDiscAmt)}`,
+              text: `= ₹${fmt2(isFlatDisc ? discountedRate : perUnitDiscAmt)}`,
               fontSize: 7,
               bold: true,
               color: INK,
@@ -505,7 +508,7 @@ export class PdfService {
                 { text: 'S.No',               style: 'th', alignment: 'center',  noWrap: true },
                 { text: 'Photo',              style: 'th', alignment: 'center',  noWrap: true },
                 { text: 'Item / Name / HSN',  style: 'th' },
-                { text: 'Instruction',        style: 'th' },
+                { text: 'Instr.',             style: 'th', noWrap: true },
                 { text: 'Qty',                style: 'th', alignment: 'center',  noWrap: true },
                 { text: 'Unit',               style: 'th', alignment: 'center',  noWrap: true },
                 ...(hasAnyDiscount ? [{ text: 'Disc', style: 'th', alignment: 'center', noWrap: true }] : []),
