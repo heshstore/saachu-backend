@@ -27,6 +27,19 @@ HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:4000/health/version}"
 # that's already set in the process environment. This makes the build
 # correct regardless of what .env.local happens to contain on any machine.
 PROD_FRONTEND_API_URL="${PROD_FRONTEND_API_URL:-https://crmhesh.duckdns.org}"
+
+# Same rationale as PROD_FRONTEND_API_URL above — these are public Firebase web
+# config values (not secrets; Firebase security is enforced via server-side
+# rules/App Check, not by hiding them), forced as real shell env vars so the
+# build is correct regardless of .env.local on any given machine.
+PROD_FIREBASE_API_KEY="${PROD_FIREBASE_API_KEY:-AIzaSyB0aq4YlJI3JJmUk3QF-zqIW0QHxfPY7h4}"
+PROD_FIREBASE_AUTH_DOMAIN="${PROD_FIREBASE_AUTH_DOMAIN:-saachi-16d7b.firebaseapp.com}"
+PROD_FIREBASE_PROJECT_ID="${PROD_FIREBASE_PROJECT_ID:-saachi-16d7b}"
+PROD_FIREBASE_STORAGE_BUCKET="${PROD_FIREBASE_STORAGE_BUCKET:-saachi-16d7b.firebasestorage.app}"
+PROD_FIREBASE_MESSAGING_SENDER_ID="${PROD_FIREBASE_MESSAGING_SENDER_ID:-299817092820}"
+PROD_FIREBASE_APP_ID="${PROD_FIREBASE_APP_ID:-1:299817092820:web:2dac7704cd727d89cb9d41}"
+PROD_FIREBASE_VAPID_KEY="${PROD_FIREBASE_VAPID_KEY:-BPGBRgLw2AEHOqlbANuHdqMYlEEsvlrK6H1RpHIMn7kCfD_wDDQygxWkioo8UltLz-pt6fQwjMksedUxybfDttc}"
+
 REHEARSAL="${REHEARSAL:-0}"
 VALIDATE_ONLY="${VALIDATE_ONLY:-0}"
 VERSION=""
@@ -116,7 +129,16 @@ fi
 log "Step 2/8 — Build backend + frontend"
 
 (cd "$BACKEND_ROOT" && npm run build) || fail "Backend build failed"
-(cd "$FRONTEND_ROOT" && REACT_APP_API_URL="$PROD_FRONTEND_API_URL" npm run build) \
+(cd "$FRONTEND_ROOT" \
+  && REACT_APP_API_URL="$PROD_FRONTEND_API_URL" \
+     REACT_APP_FIREBASE_API_KEY="$PROD_FIREBASE_API_KEY" \
+     REACT_APP_FIREBASE_AUTH_DOMAIN="$PROD_FIREBASE_AUTH_DOMAIN" \
+     REACT_APP_FIREBASE_PROJECT_ID="$PROD_FIREBASE_PROJECT_ID" \
+     REACT_APP_FIREBASE_STORAGE_BUCKET="$PROD_FIREBASE_STORAGE_BUCKET" \
+     REACT_APP_FIREBASE_MESSAGING_SENDER_ID="$PROD_FIREBASE_MESSAGING_SENDER_ID" \
+     REACT_APP_FIREBASE_APP_ID="$PROD_FIREBASE_APP_ID" \
+     REACT_APP_FIREBASE_VAPID_KEY="$PROD_FIREBASE_VAPID_KEY" \
+     npm run build) \
   || fail "Frontend build failed"
 
 [[ -f "$BACKEND_ROOT/dist/main.js" ]] || fail "Backend dist/main.js missing after build"
