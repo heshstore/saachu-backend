@@ -28,6 +28,10 @@ import { getReleaseAllowance } from '../shared/number-limits';
 import { NumberConnectionState } from '../shared/number-state';
 import { normalizeSkipReason, SkipReason } from '../shared/skip-reason';
 
+// Outside the send window, only poll for test-mode campaigns this often (instead of
+// every 15s tick) — keeps the DB idle long enough between touches for Neon to autosuspend.
+const OFF_WINDOW_CHECK_INTERVAL_MS = 5 * 60_000;
+
 const CONTENT_FINGERPRINT_DAYS = 3;
 // Test-mode campaigns use a 1-hour window so the same template can be resent quickly
 // during QA. Production behavior (3 days) is unaffected.
@@ -71,6 +75,7 @@ export class SenderService implements OnModuleInit {
   private readonly _numberLocks = new Map<string, boolean>();
   private readonly _nextAllowedSendByNumber = new Map<string, Date>();
   private _idleUntil = 0; // epoch ms — skip DB queries until this timestamp
+  private _nextOffWindowCheckAt = 0; // epoch ms — throttles the outside-window test-mode DB check
 
   constructor(
     @InjectRepository(WhatsappMessageQueue)
@@ -191,8 +196,18 @@ export class SenderService implements OnModuleInit {
     }
 
     // Window check: outside business hours blocks live sends but not test_mode campaigns.
+    // Throttled to once per OFF_WINDOW_CHECK_INTERVAL_MS (instead of every 15s tick) so the
+    // DB gets real idle gaps outside the 10am-6pm window and Neon can scale to zero.
     let windowBypassed = false;
     if (!inWindow) {
+      if (Date.now() < this._nextOffWindowCheckAt) {
+        this.logger.log(
+          '[MKT_SENDER_TICK_SKIP] reason=outside_send_window_throttled',
+        );
+        return;
+      }
+      this._nextOffWindowCheckAt = Date.now() + OFF_WINDOW_CHECK_INTERVAL_MS;
+
       const testPending = await this.queueService.findTestModePending(1);
       if (!testPending.length) {
         this.logger.log(
