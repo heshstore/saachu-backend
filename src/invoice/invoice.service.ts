@@ -74,9 +74,15 @@ export class InvoiceService {
       }
     }
 
-    // GST split: CGST+SGST if same state, else IGST
+    // GST split: CGST+SGST if same state, else IGST.
+    // Sum each item's own gst_amount (already correctly computed per its actual
+    // rate and Extra/Inclusive tax mode at order-creation time) rather than
+    // assuming a flat 18% of the order total — items can be 5/12/18/28%.
     const total = Number(order.total_amount);
-    const gstAmount = (total * 18) / 100;
+    const gstAmount = (order.items || []).reduce(
+      (sum, it) => sum + Number(it.gst_amount || 0),
+      0,
+    );
 
     const customerState = (customer?.state || '').toLowerCase();
     const isSameState = customerState === appConfig.companyState.toLowerCase();
@@ -110,6 +116,7 @@ export class InvoiceService {
     const rows = await this.invoiceRepository.manager.query<any[]>(
       `SELECT inv.*, o.order_no, o.status AS order_status,
               o.customer_id, o.customer_name, o.customer_phone,
+              o.is_tax_inclusive,
               ${ORDER_SALESMAN_SELECT}
        FROM invoice inv
        JOIN orders o ON o.id = inv.order_id
@@ -203,7 +210,12 @@ export class InvoiceService {
     }
     const customerState = (customer?.state || '').toLowerCase();
     const isSameState = customerState === appConfig.companyState.toLowerCase();
-    const gstAmount = (total * 18) / 100;
+    // Sum only the filtered (billing_category-matched) items' own gst_amount —
+    // same fix as createFromOrder(), not a flat 18% of the filtered total.
+    const gstAmount = items.reduce(
+      (sum, it) => sum + Number(it.gst_amount || 0),
+      0,
+    );
     const cgst = isSameState ? gstAmount / 2 : 0;
     const sgst = isSameState ? gstAmount / 2 : 0;
     const igst = isSameState ? 0 : gstAmount;

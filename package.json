@@ -86,6 +86,7 @@
     "migrate:document-action-log": "node scripts/migrate-document-action-log.js",
     "migrate:item-photo": "node scripts/migrate-item-photo.js",
     "migrate:quotation-order-unit": "node scripts/migrate-quotation-order-unit.js",
+    "migrate:tax-inclusive": "node scripts/migrate-tax-inclusive.js",
     "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {

@@ -170,6 +170,7 @@ export class QuotationService {
   private async mapItems(
     rawItems: any[],
     isWholesaler: boolean,
+    isTaxInclusive: boolean,
   ): Promise<QuotationItem[]> {
     const items: QuotationItem[] = [];
 
@@ -224,7 +225,17 @@ export class QuotationService {
         qi.discount_type === 'percent'
           ? (lineTotal * qi.discount_value) / 100
           : qi.discount_value * qi.qty;
-      qi.amount = lineTotal - discount;
+      const grossAfterDiscount = lineTotal - discount;
+      // qi.amount always means the taxable (GST-exclusive) value. In Extra Tax
+      // mode the entered rate already is that value. In Inclusive Tax mode the
+      // entered rate already contains GST, so extract it back out here —
+      // downstream code (totals, templates) always reads amount as pre-GST and
+      // computes GST as amount * gst_percent / 100, unaffected by which mode
+      // was used to enter the price.
+      qi.amount =
+        isTaxInclusive && qi.gst_percent > 0
+          ? grossAfterDiscount / (1 + qi.gst_percent / 100)
+          : grossAfterDiscount;
 
       items.push(qi);
     }
@@ -330,7 +341,8 @@ export class QuotationService {
       data.customer_id,
       !!data.is_wholesaler,
     );
-    const items = await this.mapItems(data.items || [], isWholesaler);
+    const isTaxInclusive = !!data.is_tax_inclusive;
+    const items = await this.mapItems(data.items || [], isWholesaler, isTaxInclusive);
 
     // Only enforce item presence for confirmed (non-draft) submissions.
     if (targetStatus !== QuotationStatus.DRAFT && items.length === 0) {
@@ -370,6 +382,7 @@ export class QuotationService {
       delivery_instructions: data.delivery_instructions,
       discount_type: data.discount_type ?? QuotationDiscountType.PERCENT,
       discount_value: data.discount_value ?? 0,
+      is_tax_inclusive: isTaxInclusive,
       charges_packing: data.charges_packing || 0,
       charges_cartage: data.charges_cartage || 0,
       charges_forwarding: data.charges_forwarding || 0,
@@ -491,7 +504,8 @@ export class QuotationService {
         data.customer_id ?? quotation.customer_id,
         data.is_wholesaler ?? quotation.is_wholesaler,
       );
-      effectiveItems = await this.mapItems(data.items || [], isWholesaler);
+      const isTaxInclusive = data.is_tax_inclusive ?? quotation.is_tax_inclusive;
+      effectiveItems = await this.mapItems(data.items || [], isWholesaler, isTaxInclusive);
 
       // Determine target status — respect explicit status in update payload.
       const targetStatus = data.status ?? quotation.status;
@@ -666,6 +680,7 @@ export class QuotationService {
         salesman_id: quotation.salesman_id,
         discount_type: quotation.discount_type,
         discount_value: quotation.discount_value,
+        is_tax_inclusive: quotation.is_tax_inclusive,
         packing_charges: quotation.charges_packing,
         cartage_charges: quotation.charges_cartage,
         forwarding_charges: quotation.charges_forwarding,

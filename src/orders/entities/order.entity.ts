@@ -73,6 +73,11 @@ export class Order {
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   discount_value: number;
 
+  // Extra Tax (false, default): item rate is pre-tax, GST added on top.
+  // Inclusive Tax (true): item rate already includes GST, extracted at calc time.
+  @Column({ type: 'boolean', default: false })
+  is_tax_inclusive: boolean;
+
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   packing_charges: number;
 

@@ -237,7 +237,10 @@ export class OrdersService {
   // ── Item normalizer ───────────────────────────────────────────────────────────
   // Single source of truth for all item-level pricing.
   // rate / amount / gst_amount from the payload are IGNORED and always recomputed.
-  private normalizeItem(input: any): Partial<OrderItem> {
+  private normalizeItem(
+    input: any,
+    isTaxInclusive: boolean,
+  ): Partial<OrderItem> {
     const round = (v: number) => Math.round(v * 100) / 100;
 
     const qty = Number(input.qty ?? input.quantity) || 1;
@@ -258,9 +261,20 @@ export class OrdersService {
       );
     }
 
-    const amount = round(qty * rate);
     const gstPercent = Number(input.gst_percent) || 0;
-    const gstAmount = round((amount * gstPercent) / 100);
+    const grossAfterDiscount = round(qty * rate);
+    // amount always means the taxable (GST-exclusive) value. Extra Tax: the
+    // rate already is that value. Inclusive Tax: the rate already contains
+    // GST, so extract it back out — gst_amount is always the tax portion
+    // either way, added on top (Extra) or carved out (Inclusive).
+    const amount =
+      isTaxInclusive && gstPercent > 0
+        ? round(grossAfterDiscount / (1 + gstPercent / 100))
+        : grossAfterDiscount;
+    const gstAmount =
+      isTaxInclusive && gstPercent > 0
+        ? round(grossAfterDiscount - amount)
+        : round((amount * gstPercent) / 100);
 
     return {
       sku: input.sku || '',
@@ -339,8 +353,9 @@ export class OrdersService {
       if (diffMinutes <= IDEMPOTENCY_WINDOW_MINUTES) return existing;
     }
 
+    const isTaxInclusive = !!data.is_tax_inclusive;
     const items = rawItems.map((i) =>
-      Object.assign(new OrderItem(), this.normalizeItem(i)),
+      Object.assign(new OrderItem(), this.normalizeItem(i, isTaxInclusive)),
     );
     const { subtotal, total_amount } = this.calcTotals(items, data);
 
@@ -395,6 +410,7 @@ export class OrdersService {
       subtotal,
       discount_type: data.discount_type ?? 'PERCENT',
       discount_value: Number(data.discount_value ?? 0),
+      is_tax_inclusive: isTaxInclusive,
       packing_charges: Number(
         data.packing_charges ?? data.charges_packing ?? 0,
       ),
@@ -751,8 +767,9 @@ export class OrdersService {
       if (!Array.isArray(data.items) || data.items.length === 0) {
         throw new BadRequestException('Order must contain at least one item');
       }
+      const isTaxInclusive = data.is_tax_inclusive ?? order.is_tax_inclusive;
       const items = data.items.map((i) =>
-        Object.assign(new OrderItem(), this.normalizeItem(i)),
+        Object.assign(new OrderItem(), this.normalizeItem(i, isTaxInclusive)),
       );
       const { subtotal, total_amount } = this.calcTotals(items, {
         ...order,

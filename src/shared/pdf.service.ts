@@ -517,7 +517,7 @@ export class PdfService {
                 {
                   stack: [
                     { text: 'Amount (₹)', fontSize: 8.5, bold: true, color: '#fff' },
-                    { text: '(Tax Extra)', fontSize: 5.5, color: '#fff', italics: true },
+                    { text: data?.is_tax_inclusive ? '(Tax Incl.)' : '(Tax Extra)', fontSize: 5.5, color: '#fff', italics: true },
                   ],
                   alignment: 'right',
                   fillColor: BLUE,
@@ -906,7 +906,7 @@ export class PdfService {
                 {
                   stack: [
                     { text: 'Amount (₹)', fontSize: 8.5, bold: true, color: '#fff' },
-                    { text: '(Tax Extra)', fontSize: 5.5, color: '#fff', italics: true },
+                    { text: data?.is_tax_inclusive ? '(Tax Incl.)' : '(Tax Extra)', fontSize: 5.5, color: '#fff', italics: true },
                   ],
                   alignment: 'right',
                   fillColor: BLUE,
