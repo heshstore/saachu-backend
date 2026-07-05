@@ -184,7 +184,7 @@ export class QuotationService {
   private async mapItems(
     rawItems: any[],
     isWholesaler: boolean,
-    isTaxInclusive: boolean,
+    docDefaultTaxInclusive: boolean,
   ): Promise<QuotationItem[]> {
     const items: QuotationItem[] = [];
 
@@ -229,6 +229,12 @@ export class QuotationService {
       // the service-item/Shopify catalog master resolved above.
       qi.unit =
         (item.unit as string | null | undefined) ?? masterUnit ?? null;
+      // Each item carries its own tax mode — falls back to the document-level
+      // default only when the item didn't specify one (e.g. older payloads).
+      qi.is_tax_inclusive =
+        item.is_tax_inclusive !== undefined
+          ? !!item.is_tax_inclusive
+          : docDefaultTaxInclusive;
 
       const lineTotal = qi.qty * qi.rate;
       // Flat ("fixed") discount is a per-piece rupee amount — must scale by
@@ -247,7 +253,7 @@ export class QuotationService {
       // computes GST as amount * gst_percent / 100, unaffected by which mode
       // was used to enter the price.
       qi.amount =
-        isTaxInclusive && qi.gst_percent > 0
+        qi.is_tax_inclusive && qi.gst_percent > 0
           ? grossAfterDiscount / (1 + qi.gst_percent / 100)
           : grossAfterDiscount;
 

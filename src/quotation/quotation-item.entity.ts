@@ -49,6 +49,10 @@ export class QuotationItem {
   @Column({ type: 'decimal', precision: 5, scale: 2, default: 0 })
   gst_percent: number;
 
+  /** Per-item override: true = rate already includes GST (extracted at calc time). */
+  @Column({ default: false })
+  is_tax_inclusive: boolean;
+
   @Column({ nullable: true })
   hsn_code: string;
 

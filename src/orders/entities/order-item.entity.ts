@@ -40,6 +40,10 @@ export class OrderItem {
   @Column({ type: 'decimal', precision: 5, scale: 2, default: 0 })
   gst_percent: number;
 
+  /** Per-item override: true = rate already includes GST (extracted at calc time). */
+  @Column({ default: false })
+  is_tax_inclusive: boolean;
+
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   amount: number;
 

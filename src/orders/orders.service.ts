@@ -253,9 +253,15 @@ export class OrdersService {
   // rate / amount / gst_amount from the payload are IGNORED and always recomputed.
   private normalizeItem(
     input: any,
-    isTaxInclusive: boolean,
+    docDefaultTaxInclusive: boolean,
   ): Partial<OrderItem> {
     const round = (v: number) => Math.round(v * 100) / 100;
+    // Each item carries its own tax mode — falls back to the document-level
+    // default only when the item didn't specify one (e.g. older payloads).
+    const isTaxInclusive =
+      input.is_tax_inclusive !== undefined
+        ? !!input.is_tax_inclusive
+        : docDefaultTaxInclusive;
 
     const qty = Number(input.qty ?? input.quantity) || 1;
     const baseRate = Number(input.base_rate) || 0;
@@ -300,6 +306,7 @@ export class OrdersService {
       discount_type: discountType,
       discount_value: discountValue,
       gst_percent: gstPercent,
+      is_tax_inclusive: isTaxInclusive,
       amount,
       gst_amount: gstAmount,
       instruction: input.instruction || null,

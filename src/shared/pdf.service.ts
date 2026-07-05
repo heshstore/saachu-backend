@@ -162,6 +162,15 @@ export class PdfService {
     };
 
     const rows = Array.isArray(data?.items) ? data.items : [];
+    // Tax mode is set per item now, not per document — show "Mixed" when
+    // items disagree instead of a single (possibly wrong) document-wide label.
+    const taxLabel = rows.length === 0
+      ? (data?.is_tax_inclusive ? '(Tax Incl.)' : '(Tax Extra)')
+      : rows.every((it: any) => !!it?.is_tax_inclusive)
+        ? '(Tax Incl.)'
+        : rows.every((it: any) => !it?.is_tax_inclusive)
+          ? '(Tax Extra)'
+          : '(Mixed)';
     const itemImageMap = await this.fetchImageMap(
       rows.map((it: any) => it?.image_url),
     );
@@ -517,7 +526,7 @@ export class PdfService {
                 {
                   stack: [
                     { text: 'Amount (₹)', fontSize: 8.5, bold: true, color: '#fff' },
-                    { text: data?.is_tax_inclusive ? '(Tax Incl.)' : '(Tax Extra)', fontSize: 5.5, color: '#fff', italics: true },
+                    { text: taxLabel, fontSize: 5.5, color: '#fff', italics: true },
                   ],
                   alignment: 'right',
                   fillColor: BLUE,
@@ -636,6 +645,15 @@ export class PdfService {
     };
 
     const rows = Array.isArray(data?.items) ? data.items : [];
+    // Tax mode is set per item now, not per document — show "Mixed" when
+    // items disagree instead of a single (possibly wrong) document-wide label.
+    const taxLabel = rows.length === 0
+      ? (data?.is_tax_inclusive ? '(Tax Incl.)' : '(Tax Extra)')
+      : rows.every((it: any) => !!it?.is_tax_inclusive)
+        ? '(Tax Incl.)'
+        : rows.every((it: any) => !it?.is_tax_inclusive)
+          ? '(Tax Extra)'
+          : '(Mixed)';
     const companyName =
       appConfig?.companyName || 'Hesh Opto Lab Private Limited';
     const companyAddr =
@@ -906,7 +924,7 @@ export class PdfService {
                 {
                   stack: [
                     { text: 'Amount (₹)', fontSize: 8.5, bold: true, color: '#fff' },
-                    { text: data?.is_tax_inclusive ? '(Tax Incl.)' : '(Tax Extra)', fontSize: 5.5, color: '#fff', italics: true },
+                    { text: taxLabel, fontSize: 5.5, color: '#fff', italics: true },
                   ],
                   alignment: 'right',
                   fillColor: BLUE,
