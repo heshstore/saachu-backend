@@ -127,6 +127,20 @@ export class OrdersService {
     return `ORD${String(next).padStart(4, '0')}`;
   }
 
+  // ── Salesman assignment ────────────────────────────────────────────────────────
+
+  /**
+   * Only Admin/COO punch orders on someone else's behalf — everyone else is
+   * always attributed to themselves, regardless of what a crafted request body
+   * might claim. Mirrors the frontend's read-only Salesman field, enforced here
+   * since the UI restriction alone is trivially bypassable.
+   */
+  private resolveSalesmanId(data: any, user?: any): number | undefined {
+    const isAdminOrCoo = user?.role === 'Admin' || user?.role === 'COO';
+    if (!isAdminOrCoo) return user?.id;
+    return data.salesman_id ? Number(data.salesman_id) : user?.id;
+  }
+
   // ── Customer snapshot ─────────────────────────────────────────────────────────
   private async snapshotCustomer(customerId: number): Promise<{
     customer_name: string;
@@ -430,7 +444,7 @@ export class OrdersService {
       status: (data.status as OrderStatus) || OrderStatus.DRAFT,
       paid_amount: 0,
       pending_amount: total_amount,
-      salesman_id: data.salesman_id ? Number(data.salesman_id) : undefined,
+      salesman_id: this.resolveSalesmanId(data, user),
       created_by: user?.id,
       idempotency_key: idempotencyKey,
       idempotency_created_at: new Date(),
@@ -743,7 +757,7 @@ export class OrdersService {
 
   // ── Update ────────────────────────────────────────────────────────────────────
 
-  async updateOrder(id: number, data: any): Promise<Order> {
+  async updateOrder(id: number, data: any, user?: any): Promise<Order> {
     const order = await this.findOne(id);
     const EDITABLE = [
       OrderStatus.DRAFT,
@@ -762,6 +776,12 @@ export class OrdersService {
     delete data.subtotal;
     delete data.total_amount;
     delete data.status;
+
+    // Only Admin/COO may reassign the salesman on an existing order — strip
+    // it from the payload for everyone else so the spread merge below leaves
+    // the order's current assignment untouched.
+    const isAdminOrCoo = user?.role === 'Admin' || user?.role === 'COO';
+    if (!isAdminOrCoo) delete data.salesman_id;
 
     if (data.items) {
       if (!Array.isArray(data.items) || data.items.length === 0) {

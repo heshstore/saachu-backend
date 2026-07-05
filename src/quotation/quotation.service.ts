@@ -86,6 +86,20 @@ export class QuotationService {
     };
   }
 
+  // ── Salesman assignment ────────────────────────────────────────────────────────
+
+  /**
+   * Only Admin/COO punch quotations on someone else's behalf — everyone else is
+   * always attributed to themselves, regardless of what a crafted request body
+   * might claim. This mirrors the frontend's read-only Salesman field, but is
+   * enforced here since the UI restriction alone is trivially bypassable.
+   */
+  private resolveSalesmanId(data: any, user?: any): number | undefined {
+    const isAdminOrCoo = user?.role === 'Admin' || user?.role === 'COO';
+    if (!isAdminOrCoo) return user?.id;
+    return data.salesman_id || user?.id;
+  }
+
   // ── Customer type resolution ──────────────────────────────────────────────────
 
   /**
@@ -369,7 +383,7 @@ export class QuotationService {
       gst_number: data.gst_number ?? snap?.gst_number ?? '',
       bill_to_id: data.bill_to_id,
       ship_to_id: data.ship_to_id,
-      salesman_id: data.salesman_id || user?.id,
+      salesman_id: this.resolveSalesmanId(data, user),
       status: targetStatus,
       validity_days: validityDays,
       valid_till,
@@ -487,6 +501,12 @@ export class QuotationService {
     // Totals are always derived — strip any user-supplied values immediately.
     delete data.sub_total;
     delete data.total_amount;
+
+    // Only Admin/COO may reassign the salesman on an existing quotation —
+    // strip it from the payload for everyone else so the spread merge below
+    // leaves the quotation's current assignment untouched.
+    const isAdminOrCoo = user?.role === 'Admin' || user?.role === 'COO';
+    if (!isAdminOrCoo) delete data.salesman_id;
 
     // Block edits on terminal statuses.
     const nonEditable = [QuotationStatus.CONVERTED, QuotationStatus.CANCELLED];

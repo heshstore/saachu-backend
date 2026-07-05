@@ -93,8 +93,8 @@ export class OrdersController {
 
   @Put(':id')
   @RequirePermission('order.edit')
-  updateOrder(@Param('id') id: string, @Body() body: any) {
-    return this.ordersService.updateOrder(Number(id), body);
+  updateOrder(@Param('id') id: string, @Body() body: any, @Req() req: Request) {
+    return this.ordersService.updateOrder(Number(id), body, (req as any).user);
   }
 
   @Patch(':id/approve')
