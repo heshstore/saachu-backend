@@ -69,7 +69,10 @@ export class PushService implements OnModuleInit {
 
   // ── FCM send ──────────────────────────────────────────────────────────────────
 
-  async sendToUser(userId: number, notification: NotificationPayload): Promise<void> {
+  async sendToUser(
+    userId: number,
+    notification: NotificationPayload,
+  ): Promise<void> {
     if (!this.messaging) return;
 
     const rows = await this.tokenRepo.find({

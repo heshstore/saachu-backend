@@ -93,6 +93,10 @@ export class Order {
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   loading_charges: number;
 
+  /** total_amount rounded to the nearest rupee minus its pre-rounding value — can be +/-. */
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  round_off: number;
+
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   total_amount: number;
 
@@ -107,8 +111,30 @@ export class Order {
   @Column({ default: false, nullable: true })
   process_without_advance: boolean;
 
+  @Column({ type: 'date', nullable: true })
+  advance_payment_date: Date;
+
+  @Column({ nullable: true })
+  advance_payment_mode: string; // 'Bank Hesh' | 'Bank' | 'Cash'
+
   @Column({ type: 'text', nullable: true })
   approval_remarks: string; // salesperson's text notes — NOT overwritten on reject/approve
+
+  @Column({ type: 'timestamp', nullable: true })
+  sent_for_approval_at: Date;
+
+  @Column({ nullable: true })
+  payment_terms: string;
+
+  @Column({ type: 'smallint', nullable: true })
+  credit_days: number;
+
+  /** When the outstanding balance is due — separate from due_date (delivery date). Set once goods are delivered. */
+  @Column({ type: 'timestamptz', nullable: true })
+  payment_due_date: Date;
+
+  @Column({ default: false })
+  is_wholesaler: boolean;
 
   // ── Approval — manager data ────────────────────────────────────────────────
   @Column({ name: 'approved_by_id', nullable: true })
@@ -142,6 +168,12 @@ export class Order {
 
   @Column({ nullable: true })
   delivery_type: string;
+
+  @Column({ nullable: true })
+  po_number: string;
+
+  @Column({ nullable: true })
+  po_document_url: string;
 
   // ── Misc ────────────────────────────────────────────────────────────────────
   @Column({ nullable: true })

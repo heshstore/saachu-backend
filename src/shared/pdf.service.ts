@@ -38,6 +38,68 @@ try {
 
 const SLATE_OWN = '#64748b';
 
+/**
+ * Customer snapshots store the full address as a single comma-joined blob
+ * built (in this fixed relative order) from street/city/state/pincode/country
+ * — see snapshotCustomer in quotation.service.ts / orders.service.ts — but
+ * empty fields are dropped, so the blob can have anywhere from 1 to 5 parts.
+ * Address/country are the only genuinely optional fields (city/state/pincode
+ * are required Customer columns), so instead of counting from either end we
+ * anchor on the pincode (the one segment that looks like a 4-6 digit number)
+ * and count exactly 2 fields back for state/city — that holds regardless of
+ * whether the street address or country segment is present.
+ */
+/**
+ * pdfmake sizes a '*'-width column from its content's longest unbreakable
+ * token, since it (like PDFKit) only wraps at existing break points — it
+ * won't split a word mid-way to fit. A long unbroken run typed with no
+ * spaces (a pasted string, mashed keys, etc.) in a proportional-width
+ * column therefore forces that column wider than its fair share, pushing
+ * whatever comes after it (e.g. the Totals column) off the right edge of
+ * the page. Zero-width spaces are invisible but are a valid line-break
+ * point under the Unicode line-breaking rules pdfmake follows, so inserting
+ * one every `maxLen` characters inside over-long tokens gives it somewhere
+ * safe to wrap without changing how the text looks.
+ */
+function breakLongWords(text: string | null | undefined, maxLen = 18): string {
+  if (!text) return '';
+  return String(text)
+    .split(' ')
+    .map((word) =>
+      word.length > maxLen
+        ? (word.match(new RegExp(`.{1,${maxLen}}`, 'g')) || [word]).join('​')
+        : word,
+    )
+    .join(' ');
+}
+
+function splitAddressBlock(fullAddress: string | null | undefined): {
+  street: string;
+  cityLine: string;
+  stateLine: string;
+} {
+  const parts = String(fullAddress || '')
+    .split(',')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const pincodeIdx = parts.findIndex((p) => /^\d{4,6}$/.test(p));
+  if (pincodeIdx === -1)
+    return { street: parts.join(', '), cityLine: '', stateLine: '' };
+  let pincode = parts[pincodeIdx];
+  if (/^\d{6}$/.test(pincode))
+    pincode = `${pincode.slice(0, 3)} ${pincode.slice(3)}`;
+  const state = pincodeIdx >= 1 ? parts[pincodeIdx - 1] : '';
+  const city = pincodeIdx >= 2 ? parts[pincodeIdx - 2] : '';
+  const country = parts.slice(pincodeIdx + 1).join(', ');
+  const street =
+    pincodeIdx >= 3 ? parts.slice(0, pincodeIdx - 2).join(', ') : '';
+  return {
+    street,
+    cityLine: [city, pincode].filter(Boolean).join(' - '),
+    stateLine: [state, country].filter(Boolean).join(', '),
+  };
+}
+
 function ownershipPdfStack(
   data: any,
   opts?: { showPhone?: boolean; approvalPending?: boolean },
@@ -150,9 +212,18 @@ export class PdfService {
 
     const safe = (v: any, fallback = '—') =>
       v != null && String(v).trim() !== '' ? String(v) : fallback;
-    const fmt2 = (n: any) => Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const fmt2 = (n: any) =>
+      Number(n || 0).toLocaleString('en-IN', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
     const inr = (n: any) => `₹${fmt2(n)}`;
-    const fmtDate = (dt: Date) => { const d = String(dt.getDate()).padStart(2,'0'); const m = String(dt.getMonth()+1).padStart(2,'0'); return `${d}/${m}/${dt.getFullYear()}`; }; const today = fmtDate(new Date());
+    const fmtDate = (dt: Date) => {
+      const d = String(dt.getDate()).padStart(2, '0');
+      const m = String(dt.getMonth() + 1).padStart(2, '0');
+      return `${d}/${m}/${dt.getFullYear()}`;
+    };
+    const today = fmtDate(new Date());
     const dateStr = (d: any) => {
       try {
         return d ? fmtDate(new Date(d)) : today;
@@ -164,13 +235,16 @@ export class PdfService {
     const rows = Array.isArray(data?.items) ? data.items : [];
     // Tax mode is set per item now, not per document — show "Mixed" when
     // items disagree instead of a single (possibly wrong) document-wide label.
-    const taxLabel = rows.length === 0
-      ? (data?.is_tax_inclusive ? '(Tax Incl.)' : '(Tax Extra)')
-      : rows.every((it: any) => !!it?.is_tax_inclusive)
-        ? '(Tax Incl.)'
-        : rows.every((it: any) => !it?.is_tax_inclusive)
-          ? '(Tax Extra)'
-          : '(Mixed)';
+    const taxLabel =
+      rows.length === 0
+        ? data?.is_tax_inclusive
+          ? '(Tax Incl.)'
+          : '(Tax Extra)'
+        : rows.every((it: any) => !!it?.is_tax_inclusive)
+          ? '(Tax Incl.)'
+          : rows.every((it: any) => !it?.is_tax_inclusive)
+            ? '(Tax Extra)'
+            : '(Mixed)';
     const itemImageMap = await this.fetchImageMap(
       rows.map((it: any) => it?.image_url),
     );
@@ -196,17 +270,25 @@ export class PdfService {
     const chargeCar = Number(data?.charges_cartage) || 0;
     const chargeFwd = Number(data?.charges_forwarding) || 0;
     const chargeInst = Number(data?.charges_installation) || 0;
-    const chargeLoad = Number(data?.charges_loading || data?.loading_charges || data?.loading_unloading) || 0;
-    const roundOff = Number(data?.round_off ?? data?.roundoff ?? data?.roundOff) || 0;
+    const chargeLoad =
+      Number(
+        data?.charges_loading ||
+          data?.loading_charges ||
+          data?.loading_unloading,
+      ) || 0;
+    const roundOff =
+      Number(data?.round_off ?? data?.roundoff ?? data?.roundOff) || 0;
     const gstByRate = new Map<number, number>();
     for (const it of rows) {
       const base = Number(it?.amount) || 0;
       const pct = Number(it?.gst_percent) || 0;
-      if (pct > 0) gstByRate.set(pct, (gstByRate.get(pct) || 0) + (base * pct) / 100);
+      if (pct > 0)
+        gstByRate.set(pct, (gstByRate.get(pct) || 0) + (base * pct) / 100);
     }
     const grandTotal = Number(data?.total_amount) || 0;
 
     const custName = safe(data?.customer_name, '');
+    const custEmail = safe(data?.customer_email, '');
     const billAddr = safe(data?.billing_address, '');
     const shipAddr = safe(data?.shipping_address || data?.billing_address, '');
     const quotNo = safe(data?.quotation_no, '');
@@ -215,7 +297,10 @@ export class PdfService {
     // Dispatch fields
     const qBookingAt = safe(data?.booking_at, '');
     const qGoodsSentBy = safe(data?.goods_sent_by || data?.delivery_by, '');
-    const qTransportPaymentBy = safe(data?.transport_payment_by || data?.payment_type || data?.payment_mode, '');
+    const qTransportPaymentBy = safe(
+      data?.transport_payment_by || data?.payment_type || data?.payment_mode,
+      '',
+    );
     const qDeliveryType = safe(data?.delivery_type, '');
     const qDeliveryInstructions = safe(data?.delivery_instructions, '');
 
@@ -225,7 +310,9 @@ export class PdfService {
 
     // Items table rows: S.No | Photo | Item/SKU/HSN | Instruction | Qty | Unit | [Disc] | Rate | GST | Amount
     // The Disc column only appears at all if at least one line item actually has a discount.
-    const hasAnyDiscount = rows.some((it: any) => Number(it?.discount_value) > 0);
+    const hasAnyDiscount = rows.some(
+      (it: any) => Number(it?.discount_value) > 0,
+    );
     const COLS = hasAnyDiscount ? 10 : 9;
     const itemRows: any[] = rows.map((it: any, i: number) => {
       const base = Number(it?.amount) || 0;
@@ -250,11 +337,21 @@ export class PdfService {
       if (discVal > 0) {
         discCell = {
           stack: [
-            { text: isFlatDisc ? `₹${fmt2(discVal)}` : `${discVal}%`, fontSize: 7, bold: true, color: INK },
+            {
+              text: isFlatDisc ? `₹${fmt2(discVal)}` : `${discVal}%`,
+              fontSize: 7,
+              bold: true,
+              color: INK,
+            },
             // Non-breaking space keeps "on ₹..." / "= ₹..." glued together —
             // a regular space lets pdfmake wrap right after "on"/"=" when the
             // amount is large, isolating the symbol on its own line.
-            { text: `on ₹${fmt2(rate)}`, fontSize: 6, color: SLATE, margin: [0, 2, 0, 0] },
+            {
+              text: `on ₹${fmt2(rate)}`,
+              fontSize: 6,
+              color: SLATE,
+              margin: [0, 2, 0, 0],
+            },
             {
               text: `= ₹${fmt2(isFlatDisc ? discountedRate : perUnitDiscAmt)}`,
               fontSize: 7,
@@ -271,55 +368,148 @@ export class PdfService {
       }
 
       // Real item-master photo when available; otherwise the gray placeholder box.
-      const photoDataUri = it?.image_url ? itemImageMap.get(it.image_url) : null;
+      const photoDataUri = it?.image_url
+        ? itemImageMap.get(it.image_url)
+        : null;
       const photoCell = photoDataUri
-        ? { image: photoDataUri, fit: [24, 24], alignment: 'center', margin: [2, 3, 2, 2] }
+        ? {
+            image: photoDataUri,
+            fit: [24, 24],
+            alignment: 'center',
+            margin: [2, 3, 2, 2],
+          }
         : {
             stack: [
               {
                 canvas: [
-                  { type: 'rect', x: 1, y: 1, w: 24, h: 24, r: 3, color: '#e2e8f0' },
-                  { type: 'ellipse', x: 13, y: 10, r1: 4, r2: 4, color: '#94a3b8' },
-                  { type: 'rect', x: 4, y: 16, w: 17, h: 7, r: 2, color: '#cbd5e1' },
+                  {
+                    type: 'rect',
+                    x: 1,
+                    y: 1,
+                    w: 24,
+                    h: 24,
+                    r: 3,
+                    color: '#e2e8f0',
+                  },
+                  {
+                    type: 'ellipse',
+                    x: 13,
+                    y: 10,
+                    r1: 4,
+                    r2: 4,
+                    color: '#94a3b8',
+                  },
+                  {
+                    type: 'rect',
+                    x: 4,
+                    y: 16,
+                    w: 17,
+                    h: 7,
+                    r: 2,
+                    color: '#cbd5e1',
+                  },
                 ],
               },
-              { text: 'Photo', fontSize: 6, alignment: 'center', color: '#94a3b8', margin: [0, 1, 0, 0] },
+              {
+                text: 'Photo',
+                fontSize: 6,
+                alignment: 'center',
+                color: '#94a3b8',
+                margin: [0, 1, 0, 0],
+              },
             ],
             margin: [2, 3, 2, 2],
           };
 
       return [
-        { text: String(i + 1), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
+        {
+          text: String(i + 1),
+          alignment: 'center',
+          fontSize: 8,
+          margin: [0, 5, 0, 0],
+        },
         photoCell,
         {
           stack: [
-            ...(it?.sku ? [{ text: it.sku, fontSize: 7, bold: true, color: BLUE }] : []),
-            { text: safe(it?.item_name || it?.itemName, `Item ${i + 1}`), fontSize: 8, bold: true },
-            ...(it?.hsn_code ? [{ text: `HSN: ${it.hsn_code}`, fontSize: 6.5, color: SLATE }] : []),
+            ...(it?.sku
+              ? [{ text: it.sku, fontSize: 7, bold: true, color: BLUE }]
+              : []),
+            {
+              text: safe(it?.item_name || it?.itemName, `Item ${i + 1}`),
+              fontSize: 8,
+              bold: true,
+            },
+            ...(it?.hsn_code
+              ? [{ text: `HSN: ${it.hsn_code}`, fontSize: 6.5, color: SLATE }]
+              : []),
           ],
           margin: [0, 3, 0, 3],
         },
-        { text: safe(it?.instruction || it?.instructions || it?.notes, ''), fontSize: 7, color: SLATE, margin: [0, 3, 0, 3] },
-        { text: String(qty), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
-        { text: safe(it?.unit || '', ''), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
+        {
+          text: breakLongWords(
+            safe(it?.instruction || it?.instructions || it?.notes, ''),
+          ),
+          fontSize: 7,
+          color: SLATE,
+          margin: [0, 3, 0, 3],
+        },
+        {
+          text: String(qty),
+          alignment: 'center',
+          fontSize: 8,
+          margin: [0, 5, 0, 0],
+        },
+        {
+          text: safe(it?.unit || '', ''),
+          alignment: 'center',
+          fontSize: 8,
+          margin: [0, 5, 0, 0],
+        },
         ...(hasAnyDiscount ? [discCell] : []),
-        { text: inr(discVal > 0 ? discountedRate : rate), alignment: 'right', fontSize: 7.5, margin: [0, 5, 0, 0] },
+        {
+          text: inr(discVal > 0 ? discountedRate : rate),
+          alignment: 'right',
+          fontSize: 7.5,
+          margin: [0, 5, 0, 0],
+        },
         gstPct > 0
           ? {
               stack: [
-                { text: `${gstPct}%`, fontSize: 7.5, bold: true, alignment: 'center' },
-                { text: inr((base * gstPct) / 100), fontSize: 5.5, color: SLATE, alignment: 'center' },
+                {
+                  text: `${gstPct}%`,
+                  fontSize: 7.5,
+                  bold: true,
+                  alignment: 'center',
+                },
+                {
+                  text: inr((base * gstPct) / 100),
+                  fontSize: 5.5,
+                  color: SLATE,
+                  alignment: 'center',
+                },
               ],
               margin: [0, 4, 0, 0],
             }
           : { text: '', fontSize: 8 },
-        { text: inr(base), alignment: 'right', fontSize: 7.5, bold: true, margin: [0, 5, 0, 0] },
+        {
+          text: inr(base),
+          alignment: 'right',
+          fontSize: 7.5,
+          bold: true,
+          margin: [0, 5, 0, 0],
+        },
       ];
     });
 
     if (itemRows.length === 0) {
       itemRows.push([
-        { text: 'No items', colSpan: COLS, alignment: 'center', fontSize: 8, color: SLATE },
+        {
+          text: 'No items',
+          colSpan: COLS,
+          alignment: 'center',
+          fontSize: 8,
+          color: SLATE,
+        },
         ...Array(COLS - 1).fill({}),
       ]);
     }
@@ -342,30 +532,70 @@ export class PdfService {
     ];
 
     // Totals (right of bottom section)
-    const tRow = (label: string, value: number, bold = false, large = false) => ({
+    const tRow = (
+      label: string,
+      value: number,
+      bold = false,
+      large = false,
+    ) => ({
       columns: [
-        { text: label, fontSize: large ? 10 : 8.5, bold, color: large ? BLUE : INK, width: '*' },
-        { text: inr(value), fontSize: large ? 10 : 8.5, bold, color: large ? BLUE : INK, width: 'auto', alignment: 'right' },
+        {
+          text: label,
+          fontSize: large ? 10 : 8.5,
+          bold,
+          color: large ? BLUE : INK,
+          width: '*',
+        },
+        {
+          text: inr(value),
+          fontSize: large ? 10 : 8.5,
+          bold,
+          color: large ? BLUE : INK,
+          width: 'auto',
+          alignment: 'right',
+        },
       ],
       margin: [0, large ? 2 : 1, 0, large ? 2 : 1],
     });
-    const tDiv = () => ({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: 200, y2: 0, lineWidth: 0.5, lineColor: '#999' }], margin: [0, 3, 0, 3] });
-    const totalBeforeGst = subTotal + chargePack + chargeCar + chargeFwd + chargeInst + chargeLoad;
+    const tDiv = () => ({
+      canvas: [
+        {
+          type: 'line',
+          x1: 0,
+          y1: 0,
+          x2: 200,
+          y2: 0,
+          lineWidth: 0.5,
+          lineColor: '#999',
+        },
+      ],
+      margin: [0, 3, 0, 3],
+    });
+    const totalBeforeGst =
+      subTotal + chargePack + chargeCar + chargeFwd + chargeInst + chargeLoad;
     const totalGstAmt = [...gstByRate.values()].reduce((s, a) => s + a, 0);
     const computedGrandTotal = totalBeforeGst + totalGstAmt + roundOff;
     const totalsStack: any[] = [
       tRow('Sub Total', subTotal, true, true),
-      ...(chargePack > 0 ? [tRow('(+) Wooden Packing Charges', chargePack)] : []),
+      ...(chargePack > 0
+        ? [tRow('(+) Wooden Packing Charges', chargePack)]
+        : []),
       ...(chargeCar > 0 ? [tRow('(+) Cartage Charges', chargeCar)] : []),
       ...(chargeFwd > 0 ? [tRow('(+) Forwarding Charges', chargeFwd)] : []),
-      ...(chargeInst > 0 ? [tRow('(+) Onsite Installation Charges', chargeInst)] : []),
-      ...(chargeLoad > 0 ? [tRow('(+) Loading & Unloading Charges', chargeLoad)] : []),
+      ...(chargeInst > 0
+        ? [tRow('(+) Onsite Installation Charges', chargeInst)]
+        : []),
+      ...(chargeLoad > 0
+        ? [tRow('(+) Loading & Unloading Charges', chargeLoad)]
+        : []),
       tDiv(),
       tRow('Total', totalBeforeGst, true, true),
       tDiv(),
       ...[...gstByRate.entries()]
         .sort((a, b) => a[0] - b[0])
-        .map(([pct, amt]) => tRow(`(+) GST ${pct}% on ${inr(amt * 100 / pct)}`, amt)),
+        .map(([pct, amt]) =>
+          tRow(`(+) GST ${pct}% on ${inr((amt * 100) / pct)}`, amt),
+        ),
       tDiv(),
       tRow('Rounded Off', roundOff),
       tDiv(),
@@ -400,7 +630,13 @@ export class PdfService {
       }),
       content: [
         // ── Title ────────────────────────────────────────────────────────
-        { text: 'Quotation', fontSize: 16, bold: true, alignment: 'center', margin: [0, 0, 0, 3] },
+        {
+          text: 'Quotation',
+          fontSize: 16,
+          bold: true,
+          alignment: 'center',
+          margin: [0, 0, 0, 3],
+        },
 
         // ── Header ───────────────────────────────────────────────────────
         {
@@ -408,21 +644,68 @@ export class PdfService {
             {
               width: '*',
               stack: [
-                { text: companyName, fontSize: 13, bold: true, margin: [0, 0, 0, 3] },
-                { text: companyAddr.replace(/\n/g, ', '), fontSize: 7, margin: [0, 0, 0, 2] },
-                { text: [
-                  { text: 'Mobile: ', bold: true, fontSize: 7 },
-                  { text: companyPhone, fontSize: 7, color: '#374151' },
-                  { text: '     ·     ', fontSize: 7, color: SLATE },
-                  { text: 'Email: ', bold: true, fontSize: 7 },
-                  { text: companyEmail, fontSize: 7, color: '#374151' },
-                ], margin: [0, 0, 0, 2] },
-                { text: [{ text: 'MSME Reg. No.: ', bold: true, fontSize: 7 }, { text: 'UDYAM-TN-02-0034349', fontSize: 7, color: '#374151' }], margin: [0, 0, 0, 2] },
-                { text: [{ text: 'ISO 9001 : 2015 Certified', bold: true, fontSize: 7, color: BLUE }, { text: '  |  QMS System', fontSize: 7, color: SLATE }], margin: [0, 0, 0, 2] },
-                { text: [{ text: 'GSTIN: ', bold: true, fontSize: 7.5 }, { text: companyGstin, bold: true, fontSize: 7.5 }] },
+                {
+                  text: companyName,
+                  fontSize: 13,
+                  bold: true,
+                  margin: [0, 0, 0, 3],
+                },
+                {
+                  text: companyAddr.replace(/\n/g, ', '),
+                  fontSize: 7,
+                  margin: [0, 0, 0, 2],
+                },
+                {
+                  text: [
+                    { text: 'Mobile: ', bold: true, fontSize: 7 },
+                    { text: companyPhone, fontSize: 7, color: '#374151' },
+                    { text: '     ·     ', fontSize: 7, color: SLATE },
+                    { text: 'Email: ', bold: true, fontSize: 7 },
+                    { text: companyEmail, fontSize: 7, color: '#374151' },
+                  ],
+                  margin: [0, 0, 0, 2],
+                },
+                {
+                  text: [
+                    { text: 'MSME Reg. No.: ', bold: true, fontSize: 7 },
+                    {
+                      text: 'UDYAM-TN-02-0034349',
+                      fontSize: 7,
+                      color: '#374151',
+                    },
+                  ],
+                  margin: [0, 0, 0, 2],
+                },
+                {
+                  text: [
+                    {
+                      text: 'ISO 9001 : 2015 Certified',
+                      bold: true,
+                      fontSize: 7,
+                      color: BLUE,
+                    },
+                    { text: '  |  QMS System', fontSize: 7, color: SLATE },
+                  ],
+                  margin: [0, 0, 0, 2],
+                },
+                {
+                  text: [
+                    { text: 'GSTIN: ', bold: true, fontSize: 7.5 },
+                    { text: companyGstin, bold: true, fontSize: 7.5 },
+                  ],
+                },
               ],
             },
-            ...(logoPath ? [{ image: logoPath, fit: [152, 97], width: 158, alignment: 'right' }] : []),
+            ...(logoPath
+              ? [
+                  {
+                    image: logoPath,
+                    fit: [152, 97],
+                    width: 158,
+                    alignment: 'right',
+                  },
+                ]
+              : []),
           ],
           columnGap: 8,
           margin: [0, 0, 0, 3],
@@ -431,58 +714,235 @@ export class PdfService {
         // ── Bill To / Ship To / Quotation Details ───────────────────────
         (() => {
           const phone = safe(data?.customer_phone, '').replace(/^\+91/, '');
-          const phone2 = safe(data?.customer_phone2 || data?.mobile2, '').replace(/^\+91/, '');
+          const phone2 = safe(
+            data?.customer_phone2 || data?.mobile2,
+            '',
+          ).replace(/^\+91/, '');
           const validity = data?.valid_till
             ? dateStr(data.valid_till)
             : data?.validity_days
               ? `${data.validity_days} days from date`
               : '30 days from date';
 
-          const labelVal = (label: string, value: string, marginBottom = 5) => ({
+          const labelVal = (
+            label: string,
+            value: string,
+            marginBottom = 5,
+          ) => ({
             columns: [
-              { text: label, bold: true, fontSize: 8, width: 'auto', color: INK },
-              { text: value, fontSize: 8, width: '*', color: '#374151', margin: [3, 0, 0, 0] },
+              {
+                text: label,
+                bold: true,
+                fontSize: 8,
+                width: 'auto',
+                color: INK,
+              },
+              {
+                text: value,
+                fontSize: 8,
+                width: '*',
+                color: '#374151',
+                margin: [3, 0, 0, 0],
+              },
             ],
             columnGap: 0,
             margin: [0, 0, 0, marginBottom],
           });
 
-          const partyStack = (addr: string) => ({
-            stack: [
-              { text: custName, fontSize: 9.5, bold: true, color: INK, margin: [0, 0, 0, 5] },
-              { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 160, y2: 0, lineWidth: 0.4, lineColor: RULE }], margin: [0, 0, 0, 5] },
-              { text: addr, fontSize: 8, color: '#374151', lineHeight: 1.3, margin: [0, 0, 0, 5] },
-              ...(phone ? [{ text: [{ text: 'Mobile: ', bold: true, fontSize: 8 }, { text: phone, fontSize: 8, color: '#374151' }], margin: [0, 0, 0, 3] }] : []),
-              ...(phone2 ? [{ text: [{ text: 'Mobile 2: ', bold: true, fontSize: 8 }, { text: phone2, fontSize: 8, color: '#374151' }], margin: [0, 0, 0, 3] }] : []),
-              ...(safe(data?.gst_number, '') ? [
-                { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 160, y2: 0, lineWidth: 0.4, lineColor: RULE }], margin: [0, 4, 0, 4] },
-                { text: [{ text: 'GSTIN: ', bold: true, fontSize: 8 }, { text: safe(data.gst_number, ''), fontSize: 8, color: '#374151' }] },
-              ] : []),
-            ],
-            margin: [5, 5, 5, 5],
-          });
+          const partyStack = (addr: string) => {
+            const { street, cityLine, stateLine } = splitAddressBlock(addr);
+            return {
+              stack: [
+                {
+                  text: custName.toUpperCase(),
+                  fontSize: 9.5,
+                  bold: true,
+                  color: INK,
+                  margin: [0, 0, 0, 5],
+                },
+                {
+                  canvas: [
+                    {
+                      type: 'line',
+                      x1: 0,
+                      y1: 0,
+                      x2: 160,
+                      y2: 0,
+                      lineWidth: 0.4,
+                      lineColor: RULE,
+                    },
+                  ],
+                  margin: [0, 0, 0, 5],
+                },
+                ...(street
+                  ? [
+                      {
+                        text: street,
+                        fontSize: 8,
+                        color: '#374151',
+                        lineHeight: 1.3,
+                        margin: [0, 0, 0, 2],
+                      },
+                    ]
+                  : []),
+                ...(cityLine
+                  ? [
+                      {
+                        text: cityLine,
+                        fontSize: 8,
+                        color: '#374151',
+                        margin: [0, 0, 0, 2],
+                      },
+                    ]
+                  : []),
+                ...(stateLine
+                  ? [
+                      {
+                        text: stateLine,
+                        fontSize: 8,
+                        color: '#374151',
+                        margin: [0, 0, 0, 5],
+                      },
+                    ]
+                  : []),
+                ...(!street && !cityLine && !stateLine
+                  ? [
+                      {
+                        text: '—',
+                        fontSize: 8,
+                        color: '#374151',
+                        margin: [0, 0, 0, 5],
+                      },
+                    ]
+                  : []),
+                ...(custEmail
+                  ? [
+                      {
+                        text: [
+                          { text: 'Email: ', bold: true, fontSize: 8 },
+                          { text: custEmail, fontSize: 8, color: '#374151' },
+                        ],
+                        margin: [0, 0, 0, 3],
+                      },
+                    ]
+                  : []),
+                ...(phone
+                  ? [
+                      {
+                        text: [
+                          { text: 'Mobile 1: ', bold: true, fontSize: 8 },
+                          { text: phone, bold: true, fontSize: 8, color: INK },
+                        ],
+                        margin: [0, 0, 0, 3],
+                      },
+                    ]
+                  : []),
+                ...(phone2
+                  ? [
+                      {
+                        text: [
+                          { text: 'Mobile 2: ', bold: true, fontSize: 8 },
+                          { text: phone2, bold: true, fontSize: 8, color: INK },
+                        ],
+                        margin: [0, 0, 0, 3],
+                      },
+                    ]
+                  : []),
+                {
+                  canvas: [
+                    {
+                      type: 'line',
+                      x1: 0,
+                      y1: 0,
+                      x2: 160,
+                      y2: 0,
+                      lineWidth: 0.4,
+                      lineColor: RULE,
+                    },
+                  ],
+                  margin: [0, 4, 0, 4],
+                },
+                {
+                  text: [
+                    { text: 'GSTIN: ', bold: true, fontSize: 8 },
+                    {
+                      text: safe(data?.gst_number, '') || 'URD',
+                      bold: true,
+                      fontSize: 8,
+                      color: INK,
+                    },
+                  ],
+                },
+              ],
+              margin: [5, 5, 5, 5],
+            };
+          };
 
           return {
             table: {
               widths: ['*', '*', '*'],
               body: [
                 [
-                  { text: 'Bill To',           fontSize: 10, bold: true, color: '#fff', fillColor: BLUE, margin: [6, 4, 6, 4] },
-                  { text: 'Ship To',           fontSize: 10, bold: true, color: '#fff', fillColor: BLUE, margin: [6, 4, 6, 4] },
-                  { text: 'Quotation Details', fontSize: 10, bold: true, color: '#fff', fillColor: BLUE, margin: [6, 4, 6, 4] },
+                  {
+                    text: 'Bill To',
+                    fontSize: 10,
+                    bold: true,
+                    color: '#fff',
+                    fillColor: BLUE,
+                    margin: [6, 4, 6, 4],
+                  },
+                  {
+                    text: 'Ship To',
+                    fontSize: 10,
+                    bold: true,
+                    color: '#fff',
+                    fillColor: BLUE,
+                    margin: [6, 4, 6, 4],
+                  },
+                  {
+                    text: 'Quotation Details',
+                    fontSize: 10,
+                    bold: true,
+                    color: '#fff',
+                    fillColor: BLUE,
+                    margin: [6, 4, 6, 4],
+                  },
                 ],
                 [
                   partyStack(billAddr),
                   partyStack(shipAddr),
                   {
                     stack: [
-                      labelVal('Date:',             quoteDate),
-                      labelVal('Quotation No:',     quotNo),
-                      labelVal('Salesman:',         safe(data?.salesman_name || data?.sales_person, '')),
-                      labelVal('Validity:',         validity),
-                      { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 160, y2: 0, lineWidth: 0.4, lineColor: RULE }], margin: [0, 2, 0, 5] },
-                      labelVal('Payment Terms:',    'Advance 70% & Before Dispatch 30%'),
-                      labelVal('Delivery Location:', safe(data?.delivery_type || data?.delivery_by, ''), 0),
+                      labelVal('Date:', quoteDate),
+                      labelVal('Quotation No:', quotNo),
+                      labelVal(
+                        'Salesman:',
+                        safe(data?.salesman_name || data?.sales_person, ''),
+                      ),
+                      labelVal('Validity:', validity),
+                      {
+                        canvas: [
+                          {
+                            type: 'line',
+                            x1: 0,
+                            y1: 0,
+                            x2: 160,
+                            y2: 0,
+                            lineWidth: 0.4,
+                            lineColor: RULE,
+                          },
+                        ],
+                        margin: [0, 2, 0, 5],
+                      },
+                      labelVal(
+                        'Payment Terms:',
+                        'Advance 70% & Before Dispatch 30%',
+                      ),
+                      labelVal(
+                        'Delivery Location:',
+                        safe(data?.delivery_type || data?.delivery_by, ''),
+                        0,
+                      ),
                     ],
                     margin: [5, 5, 5, 5],
                   },
@@ -490,8 +950,10 @@ export class PdfService {
               ],
             },
             layout: {
-              hLineWidth: (i: number) => (i === 0 || i === 1 || i === 2 ? 0.5 : 0),
-              vLineWidth: (i: number) => (i === 0 || i === 1 || i === 2 || i === 3 ? 0.5 : 0),
+              hLineWidth: (i: number) =>
+                i === 0 || i === 1 || i === 2 ? 0.5 : 0,
+              vLineWidth: (i: number) =>
+                i === 0 || i === 1 || i === 2 || i === 3 ? 0.5 : 0,
               hLineColor: () => RULE,
               vLineColor: () => RULE,
               paddingLeft: () => 0,
@@ -511,22 +973,77 @@ export class PdfService {
             // Disc's width is simply omitted (not zeroed) when hidden — the
             // Item/Name column is the only auto ('*') column, so it absorbs
             // the freed space automatically.
-            widths: [16, 28, '*', 36, 16, 18, ...(hasAnyDiscount ? [44] : []), 52, 34, 52],
+            widths: [
+              16,
+              28,
+              '*',
+              36,
+              16,
+              18,
+              ...(hasAnyDiscount ? [44] : []),
+              52,
+              34,
+              52,
+            ],
             body: [
               [
-                { text: 'S.No',               style: 'th', alignment: 'center',  noWrap: true },
-                { text: 'Photo',              style: 'th', alignment: 'center',  noWrap: true },
-                { text: 'Item / Name / HSN',  style: 'th' },
-                { text: 'Instr.',             style: 'th', noWrap: true },
-                { text: 'Qty',                style: 'th', alignment: 'center',  noWrap: true },
-                { text: 'Unit',               style: 'th', alignment: 'center',  noWrap: true },
-                ...(hasAnyDiscount ? [{ text: 'Disc', style: 'th', alignment: 'center', noWrap: true }] : []),
-                { text: 'Rate (₹)',           style: 'th', alignment: 'right',   noWrap: true },
-                { text: 'GST Tax',            style: 'th', alignment: 'center',  noWrap: true },
+                {
+                  text: 'S.No',
+                  style: 'th',
+                  alignment: 'center',
+                  noWrap: true,
+                },
+                {
+                  text: 'Photo',
+                  style: 'th',
+                  alignment: 'center',
+                  noWrap: true,
+                },
+                { text: 'Item / Name / HSN', style: 'th' },
+                { text: 'Instr.', style: 'th', noWrap: true },
+                { text: 'Qty', style: 'th', alignment: 'center', noWrap: true },
+                {
+                  text: 'Unit',
+                  style: 'th',
+                  alignment: 'center',
+                  noWrap: true,
+                },
+                ...(hasAnyDiscount
+                  ? [
+                      {
+                        text: 'Disc',
+                        style: 'th',
+                        alignment: 'center',
+                        noWrap: true,
+                      },
+                    ]
+                  : []),
+                {
+                  text: 'Rate (₹)',
+                  style: 'th',
+                  alignment: 'right',
+                  noWrap: true,
+                },
+                {
+                  text: 'GST Tax',
+                  style: 'th',
+                  alignment: 'center',
+                  noWrap: true,
+                },
                 {
                   stack: [
-                    { text: 'Amount (₹)', fontSize: 8.5, bold: true, color: '#fff' },
-                    { text: taxLabel, fontSize: 5.5, color: '#fff', italics: true },
+                    {
+                      text: 'Amount (₹)',
+                      fontSize: 8.5,
+                      bold: true,
+                      color: '#fff',
+                    },
+                    {
+                      text: taxLabel,
+                      fontSize: 5.5,
+                      color: '#fff',
+                      italics: true,
+                    },
                   ],
                   alignment: 'right',
                   fillColor: BLUE,
@@ -537,11 +1054,16 @@ export class PdfService {
           },
           layout: {
             hLineWidth: (i: number, node: any) =>
-              i === 0 || i === node.table.headerRows || i === node.table.body.length ? 1 : 0.4,
+              i === 0 ||
+              i === node.table.headerRows ||
+              i === node.table.body.length
+                ? 1
+                : 0.4,
             vLineWidth: () => 0.4,
             hLineColor: (i: number) => (i === 0 || i === 1 ? BLUE : RULE),
             vLineColor: () => RULE,
-            fillColor: (row: number) => (row === 0 ? BLUE : row % 2 === 0 ? '#f8fafc' : null),
+            fillColor: (row: number) =>
+              row === 0 ? BLUE : row % 2 === 0 ? '#f8fafc' : null,
             paddingLeft: () => 4,
             paddingRight: () => 4,
             paddingTop: () => 1.5,
@@ -555,34 +1077,90 @@ export class PdfService {
           columns: [
             // QR code
             ...(qrPath
-              ? [{
-                  width: 90,
-                  stack: [
-                    { text: 'Scan to Pay', fontSize: 7.5, bold: true, alignment: 'center', color: INK, margin: [0, 0, 0, 3] },
-                    { image: qrPath, fit: [80, 80], width: 80, alignment: 'center' },
-                    { text: 'Google Pay / UPI', fontSize: 6.5, alignment: 'center', color: SLATE, margin: [0, 3, 0, 0] },
-                  ],
-                }]
+              ? [
+                  {
+                    width: 90,
+                    stack: [
+                      {
+                        text: 'Scan to Pay',
+                        fontSize: 7.5,
+                        bold: true,
+                        alignment: 'center',
+                        color: INK,
+                        margin: [0, 0, 0, 3],
+                      },
+                      {
+                        image: qrPath,
+                        fit: [80, 80],
+                        width: 80,
+                        alignment: 'center',
+                      },
+                      {
+                        text: 'Google Pay / UPI',
+                        fontSize: 6.5,
+                        alignment: 'center',
+                        color: SLATE,
+                        margin: [0, 3, 0, 0],
+                      },
+                    ],
+                  },
+                ]
               : []),
             // Bank details + Dispatch Details (left column)
             {
               width: '*',
               stack: [
-                { text: 'Account Details', fontSize: 9.5, bold: true, color: BLUE, margin: [0, 0, 0, 5] },
+                {
+                  text: 'Account Details',
+                  fontSize: 9.5,
+                  bold: true,
+                  color: BLUE,
+                  margin: [0, 0, 0, 5],
+                },
                 ...accountLines,
                 // Dispatch Details below bank details
-                { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 200, y2: 0, lineWidth: 0.5, lineColor: RULE }], margin: [0, 10, 0, 8] },
-                { text: 'Dispatch Details', fontSize: 9.5, bold: true, color: BLUE, margin: [0, 0, 0, 5] },
+                {
+                  canvas: [
+                    {
+                      type: 'line',
+                      x1: 0,
+                      y1: 0,
+                      x2: 200,
+                      y2: 0,
+                      lineWidth: 0.5,
+                      lineColor: RULE,
+                    },
+                  ],
+                  margin: [0, 10, 0, 8],
+                },
+                {
+                  text: 'Dispatch Details',
+                  fontSize: 9.5,
+                  bold: true,
+                  color: BLUE,
+                  margin: [0, 0, 0, 5],
+                },
                 ...[
-                  ['Booking At',           qBookingAt           || '—'],
-                  ['Goods Sent By',        qGoodsSentBy         || '—'],
-                  ['Transport Payment By', qTransportPaymentBy  || '—'],
-                  ['Delivery Location',    qDeliveryType        || '—'],
-                  ['Delivery Instruction', qDeliveryInstructions|| '—'],
+                  ['Booking At', qBookingAt || '—'],
+                  ['Goods Sent By', qGoodsSentBy || '—'],
+                  ['Transport Payment By', qTransportPaymentBy || '—'],
+                  ['Delivery Location', qDeliveryType || '—'],
+                  ['Delivery Instruction', qDeliveryInstructions || '—'],
                 ].map(([label, value]) => ({
                   columns: [
-                    { text: `${label}:`, bold: true, fontSize: 8, width: 115, color: INK },
-                    { text: value, fontSize: 8, width: '*', color: value === '—' ? SLATE : '#374151' },
+                    {
+                      text: `${label}:`,
+                      bold: true,
+                      fontSize: 8,
+                      width: 115,
+                      color: INK,
+                    },
+                    {
+                      text: breakLongWords(value) || value,
+                      fontSize: 8,
+                      width: '*',
+                      color: value === '—' ? SLATE : '#374151',
+                    },
                   ],
                   margin: [0, 0, 0, 3],
                 })),
@@ -592,7 +1170,17 @@ export class PdfService {
             // Divider
             {
               width: 0.5,
-              canvas: [{ type: 'line', x1: 0, y1: 0, x2: 0, y2: 220, lineWidth: 0.5, lineColor: '#aaa' }],
+              canvas: [
+                {
+                  type: 'line',
+                  x1: 0,
+                  y1: 0,
+                  x2: 0,
+                  y2: 220,
+                  lineWidth: 0.5,
+                  lineColor: '#aaa',
+                },
+              ],
             },
             // Totals
             {
@@ -620,7 +1208,12 @@ export class PdfService {
       ],
       styles: {
         th: { bold: true, fontSize: 8.5, color: '#fff', fillColor: BLUE },
-        minorTitle: { fontSize: 7, bold: true, color: BLUE, letterSpacing: 0.2 },
+        minorTitle: {
+          fontSize: 7,
+          bold: true,
+          color: BLUE,
+          letterSpacing: 0.2,
+        },
       },
       defaultStyle: { fontSize: 8, font: 'Roboto' },
     };
@@ -634,8 +1227,14 @@ export class PdfService {
 
     const safe = (v: any, fallback = '—') =>
       v != null && String(v).trim() !== '' ? String(v) : fallback;
-    const inr = (n: any) => `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-    const fmtDate = (dt: Date) => { const d = String(dt.getDate()).padStart(2,'0'); const m = String(dt.getMonth()+1).padStart(2,'0'); return `${d}/${m}/${dt.getFullYear()}`; }; const today = fmtDate(new Date());
+    const inr = (n: any) =>
+      `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const fmtDate = (dt: Date) => {
+      const d = String(dt.getDate()).padStart(2, '0');
+      const m = String(dt.getMonth() + 1).padStart(2, '0');
+      return `${d}/${m}/${dt.getFullYear()}`;
+    };
+    const today = fmtDate(new Date());
     const dateStr = (d: any) => {
       try {
         return d ? fmtDate(new Date(d)) : today;
@@ -647,13 +1246,16 @@ export class PdfService {
     const rows = Array.isArray(data?.items) ? data.items : [];
     // Tax mode is set per item now, not per document — show "Mixed" when
     // items disagree instead of a single (possibly wrong) document-wide label.
-    const taxLabel = rows.length === 0
-      ? (data?.is_tax_inclusive ? '(Tax Incl.)' : '(Tax Extra)')
-      : rows.every((it: any) => !!it?.is_tax_inclusive)
-        ? '(Tax Incl.)'
-        : rows.every((it: any) => !it?.is_tax_inclusive)
-          ? '(Tax Extra)'
-          : '(Mixed)';
+    const taxLabel =
+      rows.length === 0
+        ? data?.is_tax_inclusive
+          ? '(Tax Incl.)'
+          : '(Tax Extra)'
+        : rows.every((it: any) => !!it?.is_tax_inclusive)
+          ? '(Tax Incl.)'
+          : rows.every((it: any) => !it?.is_tax_inclusive)
+            ? '(Tax Extra)'
+            : '(Mixed)';
     const companyName =
       appConfig?.companyName || 'Hesh Opto Lab Private Limited';
     const companyAddr =
@@ -680,38 +1282,53 @@ export class PdfService {
       Number(data?.forwarding_charges ?? data?.charges_forwarding) || 0;
     const chargeInst =
       Number(data?.installation_charges ?? data?.charges_installation) || 0;
-    const chargeLoad = Number(data?.charges_loading || data?.loading_charges || data?.loading_unloading) || 0;
+    const chargeLoad =
+      Number(
+        data?.charges_loading ||
+          data?.loading_charges ||
+          data?.loading_unloading,
+      ) || 0;
     const roundOff =
       Number(data?.round_off ?? data?.roundoff ?? data?.roundOff) || 0;
     const gstByRate2 = new Map<number, number>();
     for (const it of rows) {
       const base = Number(it?.amount) || 0;
       const pct = Number(it?.gst_percent) || 0;
-      const amt = it?.gst_amount != null ? Number(it.gst_amount) : (base * pct) / 100;
+      const amt =
+        it?.gst_amount != null ? Number(it.gst_amount) : (base * pct) / 100;
       if (pct > 0) gstByRate2.set(pct, (gstByRate2.get(pct) || 0) + amt);
     }
     const grandTotal = Number(data?.total_amount) || 0;
 
     const bookingAt = safe(data?.booking_at, '');
     const goodsSentBy = safe(data?.goods_sent_by, '');
-    const transportPaymentBy = safe(data?.transport_payment_by || data?.payment_type || data?.payment_mode, '');
-    const deliveryInstructions = safe(data?.delivery_instructions || data?.transport, '');
+    const transportPaymentBy = safe(
+      data?.transport_payment_by || data?.payment_type || data?.payment_mode,
+      '',
+    );
+    const deliveryInstructions = safe(
+      data?.delivery_instructions || data?.transport,
+      '',
+    );
     const deliveryType = safe(data?.delivery_type, '');
 
-    const orderNo = safe(data?.order_no || data?.order_number, `#${data?.id || '—'}`);
+    const orderNo = safe(
+      data?.order_no || data?.order_number,
+      `#${data?.id || '—'}`,
+    );
     const salesPerson = safe(data?.salesman_name || data?.sales_person, '');
     const custName = safe(data?.customer_name, '');
-    const billAddr = [
-      data?.billing_address,
-      data?.gst_number ? `GSTIN: ${data.gst_number}` : null,
-      data?.customer_phone ? `Ph: ${data.customer_phone}` : null,
-    ]
-      .filter(Boolean)
-      .join('\n');
+    const custEmail = safe(data?.customer_email, '');
+    const custPhone = safe(data?.customer_phone, '');
+    const billAddr = safe(data?.billing_address, '');
     const shipAddr = safe(data?.shipping_address || data?.billing_address, '');
     const poNumber = safe(data?.po_number, '');
     const orderDate = dateStr(data?.created_at);
-    const deliverDate = dateStr(data?.due_date || data?.deliver_date);
+    const deliverDate =
+      data?.due_date || data?.deliver_date
+        ? dateStr(data.due_date || data.deliver_date)
+        : '—';
+    const quotationNo = safe(data?.quotation_no, '—');
 
     // (dispatch fields read above as bookingAt, goodsSentBy, transportPaymentBy, deliveryInstructions, deliveryType)
 
@@ -721,7 +1338,9 @@ export class PdfService {
 
     // Items table: [S.No, Item Name, Instructions, Qty, Unit, [Disc], Rate, GST, Amount]
     // The Disc column only appears at all if at least one line item actually has a discount.
-    const hasAnyDiscount = rows.some((it: any) => Number(it?.discount_value) > 0);
+    const hasAnyDiscount = rows.some(
+      (it: any) => Number(it?.discount_value) > 0,
+    );
     const itemRows: any[] = rows.map((it: any, i: number) => {
       const base = Number(it?.amount) || 0;
       const gstPct = Number(it?.gst_percent) || 0;
@@ -736,20 +1355,38 @@ export class PdfService {
         { text: String(i + 1), alignment: 'center', fontSize: 9 },
         {
           stack: [
-            { text: safe(it?.item_name || it?.itemName, `Item ${i + 1}`), bold: true, fontSize: 9 },
-            ...(it?.sku ? [{ text: String(it.sku), color: SLATE, fontSize: 7 }] : []),
+            {
+              text: safe(it?.item_name || it?.itemName, `Item ${i + 1}`),
+              bold: true,
+              fontSize: 9,
+            },
+            ...(it?.sku
+              ? [{ text: String(it.sku), color: SLATE, fontSize: 7 }]
+              : []),
           ],
         },
         {
-          text: safe(it?.instruction || it?.instructions || it?.notes, ''),
+          text: breakLongWords(
+            safe(it?.instruction || it?.instructions || it?.notes, ''),
+          ),
           fontSize: 8,
           color: SLATE,
         },
-        { text: String(Number(it?.qty) || 0), alignment: 'center', fontSize: 9 },
+        {
+          text: String(Number(it?.qty) || 0),
+          alignment: 'center',
+          fontSize: 9,
+        },
         { text: safe(it?.unit || '', ''), alignment: 'center', fontSize: 9 },
-        ...(hasAnyDiscount ? [{ text: disc, alignment: 'center', fontSize: 9 }] : []),
+        ...(hasAnyDiscount
+          ? [{ text: disc, alignment: 'center', fontSize: 9 }]
+          : []),
         { text: inr(it?.rate), alignment: 'right', fontSize: 9 },
-        { text: gstPct > 0 ? `${gstPct}%` : '', alignment: 'center', fontSize: 9 },
+        {
+          text: gstPct > 0 ? `${gstPct}%` : '',
+          alignment: 'center',
+          fontSize: 9,
+        },
         { text: inr(base), alignment: 'right', fontSize: 9, bold: true },
       ];
     });
@@ -757,7 +1394,13 @@ export class PdfService {
     if (itemRows.length === 0) {
       const cols = hasAnyDiscount ? 9 : 8;
       itemRows.push([
-        { text: 'No items', colSpan: cols, alignment: 'center', fontSize: 9, color: SLATE },
+        {
+          text: 'No items',
+          colSpan: cols,
+          alignment: 'center',
+          fontSize: 9,
+          color: SLATE,
+        },
         ...Array(cols - 1).fill({}),
       ]);
     }
@@ -780,30 +1423,70 @@ export class PdfService {
     ];
 
     // Totals stack
-    const tRow2 = (label: string, value: number, bold = false, large = false) => ({
+    const tRow2 = (
+      label: string,
+      value: number,
+      bold = false,
+      large = false,
+    ) => ({
       columns: [
-        { text: label, fontSize: large ? 10 : 8.5, bold, color: large ? BLUE : INK, width: '*' },
-        { text: inr(value), fontSize: large ? 10 : 8.5, bold, color: large ? BLUE : INK, width: 'auto', alignment: 'right' },
+        {
+          text: label,
+          fontSize: large ? 10 : 8.5,
+          bold,
+          color: large ? BLUE : INK,
+          width: '*',
+        },
+        {
+          text: inr(value),
+          fontSize: large ? 10 : 8.5,
+          bold,
+          color: large ? BLUE : INK,
+          width: 'auto',
+          alignment: 'right',
+        },
       ],
       margin: [0, large ? 2 : 1, 0, large ? 2 : 1],
     });
-    const tDiv2 = () => ({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: 200, y2: 0, lineWidth: 0.5, lineColor: '#999' }], margin: [0, 3, 0, 3] });
-    const totalBeforeGst2 = subTotal + chargePack + chargeCar + chargeFwd + chargeInst + chargeLoad;
+    const tDiv2 = () => ({
+      canvas: [
+        {
+          type: 'line',
+          x1: 0,
+          y1: 0,
+          x2: 200,
+          y2: 0,
+          lineWidth: 0.5,
+          lineColor: '#999',
+        },
+      ],
+      margin: [0, 3, 0, 3],
+    });
+    const totalBeforeGst2 =
+      subTotal + chargePack + chargeCar + chargeFwd + chargeInst + chargeLoad;
     const totalGstAmt2 = [...gstByRate2.values()].reduce((s, a) => s + a, 0);
     const computedGrandTotal2 = totalBeforeGst2 + totalGstAmt2 + roundOff;
     const totalsStack: any[] = [
       tRow2('Sub Total', subTotal, true, true),
-      ...(chargePack > 0 ? [tRow2('(+) Wooden Packing Charges', chargePack)] : []),
+      ...(chargePack > 0
+        ? [tRow2('(+) Wooden Packing Charges', chargePack)]
+        : []),
       ...(chargeCar > 0 ? [tRow2('(+) Cartage Charges', chargeCar)] : []),
       ...(chargeFwd > 0 ? [tRow2('(+) Forwarding Charges', chargeFwd)] : []),
-      ...(chargeInst > 0 ? [tRow2('(+) Onsite Installation Charges', chargeInst)] : []),
-      ...(chargeLoad > 0 ? [tRow2('(+) Loading & Unloading Charges', chargeLoad)] : []),
+      ...(chargeInst > 0
+        ? [tRow2('(+) Onsite Installation Charges', chargeInst)]
+        : []),
+      ...(chargeLoad > 0
+        ? [tRow2('(+) Loading & Unloading Charges', chargeLoad)]
+        : []),
       tDiv2(),
       tRow2('Total', totalBeforeGst2, true, true),
       tDiv2(),
       ...[...gstByRate2.entries()]
         .sort((a, b) => a[0] - b[0])
-        .map(([pct, amt]) => tRow2(`(+) GST ${pct}% on ${inr(amt * 100 / pct)}`, amt)),
+        .map(([pct, amt]) =>
+          tRow2(`(+) GST ${pct}% on ${inr((amt * 100) / pct)}`, amt),
+        ),
       tDiv2(),
       tRow2('Rounded Off', roundOff),
       tDiv2(),
@@ -838,7 +1521,13 @@ export class PdfService {
       }),
       content: [
         // ── Title ────────────────────────────────────────────────────────
-        { text: 'Order', fontSize: 16, bold: true, alignment: 'center', margin: [0, 0, 0, 6] },
+        {
+          text: 'Order Form',
+          fontSize: 16,
+          bold: true,
+          alignment: 'center',
+          margin: [0, 0, 0, 6],
+        },
 
         // ── Header ──────────────────────────────────────────────────
         {
@@ -846,71 +1535,330 @@ export class PdfService {
             {
               width: '*',
               stack: [
-                { text: companyName, fontSize: 13, bold: true, margin: [0, 0, 0, 3] },
-                { text: companyAddr.replace(/\n/g, ', '), fontSize: 7, margin: [0, 0, 0, 2] },
-                { text: [
-                  { text: 'Mobile: ', bold: true, fontSize: 7 },
-                  { text: companyPhone, fontSize: 7, color: '#374151' },
-                  { text: '     ·     ', fontSize: 7, color: SLATE },
-                  { text: 'Email: ', bold: true, fontSize: 7 },
-                  { text: companyEmail, fontSize: 7, color: '#374151' },
-                ], margin: [0, 0, 0, 2] },
-                { text: [{ text: 'MSME Reg. No.: ', bold: true, fontSize: 7 }, { text: 'UDYAM-TN-02-0034349', fontSize: 7, color: '#374151' }], margin: [0, 0, 0, 2] },
-                { text: [{ text: 'ISO 9001 : 2015 Certified', bold: true, fontSize: 7, color: BLUE }, { text: '  |  QMS System', fontSize: 7, color: SLATE }], margin: [0, 0, 0, 2] },
-                { text: [{ text: 'GSTIN: ', bold: true, fontSize: 7.5 }, { text: companyGstin, bold: true, fontSize: 7.5 }] },
-                ...(salesPerson ? [{ text: `Sales Person: ${salesPerson}`, fontSize: 8, margin: [0, 4, 0, 0] }] : []),
-                { text: `Order Number: ${orderNo}`, fontSize: 8, margin: [0, 2, 0, 0] },
+                {
+                  text: companyName,
+                  fontSize: 13,
+                  bold: true,
+                  margin: [0, 0, 0, 3],
+                },
+                {
+                  text: companyAddr.replace(/\n/g, ', '),
+                  fontSize: 7,
+                  margin: [0, 0, 0, 2],
+                },
+                {
+                  text: [
+                    { text: 'Mobile: ', bold: true, fontSize: 7 },
+                    { text: companyPhone, fontSize: 7, color: '#374151' },
+                    { text: '     ·     ', fontSize: 7, color: SLATE },
+                    { text: 'Email: ', bold: true, fontSize: 7 },
+                    { text: companyEmail, fontSize: 7, color: '#374151' },
+                  ],
+                  margin: [0, 0, 0, 2],
+                },
+                {
+                  text: [
+                    { text: 'MSME Reg. No.: ', bold: true, fontSize: 7 },
+                    {
+                      text: 'UDYAM-TN-02-0034349',
+                      fontSize: 7,
+                      color: '#374151',
+                    },
+                  ],
+                  margin: [0, 0, 0, 2],
+                },
+                {
+                  text: [
+                    {
+                      text: 'ISO 9001 : 2015 Certified',
+                      bold: true,
+                      fontSize: 7,
+                      color: BLUE,
+                    },
+                    { text: '  |  QMS System', fontSize: 7, color: SLATE },
+                  ],
+                  margin: [0, 0, 0, 2],
+                },
+                {
+                  text: [
+                    { text: 'GSTIN: ', bold: true, fontSize: 7.5 },
+                    { text: companyGstin, bold: true, fontSize: 7.5 },
+                  ],
+                },
               ],
             },
-            ...(logoPath ? [{ image: logoPath, fit: [152, 97], width: 158, alignment: 'right' }] : []),
+            ...(logoPath
+              ? [
+                  {
+                    image: logoPath,
+                    fit: [152, 97],
+                    width: 158,
+                    alignment: 'right',
+                  },
+                ]
+              : []),
           ],
           columnGap: 8,
           margin: [0, 0, 0, 8],
         },
 
-        // ── Bill To / Ship To ──────────────────────────────────────────
-        {
-          table: {
-            widths: ['*', '*'],
-            body: [
-              [
-                { text: 'Bill To', fontSize: 10, bold: true, color: '#fff', fillColor: BLUE, margin: [6, 4, 6, 4] },
-                { text: 'Ship To', fontSize: 10, bold: true, color: '#fff', fillColor: BLUE, margin: [6, 4, 6, 4] },
-              ],
-              [
-                {
-                  stack: [
-                    { text: custName, fontSize: 9.5, bold: true, color: INK, margin: [0, 0, 0, 3] },
-                    { text: billAddr, fontSize: 8, color: '#374151', lineHeight: 1.3 },
-                  ],
-                  margin: [6, 6, 6, 6],
-                },
-                {
-                  stack: [
-                    { text: custName, fontSize: 9.5, bold: true, color: INK, margin: [0, 0, 0, 3] },
-                    { text: shipAddr, fontSize: 8, color: '#374151', lineHeight: 1.3 },
-                  ],
-                  margin: [6, 6, 6, 6],
-                },
-              ],
+        // ── Bill To / Ship To / Order Details ───────────────────────────
+        (() => {
+          const labelVal = (
+            label: string,
+            value: string,
+            marginBottom = 5,
+          ) => ({
+            columns: [
+              {
+                text: label,
+                bold: true,
+                fontSize: 8,
+                width: 'auto',
+                color: INK,
+              },
+              {
+                text: value,
+                fontSize: 8,
+                width: '*',
+                color: '#374151',
+                margin: [3, 0, 0, 0],
+              },
             ],
-          },
-          layout: {
-            hLineWidth: (i: number) => (i === 0 || i === 1 || i === 2 ? 0.5 : 0),
-            vLineWidth: (i: number) => (i === 0 || i === 1 || i === 2 ? 0.5 : 0),
-            hLineColor: () => RULE,
-            vLineColor: () => RULE,
-            paddingLeft: () => 0, paddingRight: () => 0,
-            paddingTop: () => 0, paddingBottom: () => 0,
-          },
-          margin: [0, 0, 0, 8],
-        },
+            columnGap: 0,
+            margin: [0, 0, 0, marginBottom],
+          });
+
+          const custPhone2 = safe(
+            data?.customer_phone2 || data?.customer_mobile2,
+            '',
+          ).replace(/^\+91/, '');
+
+          const partyStack = (addr: string) => {
+            const { street, cityLine, stateLine } = splitAddressBlock(addr);
+            return {
+              stack: [
+                {
+                  text: custName.toUpperCase(),
+                  fontSize: 9.5,
+                  bold: true,
+                  color: INK,
+                  margin: [0, 0, 0, 3],
+                },
+                ...(street
+                  ? [
+                      {
+                        text: street,
+                        fontSize: 8,
+                        color: '#374151',
+                        lineHeight: 1.3,
+                        margin: [0, 0, 0, 2],
+                      },
+                    ]
+                  : []),
+                ...(cityLine
+                  ? [
+                      {
+                        text: cityLine,
+                        fontSize: 8,
+                        color: '#374151',
+                        margin: [0, 0, 0, 2],
+                      },
+                    ]
+                  : []),
+                ...(stateLine
+                  ? [
+                      {
+                        text: stateLine,
+                        fontSize: 8,
+                        color: '#374151',
+                        margin: [0, 0, 0, 5],
+                      },
+                    ]
+                  : []),
+                ...(!street && !cityLine && !stateLine
+                  ? [
+                      {
+                        text: '—',
+                        fontSize: 8,
+                        color: '#374151',
+                        margin: [0, 0, 0, 5],
+                      },
+                    ]
+                  : []),
+                ...(custEmail
+                  ? [
+                      {
+                        text: [
+                          { text: 'Email: ', bold: true, fontSize: 8 },
+                          { text: custEmail, fontSize: 8, color: '#374151' },
+                        ],
+                        margin: [0, 0, 0, 3],
+                      },
+                    ]
+                  : []),
+                ...(custPhone
+                  ? [
+                      {
+                        text: [
+                          { text: 'Mobile 1: ', bold: true, fontSize: 8 },
+                          {
+                            text: custPhone,
+                            bold: true,
+                            fontSize: 8,
+                            color: INK,
+                          },
+                        ],
+                        margin: [0, 0, 0, 3],
+                      },
+                    ]
+                  : []),
+                ...(custPhone2
+                  ? [
+                      {
+                        text: [
+                          { text: 'Mobile 2: ', bold: true, fontSize: 8 },
+                          {
+                            text: custPhone2,
+                            bold: true,
+                            fontSize: 8,
+                            color: INK,
+                          },
+                        ],
+                        margin: [0, 0, 0, 3],
+                      },
+                    ]
+                  : []),
+                {
+                  canvas: [
+                    {
+                      type: 'line',
+                      x1: 0,
+                      y1: 0,
+                      x2: 160,
+                      y2: 0,
+                      lineWidth: 0.4,
+                      lineColor: RULE,
+                    },
+                  ],
+                  margin: [0, 4, 0, 4],
+                },
+                {
+                  text: [
+                    { text: 'GSTIN: ', bold: true, fontSize: 8 },
+                    {
+                      text: safe(data?.gst_number, '') || 'URD',
+                      bold: true,
+                      fontSize: 8,
+                      color: INK,
+                    },
+                  ],
+                },
+              ],
+              margin: [6, 6, 6, 6],
+            };
+          };
+
+          return {
+            table: {
+              widths: ['*', '*', '*'],
+              body: [
+                [
+                  {
+                    text: 'Bill To',
+                    fontSize: 10,
+                    bold: true,
+                    color: '#fff',
+                    fillColor: BLUE,
+                    margin: [6, 4, 6, 4],
+                  },
+                  {
+                    text: 'Ship To',
+                    fontSize: 10,
+                    bold: true,
+                    color: '#fff',
+                    fillColor: BLUE,
+                    margin: [6, 4, 6, 4],
+                  },
+                  {
+                    text: 'Order Details',
+                    fontSize: 10,
+                    bold: true,
+                    color: '#fff',
+                    fillColor: BLUE,
+                    margin: [6, 4, 6, 4],
+                  },
+                ],
+                [
+                  partyStack(billAddr),
+                  partyStack(shipAddr),
+                  {
+                    stack: [
+                      labelVal('Date:', orderDate),
+                      labelVal('Order No:', orderNo),
+                      labelVal('Sales Man Name:', salesPerson || '—'),
+                      labelVal('Ref Quotation No:', quotationNo),
+                      {
+                        canvas: [
+                          {
+                            type: 'line',
+                            x1: 0,
+                            y1: 0,
+                            x2: 160,
+                            y2: 0,
+                            lineWidth: 0.4,
+                            lineColor: RULE,
+                          },
+                        ],
+                        margin: [0, 2, 0, 5],
+                      },
+                      labelVal('Payment Terms:', appConfig.paymentTerms),
+                      labelVal('Delivery Date:', deliverDate),
+                      // PO Document is deliberately not linked here — this template
+                      // is shared by the downloadable PDF, and the WhatsApp/Email
+                      // attachments generated from it, none of which can usefully
+                      // carry a link back into the app. It's shown on the order's
+                      // on-screen View page instead (OrderTemplate.js).
+                      ...(poNumber
+                        ? [labelVal('PO Number:', poNumber, 0)]
+                        : []),
+                    ],
+                    margin: [5, 5, 5, 5],
+                  },
+                ],
+              ],
+            },
+            layout: {
+              hLineWidth: (i: number) =>
+                i === 0 || i === 1 || i === 2 ? 0.5 : 0,
+              vLineWidth: (i: number) =>
+                i === 0 || i === 1 || i === 2 || i === 3 ? 0.5 : 0,
+              hLineColor: () => RULE,
+              vLineColor: () => RULE,
+              paddingLeft: () => 0,
+              paddingRight: () => 0,
+              paddingTop: () => 0,
+              paddingBottom: () => 0,
+            },
+            margin: [0, 0, 0, 8],
+          };
+        })(),
 
         // ── Items table ──────────────────────────────────────────────
         {
           table: {
             headerRows: 1,
-            widths: [20, '*', 58, 20, 26, ...(hasAnyDiscount ? [28] : []), 48, 24, 50],
+            widths: [
+              20,
+              '*',
+              58,
+              20,
+              26,
+              ...(hasAnyDiscount ? [28] : []),
+              48,
+              24,
+              50,
+            ],
             body: [
               [
                 { text: 'S.No', style: 'th', alignment: 'center' },
@@ -918,13 +1866,25 @@ export class PdfService {
                 { text: 'Instructions', style: 'th' },
                 { text: 'Qty', style: 'th', alignment: 'center' },
                 { text: 'Unit', style: 'th', alignment: 'center' },
-                ...(hasAnyDiscount ? [{ text: 'Disc.', style: 'th', alignment: 'center' }] : []),
+                ...(hasAnyDiscount
+                  ? [{ text: 'Disc.', style: 'th', alignment: 'center' }]
+                  : []),
                 { text: 'Rate (₹)', style: 'th', alignment: 'right' },
                 { text: 'GST Tax', style: 'th', alignment: 'center' },
                 {
                   stack: [
-                    { text: 'Amount (₹)', fontSize: 8.5, bold: true, color: '#fff' },
-                    { text: taxLabel, fontSize: 5.5, color: '#fff', italics: true },
+                    {
+                      text: 'Amount (₹)',
+                      fontSize: 8.5,
+                      bold: true,
+                      color: '#fff',
+                    },
+                    {
+                      text: taxLabel,
+                      fontSize: 5.5,
+                      color: '#fff',
+                      italics: true,
+                    },
                   ],
                   alignment: 'right',
                   fillColor: BLUE,
@@ -935,7 +1895,9 @@ export class PdfService {
           },
           layout: {
             hLineWidth: (i: number, node: any) =>
-              i === 0 || i === node.table.headerRows || i === node.table.body.length
+              i === 0 ||
+              i === node.table.headerRows ||
+              i === node.table.body.length
                 ? 1
                 : 0.5,
             vLineWidth: () => 1,
@@ -955,33 +1917,89 @@ export class PdfService {
           columns: [
             // QR code
             ...(qrPath
-              ? [{
-                  width: 90,
-                  stack: [
-                    { text: 'Scan to Pay', fontSize: 7.5, bold: true, alignment: 'center', color: INK, margin: [0, 0, 0, 3] },
-                    { image: qrPath, fit: [80, 80], width: 80, alignment: 'center' },
-                    { text: 'Google Pay / UPI', fontSize: 6.5, alignment: 'center', color: SLATE, margin: [0, 3, 0, 0] },
-                  ],
-                }]
+              ? [
+                  {
+                    width: 90,
+                    stack: [
+                      {
+                        text: 'Scan to Pay',
+                        fontSize: 7.5,
+                        bold: true,
+                        alignment: 'center',
+                        color: INK,
+                        margin: [0, 0, 0, 3],
+                      },
+                      {
+                        image: qrPath,
+                        fit: [80, 80],
+                        width: 80,
+                        alignment: 'center',
+                      },
+                      {
+                        text: 'Google Pay / UPI',
+                        fontSize: 6.5,
+                        alignment: 'center',
+                        color: SLATE,
+                        margin: [0, 3, 0, 0],
+                      },
+                    ],
+                  },
+                ]
               : []),
             // Bank details + Dispatch Details (left column)
             {
               width: '*',
               stack: [
-                { text: 'Account Details', fontSize: 9.5, bold: true, color: BLUE, margin: [0, 0, 0, 5] },
+                {
+                  text: 'Account Details',
+                  fontSize: 9.5,
+                  bold: true,
+                  color: BLUE,
+                  margin: [0, 0, 0, 5],
+                },
                 ...accountLines,
-                { canvas: [{ type: 'line', x1: 0, y1: 0, x2: 200, y2: 0, lineWidth: 0.5, lineColor: RULE }], margin: [0, 10, 0, 8] },
-                { text: 'Dispatch Details', fontSize: 9.5, bold: true, color: BLUE, margin: [0, 0, 0, 5] },
+                {
+                  canvas: [
+                    {
+                      type: 'line',
+                      x1: 0,
+                      y1: 0,
+                      x2: 200,
+                      y2: 0,
+                      lineWidth: 0.5,
+                      lineColor: RULE,
+                    },
+                  ],
+                  margin: [0, 10, 0, 8],
+                },
+                {
+                  text: 'Dispatch Details',
+                  fontSize: 9.5,
+                  bold: true,
+                  color: BLUE,
+                  margin: [0, 0, 0, 5],
+                },
                 ...[
-                  ['Booking At',           bookingAt           || '—'],
-                  ['Goods Sent By',        goodsSentBy         || '—'],
-                  ['Transport Payment By', transportPaymentBy  || '—'],
-                  ['Delivery Location',    deliveryType        || '—'],
-                  ['Delivery Instruction', deliveryInstructions|| '—'],
+                  ['Booking At', bookingAt || '—'],
+                  ['Goods Sent By', goodsSentBy || '—'],
+                  ['Transport Payment By', transportPaymentBy || '—'],
+                  ['Delivery Location', deliveryType || '—'],
+                  ['Delivery Instruction', deliveryInstructions || '—'],
                 ].map(([label, value]) => ({
                   columns: [
-                    { text: `${label}:`, bold: true, fontSize: 8, width: 115, color: INK },
-                    { text: value, fontSize: 8, width: '*', color: value === '—' ? SLATE : '#374151' },
+                    {
+                      text: `${label}:`,
+                      bold: true,
+                      fontSize: 8,
+                      width: 115,
+                      color: INK,
+                    },
+                    {
+                      text: breakLongWords(value) || value,
+                      fontSize: 8,
+                      width: '*',
+                      color: value === '—' ? SLATE : '#374151',
+                    },
                   ],
                   margin: [0, 0, 0, 3],
                 })),
@@ -991,7 +2009,17 @@ export class PdfService {
             // Divider
             {
               width: 0.5,
-              canvas: [{ type: 'line', x1: 0, y1: 0, x2: 0, y2: 220, lineWidth: 0.5, lineColor: '#aaa' }],
+              canvas: [
+                {
+                  type: 'line',
+                  x1: 0,
+                  y1: 0,
+                  x2: 0,
+                  y2: 220,
+                  lineWidth: 0.5,
+                  lineColor: '#aaa',
+                },
+              ],
             },
             // Totals
             {
@@ -1027,6 +2055,175 @@ export class PdfService {
   // ── Template: Invoice ────────────────────────────────────────────────────────
 
   invoiceTemplate(data: any): any {
+    const BLUE = '#016bb2';
+    const INK = '#0f172a';
+    const RULE = '#cbd5e1';
+    const safe = (v: any, fallback = '—') =>
+      v != null && String(v).trim() !== '' ? String(v) : fallback;
+
+    const custName = safe(data?.customer_name, '');
+    const custPhone = safe(data?.customer_phone, '');
+    const custPhone2 = safe(
+      data?.customer_phone2 || data?.customer_mobile2,
+      '',
+    );
+    const custEmail = safe(data?.customer_email, '');
+    const billAddr = safe(data?.billing_address, '');
+    const shipAddr = safe(data?.shipping_address || data?.billing_address, '');
+
+    const partyStack = (addr: string) => {
+      const { street, cityLine, stateLine } = splitAddressBlock(addr);
+      return {
+        stack: [
+          {
+            text: custName.toUpperCase(),
+            fontSize: 9.5,
+            bold: true,
+            color: INK,
+            margin: [0, 0, 0, 3],
+          },
+          ...(street
+            ? [
+                {
+                  text: street,
+                  fontSize: 8,
+                  color: '#374151',
+                  lineHeight: 1.3,
+                  margin: [0, 0, 0, 2],
+                },
+              ]
+            : []),
+          ...(cityLine
+            ? [
+                {
+                  text: cityLine,
+                  fontSize: 8,
+                  color: '#374151',
+                  margin: [0, 0, 0, 2],
+                },
+              ]
+            : []),
+          ...(stateLine
+            ? [
+                {
+                  text: stateLine,
+                  fontSize: 8,
+                  color: '#374151',
+                  margin: [0, 0, 0, 5],
+                },
+              ]
+            : []),
+          ...(!street && !cityLine && !stateLine
+            ? [
+                {
+                  text: '—',
+                  fontSize: 8,
+                  color: '#374151',
+                  margin: [0, 0, 0, 5],
+                },
+              ]
+            : []),
+          ...(custEmail
+            ? [
+                {
+                  text: [
+                    { text: 'Email: ', bold: true, fontSize: 8 },
+                    { text: custEmail, fontSize: 8, color: '#374151' },
+                  ],
+                  margin: [0, 0, 0, 3],
+                },
+              ]
+            : []),
+          ...(custPhone
+            ? [
+                {
+                  text: [
+                    { text: 'Mobile 1: ', bold: true, fontSize: 8 },
+                    { text: custPhone, bold: true, fontSize: 8, color: INK },
+                  ],
+                  margin: [0, 0, 0, 3],
+                },
+              ]
+            : []),
+          ...(custPhone2
+            ? [
+                {
+                  text: [
+                    { text: 'Mobile 2: ', bold: true, fontSize: 8 },
+                    { text: custPhone2, bold: true, fontSize: 8, color: INK },
+                  ],
+                  margin: [0, 0, 0, 3],
+                },
+              ]
+            : []),
+          {
+            canvas: [
+              {
+                type: 'line',
+                x1: 0,
+                y1: 0,
+                x2: 160,
+                y2: 0,
+                lineWidth: 0.4,
+                lineColor: RULE,
+              },
+            ],
+            margin: [0, 4, 0, 4],
+          },
+          {
+            text: [
+              { text: 'GSTIN: ', bold: true, fontSize: 8 },
+              {
+                text: safe(data?.gst_number, '') || 'URD',
+                bold: true,
+                fontSize: 8,
+                color: INK,
+              },
+            ],
+          },
+        ],
+        margin: [6, 6, 6, 6],
+      };
+    };
+
+    const billShipTable = {
+      table: {
+        widths: ['*', '*'],
+        body: [
+          [
+            {
+              text: 'Bill To',
+              fontSize: 10,
+              bold: true,
+              color: '#fff',
+              fillColor: BLUE,
+              margin: [6, 4, 6, 4],
+            },
+            {
+              text: 'Ship To',
+              fontSize: 10,
+              bold: true,
+              color: '#fff',
+              fillColor: BLUE,
+              margin: [6, 4, 6, 4],
+            },
+          ],
+          [partyStack(billAddr), partyStack(shipAddr)],
+        ],
+      },
+      layout: {
+        hLineWidth: (i: number) => (i === 0 || i === 1 || i === 2 ? 0.5 : 0),
+        vLineWidth: (i: number) => (i === 0 || i === 1 || i === 2 ? 0.5 : 0),
+        hLineColor: () => RULE,
+        vLineColor: () => RULE,
+        paddingLeft: () => 0,
+        paddingRight: () => 0,
+        paddingTop: () => 0,
+        paddingBottom: () => 0,
+      },
+      margin: [0, 6, 0, 8],
+    };
+
     const items = (Array.isArray(data?.items) ? data.items : []).map(
       (item: any, i: number) => [
         String(i + 1),
@@ -1046,16 +2243,19 @@ export class PdfService {
 
     return {
       content: [
-        { text: 'Tax Invoice', fontSize: 18, bold: true, alignment: 'center', margin: [0, 0, 0, 8] },
+        {
+          text: 'Tax Invoice',
+          fontSize: 18,
+          bold: true,
+          alignment: 'center',
+          margin: [0, 0, 0, 8],
+        },
         { text: appConfig?.companyName || 'Saachu', style: 'header' },
         {
           text: `INVOICE: ${data?.invoice_no || data?.id || ''}`,
           style: 'subheader',
         },
-        {
-          text: `Customer: ${data?.customer_name || ''}`,
-          margin: [0, 4, 0, 2],
-        },
+        billShipTable,
         ...(ownershipLines.length
           ? [{ stack: ownershipLines, margin: [0, 0, 0, 8] }]
           : []),

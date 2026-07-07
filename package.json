@@ -88,6 +88,14 @@
     "migrate:quotation-order-unit": "node scripts/migrate-quotation-order-unit.js",
     "migrate:tax-inclusive": "node scripts/migrate-tax-inclusive.js",
     "migrate:tax-inclusive-per-item": "node scripts/migrate-tax-inclusive-per-item.js",
+    "migrate:round-off": "node scripts/migrate-round-off.js",
+    "migrate:document-no-counter": "node scripts/migrate-document-no-counter.js",
+    "migrate:invoice-estimate-counter": "node scripts/migrate-invoice-estimate-counter.js",
+    "migrate:orders-legacy-columns": "node scripts/migrate-orders-legacy-columns.js",
+    "migrate:order-po-fields": "node scripts/migrate-order-po-fields.js",
+    "migrate:order-advance-payment-fields": "node scripts/migrate-order-advance-payment-fields.js",
+    "migrate:order-approval-timestamp": "node scripts/migrate-order-approval-timestamp.js",
+    "migrate:payment-terms": "node scripts/migrate-payment-terms.js",
     "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {

@@ -7,7 +7,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   enrichRowsWithSalesman,
@@ -39,17 +39,21 @@ export class QuotationService {
     private readonly eventEmitter: EventEmitter2,
   ) {}
 
-  // ── Quotation number generator — QUO0001 format ──────────────────────────────
-  // Uses a Postgres sequence for atomic, collision-free increment.
-  // nextval() never returns the same value twice, even under concurrent load,
-  // and does not roll back if the surrounding transaction is aborted.
-
-  private async generateQuotationNo(): Promise<string> {
-    const rows = await this.quotationRepo.manager.query(
-      `SELECT nextval('quotation_no_seq') AS next`,
+  // ── Quotation number generator — Quo-00001 format ────────────────────────────
+  // Uses the document_no_counter table (not a Postgres SEQUENCE) so the
+  // increment participates in the caller's transaction — a rolled-back create
+  // (validation error, DB error, etc.) gives the number back instead of
+  // burning it, which a sequence's nextval() never does. Keyed by name
+  // ('quotation') independently of every other document's counter row.
+  private async generateQuotationNo(manager: EntityManager): Promise<string> {
+    // TypeORM's query() special-cases UPDATE/DELETE: it returns [rows,
+    // affectedCount] instead of rows directly (unlike a plain SELECT) — so
+    // the RETURNING row is result[0][0], not result[0].
+    const result = await manager.query(
+      `UPDATE document_no_counter SET value = value + 1 WHERE name = 'quotation' RETURNING value`,
     );
-    const next = Number(rows[0].next);
-    return `QUO${String(next).padStart(4, '0')}`;
+    const next = Number(result[0][0].value);
+    return `Quo-${String(next).padStart(5, '0')}`;
   }
 
   // ── Customer snapshot ─────────────────────────────────────────────────────────
@@ -67,15 +71,19 @@ export class QuotationService {
     gst_number: string;
   } | null> {
     const rows = await this.quotationRepo.manager.query<any[]>(
-      `SELECT "companyName", "contactName", "mobile1", "address", "city", "state", "pincode", "gstNumber"
+      `SELECT "companyName", "contactName", "mobile1", "address", "city", "state", "pincode", "country", "gstNumber"
        FROM customer WHERE id = $1 LIMIT 1`,
       [customerId],
     );
     if (!rows.length) return null;
     const c = rows[0];
-    const addressParts = [c.address, c.city, c.state, c.pincode].filter(
-      Boolean,
-    );
+    const addressParts = [
+      c.address,
+      c.city,
+      c.state,
+      c.pincode,
+      c.country,
+    ].filter(Boolean);
     const fullAddress = addressParts.join(', ');
     return {
       customer_name: c.companyName || c.contactName || '',
@@ -117,6 +125,49 @@ export class QuotationService {
       customerId,
     ]);
     return rows.length > 0 ? !!rows[0].isWholesaler : fallback;
+  }
+
+  // ── Payment terms resolution ──────────────────────────────────────────────────
+
+  /**
+   * Wholesaler customers always get "Credit for {credit_days} days" auto-assigned
+   * from their own credit-limit record — never the manually-submitted value —
+   * and are blocked entirely if no credit limit has been assigned yet. Everyone
+   * else's submitted payment_terms/credit_days is trusted as-is (the frontend
+   * dropdown already constrains the option set).
+   */
+  private async resolvePaymentTerms(
+    customerId: number | undefined,
+    data: any,
+  ): Promise<{ payment_terms: string | null; credit_days: number | null }> {
+    if (!customerId) {
+      return {
+        payment_terms: data.payment_terms ?? null,
+        credit_days: data.credit_days ?? null,
+      };
+    }
+    const rows = await this.quotationRepo.manager.query<
+      { isWholesaler: boolean; creditLimit: string; credit_days: number }[]
+    >(
+      `SELECT "isWholesaler", "creditLimit", credit_days FROM customer WHERE id = $1 LIMIT 1`,
+      [customerId],
+    );
+    const customer = rows[0];
+    if (customer?.isWholesaler) {
+      if (!(Number(customer.creditLimit) > 0)) {
+        throw new BadRequestException(
+          'This customer is a Wholesaler with no Credit Limit assigned. Set a credit limit for this customer before creating or updating this document.',
+        );
+      }
+      return {
+        payment_terms: `Credit for ${customer.credit_days} days`,
+        credit_days: customer.credit_days,
+      };
+    }
+    return {
+      payment_terms: data.payment_terms ?? null,
+      credit_days: data.credit_days ?? null,
+    };
   }
 
   // ── Base price resolution ─────────────────────────────────────────────────────
@@ -164,7 +215,9 @@ export class QuotationService {
    * snapshotted when the line item was created (which may predate any photo
    * ever being uploaded to that item).
    */
-  private async enrichItemsWithLiveImage(items: QuotationItem[]): Promise<void> {
+  private async enrichItemsWithLiveImage(
+    items: QuotationItem[],
+  ): Promise<void> {
     await Promise.all(
       items.map(async (it) => {
         if (!it.sku) return;
@@ -227,8 +280,7 @@ export class QuotationService {
         null;
       // Unit of measure — frontend override takes precedence, else snapshot from
       // the service-item/Shopify catalog master resolved above.
-      qi.unit =
-        (item.unit as string | null | undefined) ?? masterUnit ?? null;
+      qi.unit = (item.unit as string | null | undefined) ?? masterUnit ?? null;
       // Each item carries its own tax mode — falls back to the document-level
       // default only when the item didn't specify one (e.g. older payloads).
       qi.is_tax_inclusive =
@@ -269,8 +321,15 @@ export class QuotationService {
     items: QuotationItem[],
     data: any,
     existing?: Quotation,
-  ): { sub_total: number; total_amount: number } {
+  ): { sub_total: number; total_amount: number; round_off: number } {
     const sub_total = items.reduce((s, i) => s + Number(i.amount), 0);
+    // GST wasn't previously added into total_amount at all — sub_total only
+    // ever holds the GST-exclusive per-item amount (see mapItems), so the
+    // tax portion has to be summed in separately here.
+    const gstTotal = items.reduce(
+      (s, i) => s + (Number(i.amount) * Number(i.gst_percent)) / 100,
+      0,
+    );
 
     const charges =
       Number(data.charges_packing ?? existing?.charges_packing ?? 0) +
@@ -291,7 +350,17 @@ export class QuotationService {
         ? discountValue
         : (sub_total * discountValue) / 100;
 
-    return { sub_total, total_amount: sub_total - headerDiscount + charges };
+    // Round the amount actually charged/owed to the nearest rupee — round_off
+    // is the (possibly negative) adjustment, shown as its own line on the
+    // PDF/print so the printed total always matches what's tracked.
+    const rawTotal = Math.max(
+      0,
+      sub_total - headerDiscount + charges + gstTotal,
+    );
+    const total_amount = Math.round(rawTotal);
+    const round_off = Math.round((total_amount - rawTotal) * 100) / 100;
+
+    return { sub_total, total_amount, round_off };
   }
 
   // ── Guards ────────────────────────────────────────────────────────────────────
@@ -362,7 +431,11 @@ export class QuotationService {
       !!data.is_wholesaler,
     );
     const isTaxInclusive = !!data.is_tax_inclusive;
-    const items = await this.mapItems(data.items || [], isWholesaler, isTaxInclusive);
+    const items = await this.mapItems(
+      data.items || [],
+      isWholesaler,
+      isTaxInclusive,
+    );
 
     // Only enforce item presence for confirmed (non-draft) submissions.
     if (targetStatus !== QuotationStatus.DRAFT && items.length === 0) {
@@ -371,51 +444,63 @@ export class QuotationService {
       );
     }
 
-    const { sub_total, total_amount } = this.calcTotals(items, data);
+    const { sub_total, total_amount, round_off } = this.calcTotals(items, data);
 
     // Snapshot customer at creation — immutable historical record.
     const snap = await this.snapshotCustomer(data.customer_id);
+    const paymentTerms = await this.resolvePaymentTerms(data.customer_id, data);
 
-    const quotation_no = await this.generateQuotationNo();
+    // Number generation + save happen in one transaction — if the save fails
+    // for any reason, the number-counter increment rolls back with it instead
+    // of being permanently burned (see generateQuotationNo).
+    const saved = await this.quotationRepo.manager.transaction(
+      async (manager) => {
+        const quotation_no = await this.generateQuotationNo(manager);
 
-    const quotation = this.quotationRepo.create({
-      quotation_no,
-      lead_id: data.lead_id,
-      customer_id: data.customer_id,
-      customer_name: data.customer_name ?? snap?.customer_name ?? '',
-      customer_phone: data.customer_phone ?? snap?.customer_phone ?? '',
-      billing_address: data.billing_address ?? snap?.billing_address ?? '',
-      shipping_address: data.shipping_address ?? snap?.shipping_address ?? '',
-      gst_number: data.gst_number ?? snap?.gst_number ?? '',
-      bill_to_id: data.bill_to_id,
-      ship_to_id: data.ship_to_id,
-      salesman_id: this.resolveSalesmanId(data, user),
-      status: targetStatus,
-      validity_days: validityDays,
-      valid_till,
-      delivery_by: data.delivery_by,
-      booking_at: data.booking_at ?? null,
-      goods_sent_by: data.goods_sent_by ?? null,
-      transport_payment_by: data.transport_payment_by ?? null,
-      delivery_type: data.delivery_type,
-      payment_type: data.payment_type,
-      delivery_instructions: data.delivery_instructions,
-      discount_type: data.discount_type ?? QuotationDiscountType.PERCENT,
-      discount_value: data.discount_value ?? 0,
-      is_tax_inclusive: isTaxInclusive,
-      charges_packing: data.charges_packing || 0,
-      charges_cartage: data.charges_cartage || 0,
-      charges_forwarding: data.charges_forwarding || 0,
-      charges_installation: data.charges_installation || 0,
-      charges_loading: data.charges_loading || 0,
-      sub_total,
-      total_amount,
-      created_by: user?.id,
-      is_wholesaler: !!data.is_wholesaler,
-      items,
-    });
+        const quotation = manager.getRepository(Quotation).create({
+          quotation_no,
+          lead_id: data.lead_id,
+          customer_id: data.customer_id,
+          customer_name: data.customer_name ?? snap?.customer_name ?? '',
+          customer_phone: data.customer_phone ?? snap?.customer_phone ?? '',
+          billing_address: data.billing_address ?? snap?.billing_address ?? '',
+          shipping_address:
+            data.shipping_address ?? snap?.shipping_address ?? '',
+          gst_number: data.gst_number ?? snap?.gst_number ?? '',
+          bill_to_id: data.bill_to_id,
+          ship_to_id: data.ship_to_id,
+          salesman_id: this.resolveSalesmanId(data, user),
+          status: targetStatus,
+          validity_days: validityDays,
+          valid_till,
+          delivery_by: data.delivery_by,
+          booking_at: data.booking_at ?? null,
+          goods_sent_by: data.goods_sent_by ?? null,
+          transport_payment_by: data.transport_payment_by ?? null,
+          delivery_type: data.delivery_type,
+          payment_type: data.payment_type,
+          payment_terms: paymentTerms.payment_terms,
+          credit_days: paymentTerms.credit_days,
+          delivery_instructions: data.delivery_instructions,
+          discount_type: data.discount_type ?? QuotationDiscountType.PERCENT,
+          discount_value: data.discount_value ?? 0,
+          is_tax_inclusive: isTaxInclusive,
+          charges_packing: data.charges_packing || 0,
+          charges_cartage: data.charges_cartage || 0,
+          charges_forwarding: data.charges_forwarding || 0,
+          charges_installation: data.charges_installation || 0,
+          charges_loading: data.charges_loading || 0,
+          sub_total,
+          round_off,
+          total_amount,
+          created_by: user?.id,
+          is_wholesaler: !!data.is_wholesaler,
+          items,
+        });
 
-    const saved = await this.quotationRepo.save(quotation);
+        return manager.getRepository(Quotation).save(quotation);
+      },
+    );
     this.eventEmitter.emit('quotation.created', {
       id: saved.id,
       quotation_no: saved.quotation_no,
@@ -530,8 +615,13 @@ export class QuotationService {
         data.customer_id ?? quotation.customer_id,
         data.is_wholesaler ?? quotation.is_wholesaler,
       );
-      const isTaxInclusive = data.is_tax_inclusive ?? quotation.is_tax_inclusive;
-      effectiveItems = await this.mapItems(data.items || [], isWholesaler, isTaxInclusive);
+      const isTaxInclusive =
+        data.is_tax_inclusive ?? quotation.is_tax_inclusive;
+      effectiveItems = await this.mapItems(
+        data.items || [],
+        isWholesaler,
+        isTaxInclusive,
+      );
 
       // Determine target status — respect explicit status in update payload.
       const targetStatus = data.status ?? quotation.status;
@@ -548,13 +638,21 @@ export class QuotationService {
     }
 
     // Always recalculate — charge-only or discount-only changes must also update totals.
-    const { sub_total, total_amount } = this.calcTotals(
+    const { sub_total, total_amount, round_off } = this.calcTotals(
       effectiveItems,
       data,
       quotation,
     );
     data.sub_total = sub_total;
+    data.round_off = round_off;
     data.total_amount = total_amount;
+
+    const paymentTerms = await this.resolvePaymentTerms(
+      data.customer_id ?? quotation.customer_id,
+      data,
+    );
+    data.payment_terms = paymentTerms.payment_terms;
+    data.credit_days = paymentTerms.credit_days;
 
     // Re-snapshot if customer changed (only reachable on DRAFT due to guard above).
     if (data.customer_id && data.customer_id !== quotation.customer_id) {
@@ -622,6 +720,7 @@ export class QuotationService {
   async convertToOrder(
     id: number,
     user?: any,
+    extra?: { due_date?: string; po_number?: string; po_document_url?: string },
   ): Promise<{ order_id: number; quotation_id: number; order_no: string }> {
     const quotation = await this.findOne(id);
 
@@ -689,6 +788,7 @@ export class QuotationService {
       discount_type: i.discount_type,
       discount_value: i.discount_value,
       gst_percent: i.gst_percent,
+      is_tax_inclusive: i.is_tax_inclusive,
       instruction: i.instruction,
       billing_category: i.billing_category ?? null,
       image_url: i.image_url ?? null,
@@ -712,6 +812,17 @@ export class QuotationService {
         forwarding_charges: quotation.charges_forwarding,
         installation_charges: quotation.charges_installation,
         loading_charges: quotation.charges_loading,
+        booking_at: quotation.booking_at,
+        goods_sent_by: quotation.goods_sent_by,
+        transport_payment_by: quotation.transport_payment_by,
+        delivery_type: quotation.delivery_type,
+        delivery_instructions: quotation.delivery_instructions,
+        payment_terms: quotation.payment_terms,
+        credit_days: quotation.credit_days,
+        is_wholesaler: quotation.is_wholesaler,
+        due_date: extra?.due_date ?? null,
+        po_number: extra?.po_number ?? null,
+        po_document_url: extra?.po_document_url ?? null,
         quotation_id: quotation.id,
         status: 'GENERATED',
         items: orderItems,

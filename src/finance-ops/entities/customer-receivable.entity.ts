@@ -57,6 +57,9 @@ export class CustomerReceivable {
   @Column({ type: 'text', nullable: true })
   remarks: string | null;
 
+  @Column({ name: 'last_customer_reminder_sent', type: 'date', nullable: true })
+  lastCustomerReminderSent: string | null;
+
   @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 }

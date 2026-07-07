@@ -93,6 +93,7 @@ export class CustomersController {
       credit_days?: number;
       credit_limit_amount?: number;
       isWholesaler?: boolean;
+      stopPaymentReminder?: boolean;
     },
   ) {
     const update: any = {};
@@ -101,6 +102,8 @@ export class CustomersController {
       update.creditLimit = body.credit_limit_amount;
     if (body.isWholesaler !== undefined)
       update.isWholesaler = body.isWholesaler;
+    if (body.stopPaymentReminder !== undefined)
+      update.stopPaymentReminder = body.stopPaymentReminder;
     return this.customersService.update(Number(id), update);
   }
 }

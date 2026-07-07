@@ -7,6 +7,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { SlaEvent, SlaModule, SlaPriority } from './entities/sla-event.entity';
 import { NotificationService } from '../notifications/notification.service';
 import { DbHealthService } from '../shared/db-health.service';
+import { RbacService } from '../rbac/rbac.service';
 import {
   NotificationType,
   NotificationPriority,
@@ -16,12 +17,14 @@ import { User } from '../users/entities/user.entity';
 
 const NOTIFY_COOLDOWN_MS = 60 * 60_000; // 1 hour between re-notifications for same SLA
 
-// First manager role tried per module; falls back to Admin if no match found
-const MANAGER_ROLES: Record<string, string[]> = {
-  CRM: ['Sales Manager'],
-  PRODUCTION: ['Production Manager'],
-  ACCOUNTS: ['Admin'],
-  DISPATCH: ['Admin'],
+// The permission whose current holders (per the live RBAC matrix) are treated
+// as "the manager" for that module's escalation — not a hardcoded role name,
+// so it keeps working if roles are renamed or reassigned in Staff Management.
+// ACCOUNTS/DISPATCH have no dedicated "manager" permission today, so they
+// intentionally fall straight through to the Admin escalation below.
+const MODULE_ESCALATION_PERMISSION: Record<string, string> = {
+  CRM: 'lead.assign',
+  PRODUCTION: 'production.assign',
 };
 
 const JOB_PRIORITY_MAP: Record<string, SlaPriority> = {
@@ -53,6 +56,7 @@ export class SlaEngineService {
     private readonly notifService: NotificationService,
     private readonly eventEmitter: EventEmitter2,
     private readonly dbHealth: DbHealthService,
+    private readonly rbacService: RbacService,
   ) {}
 
   // ── SLA creation ─────────────────────────────────────────────────────────────
@@ -274,7 +278,10 @@ export class SlaEngineService {
     event: SlaEvent,
     now: Date,
   ): Promise<boolean> {
-    const managerRoles = MANAGER_ROLES[event.module] ?? [];
+    const permission = MODULE_ESCALATION_PERMISSION[event.module];
+    const managerRoles = permission
+      ? this.rbacService.getRoleNamesWithPermission(permission)
+      : [];
     const managers = managerRoles.length
       ? await this.userRepo.find({
           where: managerRoles.map((role) => ({ role, is_active: true })),

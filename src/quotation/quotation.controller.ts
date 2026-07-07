@@ -97,8 +97,12 @@ export class QuotationController {
 
   @Post(':id/convert-to-order')
   @RequirePermission('quotation.convert')
-  convertToOrder(@Param('id') id: string, @Request() req: any) {
-    return this.quotationService.convertToOrder(Number(id), req.user);
+  convertToOrder(
+    @Param('id') id: string,
+    @Body() body: any,
+    @Request() req: any,
+  ) {
+    return this.quotationService.convertToOrder(Number(id), req.user, body);
   }
 
   @Get(':id/pdf')
@@ -129,7 +133,7 @@ export class QuotationController {
     );
     await this.documentActionLogService.record('quotation', numId, 'pdf');
     const filename =
-      ((data as any).quotation_no || `QUO-${id}`).replace(/\//g, '-') + '.pdf';
+      ((data as any).quotation_no || `Quo-${id}`).replace(/\//g, '-') + '.pdf';
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': `attachment; filename="${filename}"`,

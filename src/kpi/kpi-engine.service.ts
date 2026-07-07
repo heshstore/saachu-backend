@@ -218,7 +218,7 @@ export class KpiEngineService {
             COUNT(*) FILTER (WHERE status IN ('GENERATED','CONVERTED'))::int              AS sent,
             COUNT(*) FILTER (WHERE status = 'CONVERTED')::float /
               NULLIF(COUNT(*) FILTER (WHERE status IN ('GENERATED','CONVERTED')), 0) * 100  AS conversion_rate
-          FROM quotations
+          FROM quotation
           WHERE created_at BETWEEN $1 AND $2
           ${userId ? `AND created_by = ${userId}` : ''}
         `,
@@ -265,7 +265,7 @@ export class KpiEngineService {
           FROM "user" u
           LEFT JOIN leads l       ON l.assigned_to = u.id AND l.created_at BETWEEN $1 AND $2 AND l.is_active = true
           LEFT JOIN lead_followups lf ON lf.created_by = u.id AND lf.due_date BETWEEN $1 AND $2
-          LEFT JOIN quotations q   ON q.created_by  = u.id AND q.created_at BETWEEN $1 AND $2
+          LEFT JOIN quotation q   ON q.created_by  = u.id AND q.created_at BETWEEN $1 AND $2
           WHERE u.is_active = true AND u.role IN ('Admin','Sales Manager','Salesman','COO')
           GROUP BY u.id, u.name
           HAVING COUNT(DISTINCT l.id) > 0 OR COUNT(DISTINCT q.id) > 0
@@ -581,7 +581,7 @@ export class KpiEngineService {
                  0
                )::numeric AS value
         FROM "user" u
-        LEFT JOIN quotations q ON q.created_by = u.id AND q.created_at BETWEEN $1 AND $2
+        LEFT JOIN quotation q ON q.created_by = u.id AND q.created_at BETWEEN $1 AND $2
         WHERE u.is_active = true
         GROUP BY u.id, u.name
         HAVING COUNT(q.id) >= 2

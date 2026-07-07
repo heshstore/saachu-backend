@@ -118,13 +118,21 @@ export class OrdersService {
     );
   }
 
-  // ── Order number generator — ORD0001 format ──────────────────────────────────
-  private async generateOrderNo(): Promise<string> {
-    const rows = await this.orderRepo.manager.query(
-      `SELECT nextval('order_no_seq') AS next`,
+  // ── Order number generator — Ord-00001 format ────────────────────────────────
+  // Uses the document_no_counter table (not a Postgres SEQUENCE) so the
+  // increment participates in the caller's transaction — a rolled-back create
+  // (validation error, DB error, etc.) gives the number back instead of
+  // burning it, which a sequence's nextval() never does. Keyed by name
+  // ('order') independently of every other document's counter row.
+  private async generateOrderNo(manager: EntityManager): Promise<string> {
+    // TypeORM's query() special-cases UPDATE/DELETE: it returns [rows,
+    // affectedCount] instead of rows directly (unlike a plain SELECT) — so
+    // the RETURNING row is result[0][0], not result[0].
+    const result = await manager.query(
+      `UPDATE document_no_counter SET value = value + 1 WHERE name = 'order' RETURNING value`,
     );
-    const next = Number(rows[0].next);
-    return `ORD${String(next).padStart(4, '0')}`;
+    const next = Number(result[0][0].value);
+    return `Ord-${String(next).padStart(5, '0')}`;
   }
 
   // ── Salesman assignment ────────────────────────────────────────────────────────
@@ -150,13 +158,13 @@ export class OrdersService {
     gst_number: string;
   } | null> {
     const rows = await this.orderRepo.manager.query<any[]>(
-      `SELECT "companyName", "contactName", "mobile1", "address", "city", "state", "pincode", "gstNumber"
+      `SELECT "companyName", "contactName", "mobile1", "address", "city", "state", "pincode", "country", "gstNumber"
        FROM customer WHERE id = $1 LIMIT 1`,
       [customerId],
     );
     if (!rows.length) return null;
     const c = rows[0];
-    const fullAddress = [c.address, c.city, c.state, c.pincode]
+    const fullAddress = [c.address, c.city, c.state, c.pincode, c.country]
       .filter(Boolean)
       .join(', ');
     return {
@@ -165,6 +173,50 @@ export class OrdersService {
       billing_address: fullAddress,
       shipping_address: fullAddress,
       gst_number: c.gstNumber || '',
+    };
+  }
+
+  // ── Payment terms resolution ──────────────────────────────────────────────────
+
+  /**
+   * Wholesaler customers always get "Credit for {credit_days} days" auto-assigned
+   * from their own credit-limit record — never the submitted value — and are
+   * blocked entirely if no credit limit has been assigned yet. Mirrors
+   * quotation.service.ts's resolvePaymentTerms() so both entry points (direct
+   * order creation and quotation conversion) enforce the same rule against
+   * live customer data.
+   */
+  private async resolvePaymentTerms(
+    customerId: number | undefined,
+    data: any,
+  ): Promise<{ payment_terms: string | null; credit_days: number | null }> {
+    if (!customerId) {
+      return {
+        payment_terms: data.payment_terms ?? null,
+        credit_days: data.credit_days ?? null,
+      };
+    }
+    const rows = await this.orderRepo.manager.query<
+      { isWholesaler: boolean; creditLimit: string; credit_days: number }[]
+    >(
+      `SELECT "isWholesaler", "creditLimit", credit_days FROM customer WHERE id = $1 LIMIT 1`,
+      [customerId],
+    );
+    const customer = rows[0];
+    if (customer?.isWholesaler) {
+      if (!(Number(customer.creditLimit) > 0)) {
+        throw new BadRequestException(
+          'This customer is a Wholesaler with no Credit Limit assigned. Set a credit limit for this customer before creating or approving this order.',
+        );
+      }
+      return {
+        payment_terms: `Credit for ${customer.credit_days} days`,
+        credit_days: customer.credit_days,
+      };
+    }
+    return {
+      payment_terms: data.payment_terms ?? null,
+      credit_days: data.credit_days ?? null,
     };
   }
 
@@ -224,7 +276,7 @@ export class OrdersService {
   private calcTotals(
     items: OrderItem[],
     data: any,
-  ): { subtotal: number; total_amount: number } {
+  ): { subtotal: number; total_amount: number; round_off: number } {
     const subtotal = items.reduce((s, i) => s + Number(i.amount), 0);
     const gstTotal = items.reduce((s, i) => s + Number(i.gst_amount), 0);
 
@@ -242,10 +294,17 @@ export class OrdersService {
       Number(data.installation_charges ?? data.charges_installation ?? 0) +
       Number(data.loading_charges ?? data.charges_loading ?? 0);
 
-    return {
-      subtotal,
-      total_amount: Math.max(0, subtotal + gstTotal - headerDiscount + charges),
-    };
+    // Round the amount actually charged/owed to the nearest rupee — round_off
+    // is the (possibly negative) adjustment, shown as its own line on the
+    // PDF/print so the printed total always matches what's tracked.
+    const rawTotal = Math.max(
+      0,
+      subtotal + gstTotal - headerDiscount + charges,
+    );
+    const total_amount = Math.round(rawTotal);
+    const round_off = Math.round((total_amount - rawTotal) * 100) / 100;
+
+    return { subtotal, total_amount, round_off };
   }
 
   // ── Item normalizer ───────────────────────────────────────────────────────────
@@ -325,9 +384,18 @@ export class OrdersService {
   async create(data: any, user?: any): Promise<Order> {
     if (!data) throw new BadRequestException('Request body missing');
 
-    const rawItems = data.items;
-    if (!Array.isArray(rawItems) || rawItems.length === 0) {
+    // DRAFT = save without items (mirrors quotation.service.ts's create());
+    // any other status requires at least one item to actually create an order.
+    const isDraft = data.status === OrderStatus.DRAFT;
+    const rawItems = Array.isArray(data.items) ? data.items : [];
+    if (!isDraft && rawItems.length === 0) {
       throw new BadRequestException('At least one item required');
+    }
+    // Production planning schedules off the delivery date, so it can't be
+    // skipped once an order is actually confirmed (draft saves-in-progress
+    // are still exempt, same as the item-count check above).
+    if (!isDraft && !(data.due_date ?? data.delivery_date)) {
+      throw new BadRequestException('Delivery date is required');
     }
 
     // Prevent duplicate order for same quotation
@@ -378,7 +446,7 @@ export class OrdersService {
     const items = rawItems.map((i) =>
       Object.assign(new OrderItem(), this.normalizeItem(i, isTaxInclusive)),
     );
-    const { subtotal, total_amount } = this.calcTotals(items, data);
+    const { subtotal, total_amount, round_off } = this.calcTotals(items, data);
 
     // Customer resolution:
     //   phone provided → find or create customer, snapshot from entity (no extra query)
@@ -402,6 +470,7 @@ export class OrdersService {
         customer.city,
         customer.state,
         customer.pincode,
+        customer.country,
       ]
         .filter(Boolean)
         .join(', ');
@@ -416,10 +485,12 @@ export class OrdersService {
       snap = await this.snapshotCustomer(resolvedCustomerId);
     }
 
-    const order_no = await this.generateOrderNo();
+    const paymentTerms = await this.resolvePaymentTerms(
+      resolvedCustomerId,
+      data,
+    );
 
     const order = this.orderRepo.create({
-      order_no,
       quotation_id: data.quotation_id ? Number(data.quotation_id) : undefined,
       customer_id: resolvedCustomerId,
       lead_id: data.lead_id ? Number(data.lead_id) : undefined,
@@ -447,6 +518,7 @@ export class OrdersService {
       loading_charges: Number(
         data.loading_charges ?? data.charges_loading ?? 0,
       ),
+      round_off,
       total_amount,
       status: (data.status as OrderStatus) || OrderStatus.DRAFT,
       paid_amount: 0,
@@ -460,10 +532,20 @@ export class OrdersService {
       transport_payment_by: data.transport_payment_by ?? null,
       delivery_instructions: data.delivery_instructions ?? null,
       delivery_type: data.delivery_type ?? null,
+      payment_terms: paymentTerms.payment_terms,
+      credit_days: paymentTerms.credit_days,
+      is_wholesaler: !!data.is_wholesaler,
+      due_date: data.due_date ?? data.delivery_date ?? null,
+      po_number: data.po_number ?? null,
+      po_document_url: data.po_document_url ?? null,
       items,
     });
 
     const saved = await this.orderRepo.manager.transaction(async (tx) => {
+      // Generated inside the same transaction as the save — if anything below
+      // fails, the number-counter increment rolls back with it instead of
+      // being permanently burned (see generateOrderNo).
+      order.order_no = await this.generateOrderNo(tx);
       const s = await tx.save(order);
 
       // Sync legacy NOT-NULL columns that the TypeORM entity doesn't map.
@@ -596,6 +678,19 @@ export class OrdersService {
       where: { order_id: id },
     });
     await this.enrichItemsWithLiveImage(items);
+
+    // Attach the source quotation's number for orders converted from one —
+    // quotation_id is an integer FK with no ORM relation defined, and
+    // quotation_no isn't a column on `orders` itself.
+    if (rows[0].quotation_id) {
+      const qRows: { quotation_no: string }[] =
+        await this.orderRepo.manager.query(
+          `SELECT quotation_no FROM quotation WHERE id = $1`,
+          [rows[0].quotation_id],
+        );
+      rows[0].quotation_no = qRows[0]?.quotation_no ?? null;
+    }
+
     return { ...rows[0], items } as Order;
   }
 
@@ -714,6 +809,8 @@ export class OrdersService {
     data?: {
       advance_amount?: number;
       process_without_advance?: boolean;
+      advance_payment_date?: string;
+      advance_payment_mode?: string;
       remarks?: string;
     },
   ): Promise<Order> {
@@ -721,15 +818,49 @@ export class OrdersService {
     if (order.status === OrderStatus.PENDING_APPROVAL) return order;
     assertTransition(order.status, OrderStatus.PENDING_APPROVAL);
 
+    // Re-check against live customer data — the credit limit may have been
+    // removed after the order was created, or granted since (either way the
+    // order's payment_terms must reflect the current state before approval).
+    const paymentTerms = await this.resolvePaymentTerms(order.customer_id, {
+      payment_terms: order.payment_terms,
+      credit_days: order.credit_days,
+    });
+    order.payment_terms = paymentTerms.payment_terms;
+    order.credit_days = paymentTerms.credit_days;
+
+    const advanceAmount = Number(data?.advance_amount) || 0;
+    const processWithoutAdvance = Boolean(data?.process_without_advance);
+
+    // The two are mutually exclusive — either an advance was actually
+    // received, or the order is explicitly being processed without one.
+    if (advanceAmount > 0 && processWithoutAdvance) {
+      throw new BadRequestException(
+        'Advance Received and Process without advance payment cannot both be set',
+      );
+    }
+    if (
+      advanceAmount > 0 &&
+      (!data?.advance_payment_date || !data?.advance_payment_mode)
+    ) {
+      throw new BadRequestException(
+        'Payment date and mode of payment are required when an advance is received',
+      );
+    }
+
     order.status = OrderStatus.PENDING_APPROVAL;
 
     // Persist structured fields individually so the modal can pre-fill them on re-submission.
     // Only update a field if the caller explicitly provided it (undefined = keep existing value).
     if (data?.advance_amount !== undefined) {
-      order.advance_amount = Number(data.advance_amount) || 0;
+      order.advance_amount = advanceAmount;
+      order.advance_payment_date = (advanceAmount > 0
+        ? data.advance_payment_date
+        : null) as unknown as Date;
+      order.advance_payment_mode =
+        advanceAmount > 0 ? data.advance_payment_mode : null;
     }
     if (data?.process_without_advance !== undefined) {
-      order.process_without_advance = Boolean(data.process_without_advance);
+      order.process_without_advance = processWithoutAdvance;
     }
     if (data?.remarks !== undefined) {
       order.approval_remarks = data.remarks || null;
@@ -782,6 +913,18 @@ export class OrdersService {
 
     delete data.subtotal;
     delete data.total_amount;
+
+    // Only allow the narrow DRAFT → GENERATED promotion through a plain
+    // edit-save (confirming a previously saved draft, mirroring quotation's
+    // draft → generated flow). Every other status change goes through the
+    // dedicated transition endpoints (approve/reject/send-for-approval/
+    // cancel/etc.), so this never lets a plain edit bypass their validation
+    // or side effects.
+    const targetStatus: OrderStatus =
+      order.status === OrderStatus.DRAFT &&
+      data.status === OrderStatus.GENERATED
+        ? OrderStatus.GENERATED
+        : order.status;
     delete data.status;
 
     // Only Admin/COO may reassign the salesman on an existing order — strip
@@ -790,20 +933,37 @@ export class OrdersService {
     const isAdminOrCoo = user?.role === 'Admin' || user?.role === 'COO';
     if (!isAdminOrCoo) delete data.salesman_id;
 
+    // Same DRAFT exemption as the item-count check below — production planning
+    // schedules off the delivery date, so it can't be missing once the order
+    // is confirmed, whether that happens now or was already true before this edit.
+    if (
+      targetStatus !== OrderStatus.DRAFT &&
+      !(data.due_date ?? data.delivery_date ?? order.due_date)
+    ) {
+      throw new BadRequestException('Delivery date is required');
+    }
+
     if (data.items) {
-      if (!Array.isArray(data.items) || data.items.length === 0) {
+      // DRAFT stays allowed to have zero items (save-in-progress); confirming
+      // out of DRAFT, or editing an already-non-draft order, still requires
+      // at least one item.
+      if (
+        targetStatus !== OrderStatus.DRAFT &&
+        (!Array.isArray(data.items) || data.items.length === 0)
+      ) {
         throw new BadRequestException('Order must contain at least one item');
       }
       const isTaxInclusive = data.is_tax_inclusive ?? order.is_tax_inclusive;
       const items = data.items.map((i) =>
         Object.assign(new OrderItem(), this.normalizeItem(i, isTaxInclusive)),
       );
-      const { subtotal, total_amount } = this.calcTotals(items, {
+      const { subtotal, total_amount, round_off } = this.calcTotals(items, {
         ...order,
         ...data,
       });
       data.items = items;
       data.subtotal = subtotal;
+      data.round_off = round_off;
       data.total_amount = total_amount;
       data.pending_amount = Math.max(
         0,
@@ -811,7 +971,7 @@ export class OrdersService {
       );
     }
 
-    await this.orderRepo.save({ ...order, ...data });
+    await this.orderRepo.save({ ...order, ...data, status: targetStatus });
 
     // Non-blocking re-explosion — re-calculates planning if items changed
     this.explosionService
@@ -864,7 +1024,14 @@ export class OrdersService {
       order_number: order.order_no,
       customer_name: order.customer_name,
       customer_phone: order.customer_phone,
+      customer_email: (order as any).customer_email,
       mobile: order.customer_phone,
+      mobile2: (order as any).customer_mobile2,
+      billing_address: order.billing_address,
+      shipping_address: order.shipping_address,
+      gst_number: order.gst_number,
+      payment_terms: order.payment_terms,
+      is_wholesaler: order.is_wholesaler,
       status: order.status,
       salesman_name: (order as any).salesman_name,
       salesman_phone: (order as any).salesman_phone,

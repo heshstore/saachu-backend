@@ -40,8 +40,9 @@ export class FinanceOpsListener {
 
   @OnEvent('dispatch.delivered')
   async onDispatchDelivered(payload: { order_id?: number }) {
-    if (payload?.order_id)
-      await this.finance.syncCustomerReceivable(payload.order_id);
+    if (!payload?.order_id) return;
+    await this.finance.setPaymentDueDate(payload.order_id);
+    await this.finance.syncCustomerReceivable(payload.order_id);
   }
 
   @OnEvent('purchase_order.updated')

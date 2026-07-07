@@ -91,6 +91,12 @@ export class Quotation {
   @Column({ nullable: true })
   payment_type: string;
 
+  @Column({ nullable: true })
+  payment_terms: string;
+
+  @Column({ type: 'smallint', nullable: true })
+  credit_days: number;
+
   @Column({ type: 'text', nullable: true })
   delivery_instructions: string;
 
@@ -130,6 +136,10 @@ export class Quotation {
   // ── Totals ───────────────────────────────────────────────────────────────────
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   sub_total: number;
+
+  /** total_amount rounded to the nearest rupee minus its pre-rounding value — can be +/-. */
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  round_off: number;
 
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   total_amount: number;

@@ -54,4 +54,13 @@ export class Invoice {
 
   @Column({ nullable: true })
   billing_company: string;
+
+  @Column({ nullable: true })
+  payment_terms: string;
+
+  @Column({ type: 'smallint', nullable: true })
+  credit_days: number;
+
+  @Column({ default: false })
+  is_wholesaler: boolean;
 }

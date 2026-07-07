@@ -2,12 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
-export type DocumentActionType =
-  | 'view'
-  | 'edit'
-  | 'print'
-  | 'pdf'
-  | 'whatsapp';
+export type DocumentActionType = 'view' | 'edit' | 'print' | 'pdf' | 'whatsapp';
 
 const VALID_ACTIONS: DocumentActionType[] = [
   'view',

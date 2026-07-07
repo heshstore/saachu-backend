@@ -42,6 +42,7 @@ import { DispatchModule } from './dispatch/dispatch.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { HealthModule } from './health/health.module';
 import { SlaModule } from './sla/sla.module';
+import { PaymentRemindersModule } from './payment-reminders/payment-reminders.module';
 import { ActivityModule } from './activity/activity.module';
 import { KpiModule } from './kpi/kpi.module';
 import { EventsModule } from './events/events.module';
@@ -137,6 +138,7 @@ new Logger('AppModule').log(
     DashboardModule,
     HealthModule,
     SlaModule,
+    PaymentRemindersModule,
     ActivityModule,
     KpiModule,
     EventsModule,

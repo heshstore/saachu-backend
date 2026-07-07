@@ -50,7 +50,7 @@ export class TransactionalEmailService {
   ): Promise<TransactionalEmailLog> {
     this.logger.log(`[TX_ENDPOINT_HIT] type=quotation id=${id} to=${to}`);
     this._guardInputs(to);
-    const qNo = data?.quotation_no || `QUO-${id}`;
+    const qNo = data?.quotation_no || `Quo-${id}`;
     // Revision number = how many times this quotation has already been
     // successfully emailed — 1st send has no prefix, 2nd send is "Revised 1", etc.
     const priorSends = await this.logRepo.count({
@@ -93,7 +93,7 @@ export class TransactionalEmailService {
   ): Promise<TransactionalEmailLog> {
     this.logger.log(`[TX_ENDPOINT_HIT] type=order id=${id} to=${to}`);
     this._guardInputs(to);
-    const orderNo = data?.order_no || data?.order_number || `ORD-${id}`;
+    const orderNo = data?.order_no || data?.order_number || `Ord-${id}`;
     const subject = `Order Confirmation ${orderNo} from ${appConfig.companyName}`;
 
     return this._sendAndLog('order', id, to, subject, async () => {
@@ -122,7 +122,7 @@ export class TransactionalEmailService {
   ): Promise<TransactionalEmailLog> {
     this.logger.log(`[TX_ENDPOINT_HIT] type=invoice id=${id} to=${to}`);
     this._guardInputs(to);
-    const invoiceNo = data?.invoice_no || `INV-${id}`;
+    const invoiceNo = data?.invoice_no || `Hs-${id}`;
     const subject = `Invoice ${invoiceNo} from ${appConfig.companyName}`;
 
     return this._sendAndLog('invoice', id, to, subject, async () => {
@@ -290,11 +290,36 @@ export class TransactionalEmailService {
   /** Row of circular, brand-coloured social icon links — omits any network without a configured URL. */
   private _socialIconsRow(): string {
     const icons: { url: string; bg: string; label: string; alt: string }[] = [
-      { url: appConfig.socialFacebookUrl, bg: '#1877F2', label: 'f', alt: 'Facebook' },
-      { url: appConfig.socialInstagramUrl, bg: '#C13584', label: 'IG', alt: 'Instagram' },
-      { url: appConfig.socialLinkedinUrl, bg: '#0A66C2', label: 'in', alt: 'LinkedIn' },
-      { url: appConfig.socialPinterestUrl, bg: '#E60023', label: 'P', alt: 'Pinterest' },
-      { url: appConfig.socialYoutubeUrl, bg: '#FF0000', label: '▶', alt: 'YouTube' },
+      {
+        url: appConfig.socialFacebookUrl,
+        bg: '#1877F2',
+        label: 'f',
+        alt: 'Facebook',
+      },
+      {
+        url: appConfig.socialInstagramUrl,
+        bg: '#C13584',
+        label: 'IG',
+        alt: 'Instagram',
+      },
+      {
+        url: appConfig.socialLinkedinUrl,
+        bg: '#0A66C2',
+        label: 'in',
+        alt: 'LinkedIn',
+      },
+      {
+        url: appConfig.socialPinterestUrl,
+        bg: '#E60023',
+        label: 'P',
+        alt: 'Pinterest',
+      },
+      {
+        url: appConfig.socialYoutubeUrl,
+        bg: '#FF0000',
+        label: '▶',
+        alt: 'YouTube',
+      },
     ].filter((i) => i.url);
     if (!icons.length) return '';
     const cells = icons
@@ -331,7 +356,8 @@ export class TransactionalEmailService {
         `<a href="${href}" target="_blank" style="color:${BLUE};text-decoration:none;font-weight:600;">${appConfig.companyWebsite}</a>`,
       );
     }
-    if (appConfig.companyPhone) contactParts.push(`📞 ${appConfig.companyPhone}`);
+    if (appConfig.companyPhone)
+      contactParts.push(`📞 ${appConfig.companyPhone}`);
     if (appConfig.companyEmail)
       contactParts.push(
         `✉ <a href="mailto:${appConfig.companyEmail}" style="color:${BLUE};text-decoration:none;">${appConfig.companyEmail}</a>`,
@@ -351,11 +377,7 @@ export class TransactionalEmailService {
     return Number.isFinite(n) && n > 0 ? n : null;
   }
 
-  private _quotationHtml(
-    data: any,
-    pdfLink: string,
-    hasLogo: boolean,
-  ): string {
+  private _quotationHtml(data: any, pdfLink: string, hasLogo: boolean): string {
     const BLUE = '#016bb2';
     const co = appConfig.companyName;
     const qNo = data?.quotation_no || '—';
@@ -372,9 +394,11 @@ export class TransactionalEmailService {
 <body style="margin:0;padding:20px;background:#f1f5f9;font-family:'Segoe UI',Helvetica,Arial,sans-serif;">
   <div style="max-width:580px;margin:0 auto;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 2px 16px rgba(0,0,0,.1);">
     <div style="background:${BLUE};color:#fff;padding:32px 28px;text-align:center;">
-      ${hasLogo
-        ? `<table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;"><tr><td align="center" style="background:#ffffff;border-radius:8px;padding:10px 18px;"><img src="cid:hesh-logo" alt="${co}" style="display:block;max-width:170px;max-height:52px;"></td></tr></table>`
-        : ''}
+      ${
+        hasLogo
+          ? `<table role="presentation" align="center" cellpadding="0" cellspacing="0" border="0" style="margin:0 auto;"><tr><td align="center" style="background:#ffffff;border-radius:8px;padding:10px 18px;"><img src="cid:hesh-logo" alt="${co}" style="display:block;max-width:170px;max-height:52px;"></td></tr></table>`
+          : ''
+      }
       <div style="margin-top:${hasLogo ? '16' : '0'}px;font-size:18px;font-weight:700;color:#ffffff;">${co}</div>
       <div style="margin-top:5px;font-size:12px;letter-spacing:.4px;color:#ffffff;opacity:.85;">Proforma Invoice</div>
     </div>

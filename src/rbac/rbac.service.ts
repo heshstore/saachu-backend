@@ -93,6 +93,20 @@ export class RbacService implements OnModuleInit {
     return Array.from(this.cache.get(roleName) || []);
   }
 
+  /**
+   * Role names currently granted a given permission, per the live RBAC matrix
+   * — used to route alerts/escalations to whichever role actually holds the
+   * relevant permission today, instead of a hardcoded role name that silently
+   * stops matching anyone if the matrix or role names change.
+   */
+  getRoleNamesWithPermission(permission: string): string[] {
+    const names: string[] = [];
+    for (const [roleName, perms] of this.cache) {
+      if (perms.has(permission)) names.push(roleName);
+    }
+    return names;
+  }
+
   async getAllRoles(): Promise<Role[]> {
     return this.roleRepo.find({
       where: { is_active: true },

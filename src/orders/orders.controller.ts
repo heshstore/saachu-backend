@@ -11,7 +11,13 @@ import {
   Res,
   Logger,
   BadRequestException,
+  UseInterceptors,
+  UploadedFile,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import * as fs from 'fs';
+import * as path from 'path';
 import { Request, Response } from 'express';
 import { OrdersService } from './orders.service';
 import { PaymentService } from './payment.service';
@@ -26,6 +32,8 @@ import {
   DocumentActionLogService,
   DocumentActionType,
 } from '../shared/document-action-log.service';
+
+const PO_UPLOAD_DIR = path.join(process.cwd(), 'uploads', 'po');
 
 @Controller('orders')
 export class OrdersController {
@@ -59,6 +67,33 @@ export class OrdersController {
   @RequirePermission('order.create')
   create(@Body() body: any, @Req() req: Request) {
     return this.ordersService.create(body, (req as any).user);
+  }
+
+  @Post('upload-po')
+  @UseInterceptors(
+    FileInterceptor('po', {
+      storage: diskStorage({
+        destination: (_req, _file, cb) => {
+          fs.mkdirSync(PO_UPLOAD_DIR, { recursive: true });
+          cb(null, PO_UPLOAD_DIR);
+        },
+        filename: (_req, file, cb) => {
+          cb(null, `po-${Date.now()}-${Math.round(Math.random() * 1e9)}.pdf`);
+        },
+      }),
+      limits: { fileSize: 10 * 1024 * 1024 },
+      fileFilter: (_req, file, cb) => {
+        if (file.mimetype !== 'application/pdf') {
+          cb(new BadRequestException('Only PDF files are allowed'), false);
+          return;
+        }
+        cb(null, true);
+      },
+    }),
+  )
+  uploadPo(@UploadedFile() file: Express.Multer.File) {
+    if (!file) throw new BadRequestException('No file uploaded');
+    return { url: `/uploads/po/${file.filename}` };
   }
 
   @Get()

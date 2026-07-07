@@ -111,6 +111,7 @@ export async function enrichQuotationsWithLinkedOrderApproval(
   const orderIds = linked.map((r) => Number(r[orderIdKey]));
   const approvalRows: any[] = await ds.query(
     `SELECT o.id AS order_id,
+            o.order_no,
             o.approved_at,
             ab.name AS approved_by_name,
             ab.role AS approved_by_role
@@ -122,7 +123,9 @@ export async function enrichQuotationsWithLinkedOrderApproval(
   const byOrder = new Map(approvalRows.map((r) => [Number(r.order_id), r]));
   for (const row of linked) {
     const hit = byOrder.get(Number(row[orderIdKey]));
-    if (!hit?.approved_by_name) continue;
+    if (!hit) continue;
+    row.converted_order_no = hit.order_no;
+    if (!hit.approved_by_name) continue;
     row.approved_by_name = hit.approved_by_name;
     row.approved_by_role = hit.approved_by_role;
     row.approved_at = hit.approved_at;
@@ -176,11 +179,16 @@ export const DISPATCH_ACTOR_JOINS = `
   LEFT JOIN "user" cb ON cb.id = d.created_by
 `;
 
-/** Batch-load customer email/name by customer id, for auto-filling "send email" flows. */
+/** Batch-load customer email/name/mobile2 by customer id, for auto-filling "send email" flows and document previews. */
 export async function loadCustomersByIds(
   ds: DataSource,
   ids: (number | null | undefined)[],
-): Promise<Map<number, { email: string | null; companyName: string | null }>> {
+): Promise<
+  Map<
+    number,
+    { email: string | null; companyName: string | null; mobile2: string | null }
+  >
+> {
   const unique = [
     ...new Set(
       ids
@@ -190,18 +198,22 @@ export async function loadCustomersByIds(
   ];
   if (!unique.length) return new Map();
   const rows: any[] = await ds.query(
-    `SELECT id, email, "companyName" FROM customer WHERE id = ANY($1)`,
+    `SELECT id, email, "companyName", mobile2 FROM customer WHERE id = ANY($1)`,
     [unique],
   );
   return new Map(
     rows.map((r) => [
       Number(r.id),
-      { email: r.email ?? null, companyName: r.companyName ?? null },
+      {
+        email: r.email ?? null,
+        companyName: r.companyName ?? null,
+        mobile2: r.mobile2 ?? null,
+      },
     ]),
   );
 }
 
-/** Attach customer_email from customer_id — used to prefill "send by email" recipient fields. */
+/** Attach customer_email/customer_mobile2 from customer_id — used to prefill "send by email" recipient fields and show secondary contact info on document previews. */
 export async function enrichRowsWithCustomerEmail(
   ds: DataSource,
   rows: any[],
@@ -214,6 +226,7 @@ export async function enrichRowsWithCustomerEmail(
   for (const r of rows) {
     const c = map.get(Number(r[idKey]));
     r.customer_email = c?.email ?? r.customer_email ?? null;
+    r.customer_mobile2 = c?.mobile2 ?? r.customer_mobile2 ?? null;
   }
   return rows;
 }
@@ -285,7 +298,7 @@ export async function enrichRowsWithActionCounts(
   for (const c of counts) {
     const id = Number(c.entity_id);
     if (!byRow.has(id)) byRow.set(id, {});
-    byRow.get(id)![c.action] = Number(c.cnt);
+    byRow.get(id)[c.action] = Number(c.cnt);
   }
   for (const r of rows) {
     const hit = byRow.get(Number(r[idKey]));

@@ -75,9 +75,30 @@ export class FinanceOpsService {
     return 'PENDING';
   }
 
+  /**
+   * Sets orders.payment_due_date once, the first time goods are delivered —
+   * dispatch_delivered_date + credit_days (0 for advance-based terms, which
+   * should already be settled by dispatch). Never overwritten on a later
+   * delivery event so re-dispatch of a partial order doesn't reset the clock.
+   */
+  async setPaymentDueDate(orderId: number): Promise<void> {
+    const [order] = await this.ds.query(
+      `SELECT id, credit_days, payment_due_date FROM orders WHERE id = $1`,
+      [orderId],
+    );
+    if (!order || order.payment_due_date) return;
+
+    await this.ds.query(
+      `UPDATE orders
+       SET payment_due_date = now() + make_interval(days => $2)
+       WHERE id = $1`,
+      [orderId, this.num(order.credit_days)],
+    );
+  }
+
   async syncCustomerReceivable(orderId: number): Promise<void> {
     const [order] = await this.ds.query(
-      `SELECT id, customer_id, status, total_amount, due_date
+      `SELECT id, customer_id, status, total_amount, due_date, payment_due_date
        FROM orders WHERE id = $1`,
       [orderId],
     );
@@ -109,7 +130,8 @@ export class FinanceOpsService {
     const total = this.num(order.total_amount);
     const received = this.num(sum);
     const outstanding = Math.max(0, total - received);
-    const status = this.deriveStatus(outstanding, received, order.due_date);
+    const dueDate = order.payment_due_date ?? order.due_date;
+    const status = this.deriveStatus(outstanding, received, dueDate);
 
     await this.ds.query(
       `INSERT INTO customer_receivables
@@ -129,7 +151,7 @@ export class FinanceOpsService {
         total,
         received,
         outstanding,
-        order.due_date ?? null,
+        dueDate ?? null,
         status,
       ],
     );

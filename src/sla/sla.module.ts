@@ -4,10 +4,15 @@ import { SlaEvent } from './entities/sla-event.entity';
 import { SlaEngineService } from './sla-engine.service';
 import { SlaController } from './sla.controller';
 import { NotificationsModule } from '../notifications/notification.module';
+import { RbacModule } from '../rbac/rbac.module';
 import { User } from '../users/entities/user.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([SlaEvent, User]), NotificationsModule],
+  imports: [
+    TypeOrmModule.forFeature([SlaEvent, User]),
+    NotificationsModule,
+    RbacModule,
+  ],
   controllers: [SlaController],
   providers: [SlaEngineService],
   exports: [SlaEngineService],

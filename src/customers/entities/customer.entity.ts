@@ -70,4 +70,7 @@ export class Customer {
 
   @Column({ default: false })
   isWholesaler: boolean;
+
+  @Column({ name: 'stop_payment_reminder', default: false })
+  stopPaymentReminder: boolean;
 }

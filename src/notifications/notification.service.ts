@@ -65,8 +65,13 @@ export class NotificationService {
   async createNotification(
     payload: CreateNotificationPayload,
   ): Promise<NotificationPayload | null> {
-    const { user_id, entity_type, entity_id, type, cooldownMinutes = 30 } =
-      payload;
+    const {
+      user_id,
+      entity_type,
+      entity_id,
+      type,
+      cooldownMinutes = 30,
+    } = payload;
 
     if (entity_type && entity_id) {
       const key = `${user_id}:${entity_type}:${entity_id}:${type}`;

@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { IsNull } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { Order } from '../orders/entities/order.entity';
 import { Invoice } from './entities/invoice.entity';
 import { appConfig } from '../config/config';
@@ -27,10 +27,33 @@ export class InvoiceService {
     private readonly invoiceRepository: Repository<Invoice>,
   ) {}
 
-  private async generateInvoiceNo(): Promise<string> {
-    const year = new Date().getFullYear();
-    const count = await this.invoiceRepository.count();
-    return `INV-${year}-${String(count + 1).padStart(4, '0')}`;
+  // ── Invoice/Estimate number generator — Hs-00001 / E-00001 format ────────────
+  // Uses the document_no_counter table (same mechanism as quotation/order — see
+  // generateQuotationNo/generateOrderNo) so the increment participates in the
+  // caller's transaction instead of being permanently burned on a rolled-back
+  // create. Invoice and Estimate are separate rows ('invoice' / 'estimate'),
+  // so creating one never advances the other's number — previously both types
+  // shared a single COUNT(*)+1 over the same table, which was neither
+  // independent (an estimate advanced the next invoice's number) nor
+  // concurrency-safe (two simultaneous creates could read the same count).
+  // Split invoices (production/trading billing company) draw from these same
+  // two counters rather than their own PINV-/TINV- sequences, so "invoice" and
+  // "estimate" remain single, unified sequences regardless of billing company.
+  private async generateDocNo(
+    manager: EntityManager,
+    type: 'TALLY' | 'ESTIMATE',
+  ): Promise<string> {
+    const name = type === 'ESTIMATE' ? 'estimate' : 'invoice';
+    const prefix = type === 'ESTIMATE' ? 'E-' : 'Hs-';
+    // TypeORM's query() special-cases UPDATE/DELETE: it returns [rows,
+    // affectedCount] instead of rows directly (unlike a plain SELECT) — so
+    // the RETURNING row is result[0][0], not result[0].
+    const result = await manager.query(
+      `UPDATE document_no_counter SET value = value + 1 WHERE name = $1 RETURNING value`,
+      [name],
+    );
+    const next = Number(result[0][0].value);
+    return `${prefix}${String(next).padStart(5, '0')}`;
   }
 
   async createFromOrder(orderId: number, type: 'TALLY' | 'ESTIMATE' = 'TALLY') {
@@ -45,10 +68,19 @@ export class InvoiceService {
     let customer: any = null;
     if (order.customer_id) {
       const rows = await this.orderRepository.manager.query<any[]>(
-        `SELECT id, "creditLimit", state FROM customer WHERE id = $1 LIMIT 1`,
+        `SELECT id, "isWholesaler", "creditLimit", state FROM customer WHERE id = $1 LIMIT 1`,
         [order.customer_id],
       );
       customer = rows[0] ?? null;
+    }
+
+    // A Wholesaler must have a credit limit assigned before any invoice is
+    // raised against them — same gate enforced at quotation/order creation,
+    // re-checked here in case it was removed after the order was placed.
+    if (customer?.isWholesaler && !(Number(customer.creditLimit) > 0)) {
+      throw new BadRequestException(
+        'This customer is a Wholesaler with no Credit Limit assigned. Set a credit limit for this customer before raising this invoice.',
+      );
     }
 
     if (customer?.creditLimit && Number(customer.creditLimit) > 0) {
@@ -91,21 +123,33 @@ export class InvoiceService {
     const sgst = isSameState ? gstAmount / 2 : 0;
     const igst = isSameState ? 0 : gstAmount;
 
-    const invoice_no = await this.generateInvoiceNo();
+    const saved = await this.invoiceRepository.manager.transaction(
+      async (manager) => {
+        // Generated inside the same transaction as the save — if anything
+        // below fails, the counter increment rolls back with it instead of
+        // being permanently burned (see generateDocNo).
+        const invoice_no = await this.generateDocNo(manager, type);
 
-    const invoice = this.invoiceRepository.create({
-      order_id: orderId,
-      invoice_no,
-      type,
-      total_amount: total,
-      status: 'PENDING',
-      gst_type: isSameState ? 'CGST_SGST' : 'IGST',
-      cgst,
-      sgst,
-      igst,
-    });
+        const invoice = manager.getRepository(Invoice).create({
+          order_id: orderId,
+          invoice_no,
+          type,
+          total_amount: total,
+          status: 'PENDING',
+          gst_type: isSameState ? 'CGST_SGST' : 'IGST',
+          cgst,
+          sgst,
+          igst,
+          payment_terms: order.payment_terms,
+          credit_days: order.credit_days,
+          is_wholesaler: order.is_wholesaler,
+        });
 
-    return this.invoiceRepository.save(invoice);
+        return manager.save(invoice);
+      },
+    );
+
+    return saved;
   }
 
   async findAll() {
@@ -116,6 +160,7 @@ export class InvoiceService {
     const rows = await this.invoiceRepository.manager.query<any[]>(
       `SELECT inv.*, o.order_no, o.status AS order_status,
               o.customer_id, o.customer_name, o.customer_phone,
+              o.billing_address, o.shipping_address, o.gst_number,
               o.is_tax_inclusive,
               ${ORDER_SALESMAN_SELECT}
        FROM invoice inv
@@ -126,9 +171,20 @@ export class InvoiceService {
       [id],
     );
     if (!rows.length) throw new NotFoundException('Invoice not found');
-    await enrichRowsWithCustomerEmail(this.invoiceRepository.manager.connection, rows);
-    await enrichRowsWithEmailCount(this.invoiceRepository.manager.connection, rows, 'invoice');
-    await enrichRowsWithActionCounts(this.invoiceRepository.manager.connection, rows, 'invoice');
+    await enrichRowsWithCustomerEmail(
+      this.invoiceRepository.manager.connection,
+      rows,
+    );
+    await enrichRowsWithEmailCount(
+      this.invoiceRepository.manager.connection,
+      rows,
+      'invoice',
+    );
+    await enrichRowsWithActionCounts(
+      this.invoiceRepository.manager.connection,
+      rows,
+      'invoice',
+    );
     return rows[0];
   }
 
@@ -143,21 +199,6 @@ export class InvoiceService {
   // ── Split billing extension ──────────────────────────────────────────────────
   // New methods added inside the existing service class.
   // All existing methods above are completely untouched.
-
-  private async generateSplitInvoiceNo(
-    billingCompany: 'PRODUCTION' | 'TRADING',
-  ): Promise<string> {
-    const seqName =
-      billingCompany === 'PRODUCTION'
-        ? 'production_invoice_no_seq'
-        : 'trading_invoice_no_seq';
-    const prefix = billingCompany === 'PRODUCTION' ? 'PINV' : 'TINV';
-    const rows = await this.invoiceRepository.manager.query<{ next: string }[]>(
-      `SELECT nextval($1) AS next`,
-      [seqName],
-    );
-    return `${prefix}-${new Date().getFullYear()}-${String(Number(rows[0].next)).padStart(4, '0')}`;
-  }
 
   async createSplitFromOrder(
     orderId: number,
@@ -203,10 +244,15 @@ export class InvoiceService {
     let customer: any = null;
     if (order.customer_id) {
       const rows = await this.orderRepository.manager.query<any[]>(
-        `SELECT id, "creditLimit", state FROM customer WHERE id = $1 LIMIT 1`,
+        `SELECT id, "isWholesaler", "creditLimit", state FROM customer WHERE id = $1 LIMIT 1`,
         [order.customer_id],
       );
       customer = rows[0] ?? null;
+    }
+    if (customer?.isWholesaler && !(Number(customer.creditLimit) > 0)) {
+      throw new BadRequestException(
+        'This customer is a Wholesaler with no Credit Limit assigned. Set a credit limit for this customer before raising this invoice.',
+      );
     }
     const customerState = (customer?.state || '').toLowerCase();
     const isSameState = customerState === appConfig.companyState.toLowerCase();
@@ -220,22 +266,30 @@ export class InvoiceService {
     const sgst = isSameState ? gstAmount / 2 : 0;
     const igst = isSameState ? 0 : gstAmount;
 
-    const invoice_no = await this.generateSplitInvoiceNo(billingCompany);
+    return this.invoiceRepository.manager.transaction(async (manager) => {
+      // Generated inside the same transaction as the save — if anything
+      // below fails, the counter increment rolls back with it instead of
+      // being permanently burned (see generateDocNo).
+      const invoice_no = await this.generateDocNo(manager, type);
 
-    const invoice = this.invoiceRepository.create({
-      order_id: orderId,
-      billing_company: billingCompany,
-      invoice_no,
-      type,
-      total_amount: total,
-      status: 'PENDING',
-      gst_type: isSameState ? 'CGST_SGST' : 'IGST',
-      cgst,
-      sgst,
-      igst,
+      const invoice = manager.getRepository(Invoice).create({
+        order_id: orderId,
+        billing_company: billingCompany,
+        invoice_no,
+        type,
+        total_amount: total,
+        status: 'PENDING',
+        gst_type: isSameState ? 'CGST_SGST' : 'IGST',
+        cgst,
+        sgst,
+        igst,
+        payment_terms: order.payment_terms,
+        credit_days: order.credit_days,
+        is_wholesaler: order.is_wholesaler,
+      });
+
+      return manager.save(invoice);
     });
-
-    return this.invoiceRepository.save(invoice);
   }
 
   async findSplitByOrder(orderId: number): Promise<Invoice[]> {
