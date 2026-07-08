@@ -51,6 +51,7 @@ import { BoqModule } from './boq/boq.module';
 import { InventoryModule } from './inventory/inventory.module';
 import { PurchaseRequirementsModule } from './purchase-requirements/purchase-requirements.module';
 import { ProductionExecutionModule } from './production-execution/production-execution.module';
+import { ProductionBoardModule } from './production-board/production-board.module';
 import { VendorsModule } from './vendors/vendors.module';
 import { PurchaseOrdersModule } from './purchase-orders/purchase-orders.module';
 import { ManufacturingAnalyticsModule } from './manufacturing-analytics/manufacturing-analytics.module';
@@ -147,6 +148,7 @@ new Logger('AppModule').log(
     InventoryModule,
     PurchaseRequirementsModule,
     ProductionExecutionModule,
+    ProductionBoardModule,
     VendorsModule,
     PurchaseOrdersModule,
     ManufacturingAnalyticsModule,

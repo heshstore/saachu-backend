@@ -15,7 +15,11 @@ import {
 } from '../notifications/notification.entity';
 import { User } from '../users/entities/user.entity';
 
-const NOTIFY_COOLDOWN_MS = 60 * 60_000; // 1 hour between re-notifications for same SLA
+// Level-2 (admin) re-notification: 4 h between repeats, stops after 5 total fires.
+// This prevents permanent spam for SLA events that are genuinely unresolvable
+// until someone manually intervenes; the Admin still gets notified, just not hourly forever.
+const NOTIFY_COOLDOWN_MS = 4 * 60 * 60_000; // 4 hours between re-notifications for same SLA
+const MAX_ADMIN_RENOTIFY = 5; // after 5 admin pings, silence the event until manually resolved
 
 // The permission whose current holders (per the live RBAC matrix) are treated
 // as "the manager" for that module's escalation — not a hardcoded role name,
@@ -174,6 +178,29 @@ export class SlaEngineService {
     } catch {}
   }
 
+  // Resolve lead SLA events when leads reach terminal states
+  @OnEvent('lead.converted')
+  @OnEvent('lead.lost')
+  @OnEvent('lead.closed')
+  async onLeadTerminated(payload: { leadId?: number; id?: number }): Promise<void> {
+    const id = payload.leadId ?? payload.id;
+    if (!id) return;
+    try {
+      await this.resolveSlaEvent('lead', id);
+      await this.resolveSlaEvent('followup_lead', id); // belt-and-suspenders
+    } catch {}
+  }
+
+  @OnEvent('order.completed')
+  @OnEvent('order.cancelled')
+  async onOrderTerminated(payload: { orderId?: number; id?: number }): Promise<void> {
+    const id = payload.orderId ?? payload.id;
+    if (!id) return;
+    try {
+      await this.resolveSlaEvent('order', id);
+    } catch {}
+  }
+
   // ── Cron: evaluate all open SLA events every 5 minutes ───────────────────────
 
   @Cron('0 */5 * * * *')
@@ -209,11 +236,20 @@ export class SlaEngineService {
     const isPastDeadline = now >= new Date(event.sla_deadline);
     const isPastWarning = event.warning_at && now >= new Date(event.warning_at);
 
-    // Level 2 (admin): re-notify hourly while overdue
+    // Level 2 (admin): re-notify every 4 h, but stop after MAX_ADMIN_RENOTIFY total fires.
+    // Count is stored in metadata.notif_count (no migration required — field is already JSONB).
     if (event.status === 'ESCALATED' && event.escalation_level >= 2) {
       if (isPastDeadline && sinceLastNotif >= NOTIFY_COOLDOWN_MS) {
+        const notifCount = Number(event.metadata?.notif_count ?? 0);
+        if (notifCount >= MAX_ADMIN_RENOTIFY) {
+          // Silent: too many escalations with no action. Stop pinging until manually resolved.
+          return;
+        }
         await this.notifyAdmin(event, now);
-        await this.slaRepo.update(event.id, { last_notification_at: now });
+        await this.slaRepo.manager.query(
+          `UPDATE sla_events SET last_notification_at = $1, metadata = COALESCE(metadata,'{}')::jsonb || $2::jsonb WHERE id = $3`,
+          [now, JSON.stringify({ notif_count: notifCount + 1 }), event.id],
+        );
       }
       return;
     }
@@ -386,6 +422,90 @@ export class SlaEngineService {
     const h = Math.floor(minutes / 60);
     const m = minutes % 60;
     return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  }
+
+  // ── Cron: auto-resolve stale SLA events daily at 02:00 ───────────────────────
+  // Resolves orphaned events for entities that reached a terminal state without
+  // emitting the event this service listens for (e.g. manual DB edits, old records,
+  // legacy status changes). This is the permanent fix for "SLA Breached" spam.
+
+  @Cron('0 2 * * *')
+  async autoResolveStaleEvents(): Promise<void> {
+    if (this._running) return;
+    this._running = true;
+    try {
+      const now = new Date();
+
+      // 1. Leads that are CONVERTED or LOST
+      await this.slaRepo.manager.query(`
+        UPDATE sla_events se
+        SET    status = 'RESOLVED', resolved_at = $1
+        FROM   leads l
+        WHERE  se.entity_type = 'lead'
+          AND  se.entity_id   = l.id
+          AND  se.status     != 'RESOLVED'
+          AND  l.workflow_state IN ('CONVERTED', 'LOST')
+      `, [now]);
+
+      // 2. Follow-ups that are completed
+      await this.slaRepo.manager.query(`
+        UPDATE sla_events se
+        SET    status = 'RESOLVED', resolved_at = $1
+        FROM   lead_followups lf
+        WHERE  se.entity_type = 'followup'
+          AND  se.entity_id   = lf.id
+          AND  se.status     != 'RESOLVED'
+          AND  lf.is_completed = true
+      `, [now]);
+
+      // 3. Production jobs that are DONE or CANCELLED
+      await this.slaRepo.manager.query(`
+        UPDATE sla_events se
+        SET    status = 'RESOLVED', resolved_at = $1
+        FROM   production_jobs pj
+        WHERE  se.entity_type = 'job'
+          AND  se.entity_id   = pj.id
+          AND  se.status     != 'RESOLVED'
+          AND  pj.status IN ('DONE', 'CANCELLED')
+      `, [now]);
+
+      // 4. Orders that are COMPLETED, DISPATCHED, or CANCELLED
+      await this.slaRepo.manager.query(`
+        UPDATE sla_events se
+        SET    status = 'RESOLVED', resolved_at = $1
+        FROM   orders o
+        WHERE  se.entity_type = 'order'
+          AND  se.entity_id   = o.id
+          AND  se.status     != 'RESOLVED'
+          AND  o.status IN ('COMPLETED','DISPATCHED','PARTIAL_DISPATCHED','CANCELLED')
+      `, [now]);
+
+      // 5. Dispatch records that are DELIVERED or CANCELLED
+      await this.slaRepo.manager.query(`
+        UPDATE sla_events se
+        SET    status = 'RESOLVED', resolved_at = $1
+        FROM   dispatch_orders d
+        WHERE  se.entity_type = 'dispatch'
+          AND  se.entity_id   = d.id
+          AND  se.status     != 'RESOLVED'
+          AND  d.status IN ('DELIVERED','CANCELLED')
+      `, [now]);
+
+      // 6. Any event that has been ESCALATED for more than 30 days — resolve as stale
+      await this.slaRepo.manager.query(`
+        UPDATE sla_events
+        SET    status = 'RESOLVED', resolved_at = $1
+        WHERE  status     != 'RESOLVED'
+          AND  escalated_at IS NOT NULL
+          AND  escalated_at < NOW() - INTERVAL '30 days'
+      `, [now]);
+
+      this.logger.log('[SlaEngine] autoResolveStaleEvents complete');
+    } catch (e: any) {
+      this.dbHealth.handleError(e, 'SlaEngine.autoResolveStaleEvents');
+    } finally {
+      this._running = false;
+    }
   }
 
   // ── Cron: scan for overdue lead follow-ups every 30 min (business hours) ─────
