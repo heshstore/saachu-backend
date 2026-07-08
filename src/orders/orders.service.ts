@@ -118,7 +118,7 @@ export class OrdersService {
     );
   }
 
-  // ── Order number generator — Ord-00001 format ────────────────────────────────
+  // ── Order number generator — ORD0001 format ──────────────────────────────────
   // Uses the document_no_counter table (not a Postgres SEQUENCE) so the
   // increment participates in the caller's transaction — a rolled-back create
   // (validation error, DB error, etc.) gives the number back instead of
@@ -132,7 +132,7 @@ export class OrdersService {
       `UPDATE document_no_counter SET value = value + 1 WHERE name = 'order' RETURNING value`,
     );
     const next = Number(result[0][0].value);
-    return `Ord-${String(next).padStart(5, '0')}`;
+    return `ORD${String(next).padStart(4, '0')}`;
   }
 
   // ── Salesman assignment ────────────────────────────────────────────────────────

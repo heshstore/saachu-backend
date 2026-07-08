@@ -96,6 +96,7 @@
     "migrate:order-advance-payment-fields": "node scripts/migrate-order-advance-payment-fields.js",
     "migrate:order-approval-timestamp": "node scripts/migrate-order-approval-timestamp.js",
     "migrate:payment-terms": "node scripts/migrate-payment-terms.js",
+    "migrate:production-board": "node scripts/migrate-production-board.js",
     "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {

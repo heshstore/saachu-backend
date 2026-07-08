@@ -1229,6 +1229,8 @@ export class PdfService {
       v != null && String(v).trim() !== '' ? String(v) : fallback;
     const inr = (n: any) =>
       `₹${Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const fmt2 = (n: any) =>
+      Number(n || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     const fmtDate = (dt: Date) => {
       const d = String(dt.getDate()).padStart(2, '0');
       const m = String(dt.getMonth() + 1).padStart(2, '0');
@@ -1336,58 +1338,61 @@ export class PdfService {
     const logoPath = this.resolveStaticImage('logo.png');
     const qrPath = this.resolveStaticImage('QR.jpg');
 
-    // Items table: [S.No, Item Name, Instructions, Qty, Unit, [Disc], Rate, GST, Amount]
-    // The Disc column only appears at all if at least one line item actually has a discount.
+    // Items table: matches Quotation format exactly — 3-stack disc, discountedRate, GST stack
     const hasAnyDiscount = rows.some(
       (it: any) => Number(it?.discount_value) > 0,
     );
     const itemRows: any[] = rows.map((it: any, i: number) => {
-      const base = Number(it?.amount) || 0;
-      const gstPct = Number(it?.gst_percent) || 0;
-      const discVal = Number(it?.discount_value) || 0;
-      const disc =
-        discVal > 0
-          ? String(it?.discount_type || '').toLowerCase() === 'percent'
-            ? `${discVal}%`
-            : inr(discVal)
-          : '';
+      const base           = Number(it?.amount) || 0;
+      const rate           = Number(it?.rate) || 0;
+      const qty            = Number(it?.qty) || 0;
+      const gstPct         = Number(it?.gst_percent) || 0;
+      const discVal        = Number(it?.discount_value) || 0;
+      const discType       = String(it?.discount_type || 'percent').toLowerCase();
+      const isFlatDisc     = discType !== 'percent';
+      const perUnitDiscAmt = isFlatDisc ? discVal : (rate * discVal) / 100;
+      const discountedRate = Math.max(0, rate - perUnitDiscAmt);
+
+      let discCell: any;
+      if (discVal > 0) {
+        discCell = {
+          stack: [
+            { text: isFlatDisc ? `₹${fmt2(discVal)}` : `${discVal}%`, fontSize: 7, bold: true, color: INK },
+            { text: `on ₹${fmt2(rate)}`, fontSize: 6, color: SLATE, margin: [0, 2, 0, 0] },
+            { text: `= ₹${fmt2(isFlatDisc ? discountedRate : perUnitDiscAmt)}`, fontSize: 7, bold: true, color: INK, margin: [0, 3, 0, 0] },
+          ],
+          alignment: 'center',
+          margin: [0, 4, 0, 0],
+        };
+      } else {
+        discCell = { text: '', fontSize: 7, alignment: 'center' };
+      }
+
       return [
-        { text: String(i + 1), alignment: 'center', fontSize: 9 },
+        { text: String(i + 1), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
         {
           stack: [
-            {
-              text: safe(it?.item_name || it?.itemName, `Item ${i + 1}`),
-              bold: true,
-              fontSize: 9,
-            },
-            ...(it?.sku
-              ? [{ text: String(it.sku), color: SLATE, fontSize: 7 }]
-              : []),
+            ...(it?.sku ? [{ text: String(it.sku), fontSize: 7, bold: true, color: BLUE }] : []),
+            { text: safe(it?.item_name || it?.itemName, `Item ${i + 1}`), fontSize: 8, bold: true },
+            ...(it?.hsn_code ? [{ text: `HSN: ${it.hsn_code}`, fontSize: 6.5, color: SLATE }] : []),
           ],
+          margin: [0, 3, 0, 3],
         },
-        {
-          text: breakLongWords(
-            safe(it?.instruction || it?.instructions || it?.notes, ''),
-          ),
-          fontSize: 8,
-          color: SLATE,
-        },
-        {
-          text: String(Number(it?.qty) || 0),
-          alignment: 'center',
-          fontSize: 9,
-        },
-        { text: safe(it?.unit || '', ''), alignment: 'center', fontSize: 9 },
-        ...(hasAnyDiscount
-          ? [{ text: disc, alignment: 'center', fontSize: 9 }]
-          : []),
-        { text: inr(it?.rate), alignment: 'right', fontSize: 9 },
-        {
-          text: gstPct > 0 ? `${gstPct}%` : '',
-          alignment: 'center',
-          fontSize: 9,
-        },
-        { text: inr(base), alignment: 'right', fontSize: 9, bold: true },
+        { text: breakLongWords(safe(it?.instruction || it?.instructions || it?.notes, '')), fontSize: 7, color: SLATE, margin: [0, 3, 0, 3] },
+        { text: String(qty), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
+        { text: safe(it?.unit || '', ''), alignment: 'center', fontSize: 8, margin: [0, 5, 0, 0] },
+        ...(hasAnyDiscount ? [discCell] : []),
+        { text: inr(discVal > 0 ? discountedRate : rate), alignment: 'right', fontSize: 7.5, margin: [0, 5, 0, 0] },
+        gstPct > 0
+          ? {
+              stack: [
+                { text: `${gstPct}%`, fontSize: 7.5, bold: true, alignment: 'center' },
+                { text: inr((base * gstPct) / 100), fontSize: 5.5, color: SLATE, alignment: 'center' },
+              ],
+              margin: [0, 4, 0, 0],
+            }
+          : { text: '', fontSize: 8 },
+        { text: inr(base), alignment: 'right', fontSize: 7.5, bold: true, margin: [0, 5, 0, 0] },
       ];
     });
 
@@ -1849,28 +1854,28 @@ export class PdfService {
           table: {
             headerRows: 1,
             widths: [
-              20,
+              16,
               '*',
-              58,
-              20,
-              26,
-              ...(hasAnyDiscount ? [28] : []),
-              48,
-              24,
-              50,
+              42,
+              16,
+              18,
+              ...(hasAnyDiscount ? [44] : []),
+              52,
+              34,
+              52,
             ],
             body: [
               [
-                { text: 'S.No', style: 'th', alignment: 'center' },
-                { text: 'Item Name', style: 'th' },
-                { text: 'Instructions', style: 'th' },
-                { text: 'Qty', style: 'th', alignment: 'center' },
-                { text: 'Unit', style: 'th', alignment: 'center' },
+                { text: 'S.No',            style: 'th', alignment: 'center', noWrap: true },
+                { text: 'Item / Name / HSN', style: 'th' },
+                { text: 'Instr.',           style: 'th', noWrap: true },
+                { text: 'Qty',             style: 'th', alignment: 'center', noWrap: true },
+                { text: 'Unit',            style: 'th', alignment: 'center', noWrap: true },
                 ...(hasAnyDiscount
-                  ? [{ text: 'Disc.', style: 'th', alignment: 'center' }]
+                  ? [{ text: 'Disc', style: 'th', alignment: 'center', noWrap: true }]
                   : []),
-                { text: 'Rate (₹)', style: 'th', alignment: 'right' },
-                { text: 'GST Tax', style: 'th', alignment: 'center' },
+                { text: 'Rate (₹)', style: 'th', alignment: 'right',  noWrap: true },
+                { text: 'GST Tax',  style: 'th', alignment: 'center', noWrap: true },
                 {
                   stack: [
                     {

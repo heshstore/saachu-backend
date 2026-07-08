@@ -186,7 +186,7 @@ export async function loadCustomersByIds(
 ): Promise<
   Map<
     number,
-    { email: string | null; companyName: string | null; mobile2: string | null }
+    { email: string | null; companyName: string | null; mobile2: string | null; city: string | null }
   >
 > {
   const unique = [
@@ -198,7 +198,7 @@ export async function loadCustomersByIds(
   ];
   if (!unique.length) return new Map();
   const rows: any[] = await ds.query(
-    `SELECT id, email, "companyName", mobile2 FROM customer WHERE id = ANY($1)`,
+    `SELECT id, email, "companyName", mobile2, city FROM customer WHERE id = ANY($1)`,
     [unique],
   );
   return new Map(
@@ -208,6 +208,7 @@ export async function loadCustomersByIds(
         email: r.email ?? null,
         companyName: r.companyName ?? null,
         mobile2: r.mobile2 ?? null,
+        city: r.city ?? null,
       },
     ]),
   );
@@ -227,6 +228,7 @@ export async function enrichRowsWithCustomerEmail(
     const c = map.get(Number(r[idKey]));
     r.customer_email = c?.email ?? r.customer_email ?? null;
     r.customer_mobile2 = c?.mobile2 ?? r.customer_mobile2 ?? null;
+    r.customer_city = c?.city ?? r.customer_city ?? null;
   }
   return rows;
 }
