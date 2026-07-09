@@ -4,11 +4,13 @@ import {
   Logger,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
 import { ProductionBoardTask } from './entities/production-board-task.entity';
+import { DepartmentControlService } from '../departments/department-control.service';
 
 @Injectable()
 export class ProductionBoardService {
@@ -18,6 +20,7 @@ export class ProductionBoardService {
     @InjectRepository(ProductionBoardTask)
     private readonly taskRepo: Repository<ProductionBoardTask>,
     private readonly dataSource: DataSource,
+    private readonly deptCtrl: DepartmentControlService,
   ) {}
 
   // ── Order approval hook ────────────────────────────────────────────────────
@@ -192,6 +195,14 @@ export class ProductionBoardService {
       [departmentId],
     );
     if (!dept.length) throw new NotFoundException(`Department ${departmentId} not found`);
+
+    // Production lock: block assignment if department checklist is not complete today
+    const readiness = await this.deptCtrl.getReadiness(departmentId);
+    if (!readiness.ready) {
+      throw new ForbiddenException(
+        `Department "${dept[0].name}" is NOT READY — ${readiness.reason}. Complete the daily checklist before assigning jobs.`,
+      );
+    }
 
     // Find the latest non-cancelled task for this order item
     const latest = await this.taskRepo.findOne({
