@@ -140,6 +140,13 @@ export class DepartmentsController {
     return this.ctrl.approveSession(body.sessionId, req.user.id);
   }
 
+  // Phase 1: operator explicitly completes inspection → machines become READY
+  @Post(':id/checklist/today/finish')
+  @RequirePermission('production.view')
+  completeInspection(@Param('id') id: string, @Request() req: any) {
+    return this.ctrl.completeInspection(+id, req.user.id);
+  }
+
   // ── Machines ──────────────────────────────────────────────────────────────────
 
   @Get(':id/machines')

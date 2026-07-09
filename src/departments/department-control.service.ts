@@ -187,15 +187,31 @@ export class DepartmentControlService {
     if (activeItems === 0) return { ready: true, reason: 'No checklist items configured', session: null };
 
     const session = await this.getTodaySession(deptId);
-    if (!session) return { ready: false, reason: 'Daily checklist not started', session: null };
-    if (!session.isComplete) return { ready: false, reason: 'Mandatory checklist items not all completed', session };
+    if (!session) return { ready: false, reason: 'Machine inspection has not been completed today. Production cannot start.', session: null };
+    if (!session.isComplete) return { ready: false, reason: 'Machine inspection has not been completed today. Production cannot start.', session };
 
-    const ext = await this.extRepo.findOne({ where: { departmentId: deptId } });
-    if (ext?.requireSupervisorApproval && !session.approvedAt) {
-      return { ready: false, reason: 'Awaiting supervisor approval', session };
+    return { ready: true, reason: 'Inspection complete — machines are READY', session };
+  }
+
+  // Complete the daily inspection: validate all mandatory items done, mark machines READY
+  async completeInspection(deptId: number, userId: number): Promise<{ ready: boolean; session: any }> {
+    const session = await this.getTodaySession(deptId);
+    if (!session) throw new Error('No inspection session started today. Start inspection first.');
+
+    if (!session.isComplete) {
+      throw new Error('Not all mandatory checklist items are completed. Complete all mandatory items before finishing inspection.');
     }
 
-    return { ready: true, reason: 'Checklist complete', session };
+    // Mark all active machines in this department as READY for today
+    const today = this.todayStr();
+    await this.machineRepo
+      .createQueryBuilder()
+      .update()
+      .set({ status: 'READY', readyDate: today } as any)
+      .where('department_id = :deptId AND is_active = true', { deptId })
+      .execute();
+
+    return { ready: true, session };
   }
 
   // ── Machines ─────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
 
-export type MachineStatus = 'RUNNING' | 'IDLE' | 'BREAKDOWN' | 'MAINTENANCE';
+export type MachineStatus = 'READY' | 'RUNNING' | 'IDLE' | 'BREAKDOWN' | 'MAINTENANCE';
 
 @Entity('department_machines')
 export class DepartmentMachine {
@@ -15,6 +15,8 @@ export class DepartmentMachine {
   @Column({ type: 'numeric', precision: 10, scale: 2, nullable: true }) capacity: number | null;
   @Column({ name: 'capacity_unit', nullable: true }) capacityUnit: string | null;
   @Column({ default: 'IDLE' }) status: MachineStatus;
+  @Column({ nullable: true }) operator: string | null;
+  @Column({ name: 'ready_date', type: 'date', nullable: true }) readyDate: string | null;
   @Column({ name: 'is_active', default: true }) isActive: boolean;
   @CreateDateColumn({ name: 'created_at' }) createdAt: Date;
   @UpdateDateColumn({ name: 'updated_at' }) updatedAt: Date;

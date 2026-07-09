@@ -200,7 +200,7 @@ export class ProductionBoardService {
     const readiness = await this.deptCtrl.getReadiness(departmentId);
     if (!readiness.ready) {
       throw new ForbiddenException(
-        `Department "${dept[0].name}" is NOT READY — ${readiness.reason}. Complete the daily checklist before assigning jobs.`,
+        `Machine inspection has not been completed today. Production cannot start.`,
       );
     }
 
