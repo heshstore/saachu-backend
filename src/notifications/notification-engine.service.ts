@@ -275,6 +275,184 @@ export class NotificationEngineService {
     }
   }
 
+  // ── Order approved → Production Manager ──────────────────────────────────────
+
+  @OnEvent('order.approved')
+  async onOrderApproved(payload: { orderId: number; orderNo?: string }): Promise<void> {
+    try {
+      await this.notifService.createRoleNotification(['Production Manager', 'Admin'], {
+        type: NotificationType.ACTION,
+        priority: NotificationPriority.HIGH,
+        category: NotificationCategory.PRODUCTION,
+        title: `Order approved — ready for production`,
+        message: `${payload.orderNo ?? `Order #${payload.orderId}`} has been approved. Review and assign production jobs.`,
+        entity_type: 'order',
+        entity_id: payload.orderId,
+        action_url: `/orders/${payload.orderId}`,
+        cooldownMinutes: 0,
+        is_automated: true,
+      });
+    } catch (err: any) {
+      this.logger.warn(`onOrderApproved notification failed: ${err?.message}`);
+    }
+  }
+
+  // ── Order ready for dispatch ──────────────────────────────────────────────────
+
+  @OnEvent('order.ready_for_dispatch')
+  async onOrderReadyForDispatch(payload: { orderId: number; orderNo?: string }): Promise<void> {
+    try {
+      await this.notifService.createRoleNotification(['Admin'], {
+        type: NotificationType.ACTION,
+        priority: NotificationPriority.HIGH,
+        category: NotificationCategory.DISPATCH,
+        title: `Order ready for dispatch`,
+        message: `${payload.orderNo ?? `Order #${payload.orderId}`} is packed and ready. Create a dispatch now.`,
+        entity_type: 'order',
+        entity_id: payload.orderId,
+        action_url: `/dispatch`,
+        cooldownMinutes: 60,
+        is_automated: true,
+      });
+    } catch (err: any) {
+      this.logger.warn(`onOrderReadyForDispatch notification failed: ${err?.message}`);
+    }
+  }
+
+  // ── Quotation converted (customer accepted) ───────────────────────────────────
+
+  @OnEvent('quotation.converted')
+  async onQuotationConverted(payload: { quotationId: number; orderId?: number; customerName?: string }): Promise<void> {
+    try {
+      await this.notifService.createRoleNotification(['Admin'], {
+        type: NotificationType.ACTION,
+        priority: NotificationPriority.HIGH,
+        category: NotificationCategory.CRM,
+        title: `Quotation accepted — order created`,
+        message: `${payload.customerName ? `${payload.customerName} accepted` : 'Quotation accepted'}. ${payload.orderId ? `Order #${payload.orderId} created.` : 'Review and approve the order.'}`,
+        entity_type: 'quotation',
+        entity_id: payload.quotationId,
+        action_url: payload.orderId ? `/orders/${payload.orderId}` : `/quotations/${payload.quotationId}`,
+        cooldownMinutes: 0,
+        is_automated: true,
+      });
+    } catch (err: any) {
+      this.logger.warn(`onQuotationConverted notification failed: ${err?.message}`);
+    }
+  }
+
+  // ── New lead received ─────────────────────────────────────────────────────────
+
+  @OnEvent('crm.lead.created')
+  async onLeadCreated(payload: { id: number; name?: string; source?: string }): Promise<void> {
+    try {
+      await this.notifService.createRoleNotification(['Admin'], {
+        type: NotificationType.ACTION,
+        priority: NotificationPriority.MEDIUM,
+        category: NotificationCategory.CRM,
+        title: `New lead received`,
+        message: `${payload.name ?? 'A new lead'} came in${payload.source ? ` via ${payload.source}` : ''}. Assign it now.`,
+        entity_type: 'lead',
+        entity_id: payload.id,
+        action_url: `/crm/leads/${payload.id}`,
+        cooldownMinutes: 5,
+        is_automated: true,
+      });
+    } catch (err: any) {
+      this.logger.warn(`onLeadCreated notification failed: ${err?.message}`);
+    }
+  }
+
+  // ── Service ticket closed ─────────────────────────────────────────────────────
+
+  @OnEvent('service.ticket.closed')
+  async onServiceTicketClosed(payload: { ticketId: number; customerId?: number; summary?: string }): Promise<void> {
+    try {
+      await this.notifService.createRoleNotification(['Admin'], {
+        type: NotificationType.INFO,
+        priority: NotificationPriority.LOW,
+        category: NotificationCategory.SYSTEM,
+        title: `After-sales ticket closed`,
+        message: payload.summary ?? `Ticket #${payload.ticketId} has been resolved and closed.`,
+        entity_type: 'service_ticket',
+        entity_id: payload.ticketId,
+        action_url: `/after-sales`,
+        cooldownMinutes: 0,
+        is_automated: true,
+      });
+    } catch (err: any) {
+      this.logger.warn(`onServiceTicketClosed notification failed: ${err?.message}`);
+    }
+  }
+
+  // ── Dispatch created ──────────────────────────────────────────────────────────
+
+  @OnEvent('dispatch.created')
+  async onDispatchCreated(payload: { id: number; orderId?: number; orderNo?: string }): Promise<void> {
+    try {
+      await this.notifService.createRoleNotification(['Admin'], {
+        type: NotificationType.INFO,
+        priority: NotificationPriority.MEDIUM,
+        category: NotificationCategory.DISPATCH,
+        title: `Dispatch created`,
+        message: `Dispatch #${payload.id} created${payload.orderNo ? ` for ${payload.orderNo}` : ''}. Mark as delivered once shipped.`,
+        entity_type: 'dispatch',
+        entity_id: payload.id,
+        action_url: `/dispatch`,
+        cooldownMinutes: 0,
+        is_automated: true,
+      });
+    } catch (err: any) {
+      this.logger.warn(`onDispatchCreated notification failed: ${err?.message}`);
+    }
+  }
+
+  // ── Cron: Overdue receivables — daily at 09:00 ────────────────────────────────
+
+  @Cron('0 9 * * *')
+  async checkOverdueReceivables(): Promise<void> {
+    if (this._running) return;
+    this._running = true;
+    try {
+      const rows: Array<{ order_no: string; outstanding_amount: number; customer_name: string }> =
+        await this.userRepo.manager.query(`
+          SELECT cr.outstanding_amount, o.order_no,
+                 COALESCE(c.name, 'Customer') AS customer_name
+          FROM   customer_receivables cr
+          JOIN   orders o ON o.id = cr.order_id
+          LEFT   JOIN customers c ON c.id = o.customer_id
+          WHERE  cr.status IN ('PENDING','PARTIAL')
+            AND  cr.due_date IS NOT NULL
+            AND  cr.due_date < CURRENT_DATE
+            AND  cr.outstanding_amount > 0
+          LIMIT 20
+        `);
+
+      if (!rows.length) return;
+
+      const total = rows.reduce((s, r) => s + Number(r.outstanding_amount), 0);
+      const count = rows.length;
+      const preview = rows.slice(0, 3).map(r => `${r.order_no} — ₹${Number(r.outstanding_amount).toLocaleString('en-IN')}`).join('; ');
+
+      await this.notifService.createRoleNotification(['Admin'], {
+        type: NotificationType.ACTION,
+        priority: NotificationPriority.HIGH,
+        category: NotificationCategory.ACCOUNTS,
+        title: `${count} overdue payment${count > 1 ? 's' : ''} — ₹${total.toLocaleString('en-IN')} outstanding`,
+        message: `${preview}${count > 3 ? ` and ${count - 3} more` : ''}. Follow up today.`,
+        entity_type: null,
+        entity_id: null,
+        action_url: `/accounts/receivables`,
+        cooldownMinutes: 1380, // once per day
+        is_automated: true,
+      });
+    } catch (err: any) {
+      this.dbHealth.handleError(err, 'NotificationEngine.checkOverdueReceivables');
+    } finally {
+      this._running = false;
+    }
+  }
+
   // ── Cron: Delayed jobs (every 10 min) ────────────────────────────────────────
 
   @Cron('*/10 * * * *')
