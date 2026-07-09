@@ -491,13 +491,17 @@ export class SlaEngineService {
           AND  d.status IN ('DELIVERED','CANCELLED')
       `, [now]);
 
-      // 6. Any event that has been ESCALATED for more than 30 days — resolve as stale
+      // 6. Any event ESCALATED for more than 7 days — resolve as stale.
+      //    Also catches events where escalated_at is NULL but status is ESCALATED
+      //    (created before the column was consistently populated).
       await this.slaRepo.manager.query(`
         UPDATE sla_events
         SET    status = 'RESOLVED', resolved_at = $1
-        WHERE  status     != 'RESOLVED'
-          AND  escalated_at IS NOT NULL
-          AND  escalated_at < NOW() - INTERVAL '30 days'
+        WHERE  status = 'ESCALATED'
+          AND (
+            escalated_at < NOW() - INTERVAL '7 days'
+            OR escalated_at IS NULL
+          )
       `, [now]);
 
       this.logger.log('[SlaEngine] autoResolveStaleEvents complete');
@@ -527,6 +531,7 @@ export class SlaEngineService {
           WHERE lf.is_completed = false
             AND lf.due_date IS NOT NULL
             AND lf.due_date < NOW() + INTERVAL '2 hours'
+            AND lf.due_date > NOW() - INTERVAL '7 days'
           LIMIT 100
         `);
 
@@ -548,6 +553,30 @@ export class SlaEngineService {
     } finally {
       this._running = false;
     }
+  }
+
+  // ── Manual admin trigger ──────────────────────────────────────────────────────
+
+  async forceResolveStale(): Promise<{ resolved: number }> {
+    const now = new Date();
+    let resolved = 0;
+
+    // Resolve all ESCALATED events regardless of age — admin explicitly asked
+    const r6 = await this.slaRepo.manager.query<{ count: string }[]>(`
+      WITH updated AS (
+        UPDATE sla_events
+        SET    status = 'RESOLVED', resolved_at = $1
+        WHERE  status = 'ESCALATED'
+        RETURNING id
+      ) SELECT COUNT(*) as count FROM updated
+    `, [now]);
+    resolved += Number(r6[0]?.count ?? 0);
+
+    // Also run the full entity-state cleanup
+    await this.autoResolveStaleEvents();
+
+    this.logger.log(`[SlaEngine] forceResolveStale: resolved ${resolved} events`);
+    return { resolved };
   }
 
   // ── Query API ─────────────────────────────────────────────────────────────────

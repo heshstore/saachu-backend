@@ -1,4 +1,4 @@
-import { Controller, Get, Query, Request } from '@nestjs/common';
+import { Controller, Get, Post, Query, Request } from '@nestjs/common';
 import { SlaEngineService } from './sla-engine.service';
 import { RequirePermission } from '../auth/require-permission.decorator';
 
@@ -34,5 +34,12 @@ export class SlaController {
   @RequirePermission('staff.view')
   getStats() {
     return this.slaEngine.getStats();
+  }
+
+  /** Admin one-shot: immediately resolve all ESCALATED events and run entity-state cleanup */
+  @Post('admin/force-resolve-stale')
+  @RequirePermission('staff.view')
+  forceResolveStale() {
+    return this.slaEngine.forceResolveStale();
   }
 }
