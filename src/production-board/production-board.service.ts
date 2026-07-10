@@ -196,11 +196,12 @@ export class ProductionBoardService {
     );
     if (!dept.length) throw new NotFoundException(`Department ${departmentId} not found`);
 
-    // Production lock: block assignment if department checklist is not complete today
+    // Production lock: block if no machine in this department is inspected today
+    // and operationally available (not BREAKDOWN or MAINTENANCE).
     const readiness = await this.deptCtrl.getReadiness(departmentId);
     if (!readiness.ready) {
       throw new ForbiddenException(
-        `Machine inspection has not been completed today. Production cannot start.`,
+        `No machines are available for production in this department. ${readiness.reason}`,
       );
     }
 

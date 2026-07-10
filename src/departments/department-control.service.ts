@@ -1,12 +1,13 @@
-import { Injectable, NotFoundException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { Repository } from 'typeorm';
+import { ActivityService } from '../activity/activity.service';
 import { DepartmentExtension } from './entities/department-extension.entity';
 import { DepartmentChecklist } from './entities/department-checklist.entity';
 import { DepartmentChecklistItem } from './entities/department-checklist-item.entity';
 import { DepartmentChecklistSession } from './entities/department-checklist-session.entity';
 import { DepartmentChecklistCompletion } from './entities/department-checklist-completion.entity';
-import { DepartmentMachine } from './entities/department-machine.entity';
+import { DepartmentMachine, MachineOperationalStatus } from './entities/department-machine.entity';
 import { DepartmentMaintenance } from './entities/department-maintenance.entity';
 import { DepartmentSkill } from './entities/department-skill.entity';
 import { DepartmentKpi } from './entities/department-kpi.entity';
@@ -16,6 +17,7 @@ import { DepartmentDocument } from './entities/department-document.entity';
 @Injectable()
 export class DepartmentControlService {
   constructor(
+    private readonly activitySvc: ActivityService,
     @InjectRepository(DepartmentExtension) private readonly extRepo: Repository<DepartmentExtension>,
     @InjectRepository(DepartmentChecklist) private readonly clRepo: Repository<DepartmentChecklist>,
     @InjectRepository(DepartmentChecklistItem) private readonly itemRepo: Repository<DepartmentChecklistItem>,
@@ -47,7 +49,7 @@ export class DepartmentControlService {
   // ── Full detail (one shot for the frontend) ──────────────────────────────────
 
   async getDetail(deptId: number) {
-    const [ext, checklist, machines, maintenance, skills, kpis, kras, documents, readiness] =
+    const [ext, checklist, machines, maintenance, skills, kpis, kras, documents, readiness, todaySession] =
       await Promise.all([
         this.getExtension(deptId),
         this.getChecklist(deptId),
@@ -58,8 +60,9 @@ export class DepartmentControlService {
         this.getKras(deptId),
         this.getDocuments(deptId),
         this.getReadiness(deptId),
+        this.getTodaySession(deptId),
       ]);
-    return { ext, checklist, machines, maintenance, skills, kpis, kras, documents, readiness };
+    return { ext, checklist, machines, maintenance, skills, kpis, kras, documents, readiness, todaySession };
   }
 
   // ── Checklist management ─────────────────────────────────────────────────────
@@ -178,40 +181,157 @@ export class DepartmentControlService {
   }
 
   // ── Production readiness check ───────────────────────────────────────────────
+  // Readiness is determined by inspection validity (last_inspected_at = today)
+  // AND operational status not being BREAKDOWN or MAINTENANCE.
+  // Never stored — always calculated.
 
-  async getReadiness(deptId: number): Promise<{ ready: boolean; reason: string; session: any }> {
-    const cl = await this.clRepo.findOne({ where: { departmentId: deptId } });
-    if (!cl) return { ready: true, reason: 'No checklist configured', session: null };
+  async getReadiness(deptId: number) {
+    const todayDate = this.todayStr();
+    const machines = await this.machineRepo.find({ where: { departmentId: deptId, isActive: true } });
 
-    const activeItems = await this.itemRepo.count({ where: { checklistId: cl.id, isActive: true } });
-    if (activeItems === 0) return { ready: true, reason: 'No checklist items configured', session: null };
-
-    const session = await this.getTodaySession(deptId);
-    if (!session) return { ready: false, reason: 'Machine inspection has not been completed today. Production cannot start.', session: null };
-    if (!session.isComplete) return { ready: false, reason: 'Machine inspection has not been completed today. Production cannot start.', session };
-
-    return { ready: true, reason: 'Inspection complete — machines are READY', session };
-  }
-
-  // Complete the daily inspection: validate all mandatory items done, mark machines READY
-  async completeInspection(deptId: number, userId: number): Promise<{ ready: boolean; session: any }> {
-    const session = await this.getTodaySession(deptId);
-    if (!session) throw new Error('No inspection session started today. Start inspection first.');
-
-    if (!session.isComplete) {
-      throw new Error('Not all mandatory checklist items are completed. Complete all mandatory items before finishing inspection.');
+    if (machines.length === 0) {
+      return { ready: false, readyCount: 0, totalCount: 0, reason: 'No machines configured in this department.', machines: [] };
     }
 
-    // Mark all active machines in this department as READY for today
-    const today = this.todayStr();
-    await this.machineRepo
-      .createQueryBuilder()
-      .update()
-      .set({ status: 'READY', readyDate: today } as any)
-      .where('department_id = :deptId AND is_active = true', { deptId })
-      .execute();
+    const machinesSummary = machines.map(m => {
+      const inspectedToday = m.lastInspectedAt
+        ? new Date(m.lastInspectedAt).toISOString().slice(0, 10) === todayDate
+        : false;
+      const blocked = m.status === 'BREAKDOWN' || m.status === 'MAINTENANCE';
+      return {
+        id: m.id,
+        name: m.name,
+        machineRefId: m.machineRefId,
+        operationalStatus: m.status,
+        inspectedToday,
+        lastInspectedAt: m.lastInspectedAt,
+        lastInspectedBy: m.lastInspectedBy,
+        available: inspectedToday && !blocked,
+      };
+    });
 
-    return { ready: true, session };
+    const readyCount = machinesSummary.filter(m => m.available).length;
+    const totalCount = machines.length;
+    const ready = readyCount > 0;
+
+    let reason: string;
+    if (ready) {
+      reason = `${readyCount} of ${totalCount} machine${readyCount !== 1 ? 's' : ''} inspected and available for production.`;
+    } else {
+      const notInspected = machinesSummary.filter(m => !m.inspectedToday).length;
+      const blocked = machinesSummary.filter(m => m.operationalStatus === 'BREAKDOWN' || m.operationalStatus === 'MAINTENANCE').length;
+      const parts: string[] = [];
+      if (notInspected > 0) parts.push(`${notInspected} machine${notInspected !== 1 ? 's' : ''} not yet inspected today`);
+      if (blocked > 0) parts.push(`${blocked} machine${blocked !== 1 ? 's' : ''} under breakdown or maintenance`);
+      reason = parts.length ? parts.join('; ') + '.' : 'No machines available for production.';
+    }
+
+    return { ready, readyCount, totalCount, reason, machines: machinesSummary };
+  }
+
+  // ── Per-machine inspection ────────────────────────────────────────────────────
+
+  async inspectMachine(
+    machineId: number,
+    deptId: number,
+    userId: number,
+    result: 'PASS' | 'FAIL',
+    remarks?: string,
+    checklistSnapshot?: Record<string, any>,
+  ) {
+    const machine = await this.machineRepo.findOneBy({ id: machineId });
+    if (!machine) throw new NotFoundException(`Machine ${machineId} not found`);
+    if (machine.departmentId !== deptId) throw new ForbiddenException('Machine does not belong to this department');
+    if (!machine.isActive) throw new ForbiddenException('Machine is deactivated');
+
+    const previousInspectedAt = machine.lastInspectedAt;
+
+    // Update inspection cache columns — operational status is NOT changed
+    machine.lastInspectedAt = new Date();
+    machine.lastInspectedBy = userId;
+    const saved = await this.machineRepo.save(machine);
+
+    // Log to activity_logs
+    void this.activitySvc.logActivity({
+      module: 'PRODUCTION',
+      entity_type: 'MACHINE',
+      entity_id: machineId,
+      action: 'INSPECTION',
+      title: `${machine.name} inspected — ${result}`,
+      description: remarks ?? null,
+      performed_by_user_id: userId,
+      source: 'USER',
+      old_value: { last_inspected_at: previousInspectedAt ?? null },
+      new_value: { last_inspected_at: saved.lastInspectedAt, result },
+      metadata: {
+        result,
+        remarks: remarks ?? null,
+        department_id: deptId,
+        checklist_snapshot: checklistSnapshot ?? null,
+      },
+      severity: result === 'FAIL' ? 'WARNING' : 'INFO',
+    });
+
+    return saved;
+  }
+
+  // ── Machine status update (operational only) ──────────────────────────────────
+
+  async updateMachineStatus(machineId: number, deptId: number, userId: number, newStatus: MachineOperationalStatus) {
+    const machine = await this.machineRepo.findOneBy({ id: machineId });
+    if (!machine) throw new NotFoundException(`Machine ${machineId} not found`);
+    if (machine.departmentId !== deptId) throw new ForbiddenException('Machine does not belong to this department');
+
+    const oldStatus = machine.status;
+    machine.status = newStatus;
+    const saved = await this.machineRepo.save(machine);
+
+    void this.activitySvc.logActivity({
+      module: 'PRODUCTION',
+      entity_type: 'MACHINE',
+      entity_id: machineId,
+      action: 'STATUS_CHANGE',
+      title: `${machine.name}: ${oldStatus} → ${newStatus}`,
+      performed_by_user_id: userId,
+      source: 'USER',
+      old_value: { status: oldStatus },
+      new_value: { status: newStatus },
+      metadata: { department_id: deptId },
+      severity: newStatus === 'BREAKDOWN' ? 'WARNING' : 'INFO',
+    });
+
+    return saved;
+  }
+
+  // ── Machine event history ─────────────────────────────────────────────────────
+
+  async getMachineEvents(
+    machineId: number,
+    filters: { event_type?: string; date?: string; performed_by?: number; limit?: number; offset?: number },
+  ) {
+    const { event_type, date, performed_by, limit = 50, offset = 0 } = filters;
+
+    const qb = this.machineRepo.manager
+      .getRepository('activity_logs')
+      .createQueryBuilder('a')
+      .where('a.entity_type = :et', { et: 'MACHINE' })
+      .andWhere('a.entity_id = :mid', { mid: machineId })
+      .orderBy('a.created_at', 'DESC')
+      .skip(offset)
+      .take(limit);
+
+    if (event_type) qb.andWhere('a.action = :action', { action: event_type });
+    if (date) qb.andWhere('a.created_at::date = :date', { date });
+    if (performed_by) qb.andWhere('a.performed_by_user_id = :uid', { uid: performed_by });
+
+    const [items, total] = await qb.getManyAndCount();
+    return { items, total, limit, offset };
+  }
+
+  // completeInspection is now a no-op compatibility shim — per-machine inspection
+  // replaces the old "complete all machines" flow. Kept so existing route doesn't 404.
+  async completeInspection(_deptId: number, _userId: number): Promise<{ message: string }> {
+    return { message: 'Use POST /departments/:id/machines/:mid/inspect for per-machine inspection.' };
   }
 
   // ── Machines ─────────────────────────────────────────────────────────────────
@@ -221,13 +341,20 @@ export class DepartmentControlService {
   }
 
   async addMachine(deptId: number, data: Partial<DepartmentMachine>): Promise<DepartmentMachine> {
-    return this.machineRepo.save(this.machineRepo.create({ ...data, departmentId: deptId }));
+    // New machines always start IDLE — inspection validity is separate
+    const { status: _ignored, lastInspectedAt: _a, lastInspectedBy: _b, ...rest } = data as any;
+    const entity = this.machineRepo.create({ ...rest, departmentId: deptId, status: 'IDLE' as const });
+    return (await (this.machineRepo.save as any)(entity)) as DepartmentMachine;
   }
 
   async updateMachine(machineId: number, data: Partial<DepartmentMachine>): Promise<DepartmentMachine> {
     const m = await this.machineRepo.findOneBy({ id: machineId });
     if (!m) throw new NotFoundException(`Machine ${machineId} not found`);
-    Object.assign(m, data);
+    // Status changes must go through updateMachineStatus() to get audit logging.
+    // If status is included here (e.g. toggling isActive), strip it and ignore.
+    // Callers that need status change should use the dedicated endpoint.
+    const { status: _s, lastInspectedAt: _a, lastInspectedBy: _b, ...safe } = data as any;
+    Object.assign(m, safe);
     return this.machineRepo.save(m);
   }
 

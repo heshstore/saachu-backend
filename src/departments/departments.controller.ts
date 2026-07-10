@@ -8,6 +8,7 @@ import {
   Param,
   Query,
   Request,
+  BadRequestException,
 } from '@nestjs/common';
 import { DepartmentsService } from './departments.service';
 import { DepartmentControlService } from './department-control.service';
@@ -165,6 +166,59 @@ export class DepartmentsController {
   @RequirePermission('production.update')
   updateMachine(@Param('mid') mid: string, @Body() data: any) {
     return this.ctrl.updateMachine(+mid, data);
+  }
+
+  // Operational status change — logged, READY rejected at service level
+  @Patch(':id/machines/:mid/status')
+  @RequirePermission('production.update')
+  updateMachineStatus(
+    @Param('id') id: string,
+    @Param('mid') mid: string,
+    @Body() body: { status: string },
+    @Request() req: any,
+  ) {
+    const allowed = ['IDLE', 'RUNNING', 'BREAKDOWN', 'MAINTENANCE'];
+    if (!allowed.includes(body.status)) {
+      throw new BadRequestException(
+        `Invalid status "${body.status}". Allowed: ${allowed.join(', ')}. Use POST /:id/machines/:mid/inspect to record inspection.`,
+      );
+    }
+    return this.ctrl.updateMachineStatus(+mid, +id, req.user.id, body.status as any);
+  }
+
+  // Per-machine inspection — updates lastInspectedAt, logs to activity_logs
+  @Post(':id/machines/:mid/inspect')
+  @RequirePermission('production.view')
+  inspectMachine(
+    @Param('id') id: string,
+    @Param('mid') mid: string,
+    @Body() body: { result: 'PASS' | 'FAIL'; remarks?: string; checklistSnapshot?: Record<string, any> },
+    @Request() req: any,
+  ) {
+    if (!['PASS', 'FAIL'].includes(body.result)) {
+      throw new BadRequestException('result must be PASS or FAIL');
+    }
+    return this.ctrl.inspectMachine(+mid, +id, req.user.id, body.result, body.remarks, body.checklistSnapshot);
+  }
+
+  // Machine event history — queries activity_logs (entity_type=MACHINE, entity_id=machineId)
+  @Get(':id/machines/:mid/events')
+  @RequirePermission('production.view')
+  getMachineEvents(
+    @Param('mid') mid: string,
+    @Query('event_type') event_type?: string,
+    @Query('date') date?: string,
+    @Query('performed_by') performed_by?: string,
+    @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+  ) {
+    return this.ctrl.getMachineEvents(+mid, {
+      event_type,
+      date,
+      performed_by: performed_by ? +performed_by : undefined,
+      limit: limit ? +limit : 50,
+      offset: offset ? +offset : 0,
+    });
   }
 
   @Delete(':id/machines/:mid')

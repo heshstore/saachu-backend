@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ActivityModule } from '../activity/activity.module';
 import { Department } from './entities/department.entity';
 import { DepartmentExtension } from './entities/department-extension.entity';
 import { DepartmentChecklist } from './entities/department-checklist.entity';
@@ -18,6 +19,7 @@ import { DepartmentsController } from './departments.controller';
 
 @Module({
   imports: [
+    ActivityModule,
     TypeOrmModule.forFeature([
       Department,
       DepartmentExtension,

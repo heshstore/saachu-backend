@@ -99,6 +99,7 @@
     "migrate:production-board": "node scripts/migrate-production-board.js",
     "migrate:dept-control": "node scripts/migrate-department-control.js",
     "migrate:dept-phase1-patch": "node scripts/migrate-dept-phase1-patch.js",
+    "migrate:machine-inspection-patch": "node scripts/migrate-machine-inspection-patch.js",
     "postinstall": "npx puppeteer browsers install chrome"
   },
   "dependencies": {
